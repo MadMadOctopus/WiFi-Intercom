@@ -19,7 +19,6 @@
  */
 #include <string.h>
 #include <stdlib.h>
-#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -53,7 +52,6 @@
 static device_config_t g_config;
 #define MESH_ID (g_config.mesh_id)
 #define NODE_ID (g_config.device_id)
-#define PTT_GPIO BUTTON_BROADCAST_GPIO
 
 static const char *TAG = "intercom";
 
@@ -62,6 +60,13 @@ typedef struct { int16_t pcm[FRAME_SAMPLES]; } audio_frame_t;
 
 /* ---- floor-control states ---------------------------------------------- */
 typedef enum { ST_IDLE, ST_CLAIMING, ST_TALKING, ST_RECEIVING } node_state_t;
+
+#define PEER_CAP 8
+typedef struct {
+    uint32_t id;
+    struct sockaddr_in address;
+    uint32_t last_seen_ms;
+} peer_t;
 
 /* ---- jitter buffer ------------------------------------------------------ */
 #define JB_CAP 16
@@ -110,6 +115,11 @@ static struct {
     struct sockaddr_in last_talker_address;
     uint32_t error_until_ms;
 
+    /* Learned from HELLO/control/audio source addresses. Broadcast AUDIO is
+     * mirrored to these endpoints because Wi-Fi multicast delivery is often
+     * lossy, while multicast remains the peerless discovery/floor channel. */
+    peer_t peers[PEER_CAP];
+
     /* jitter buffer */
     jb_slot_t slots[JB_CAP];
     uint32_t  jb_expected;
@@ -123,6 +133,7 @@ static QueueHandle_t     mic_q;
 
 static int                 g_sock = -1;
 static struct sockaddr_in  g_group;
+static uint32_t            g_wifi_ip_addr;
 
 static i2s_chan_handle_t          i2s_tx;
 static adc_continuous_handle_t    adc_handle;
@@ -148,16 +159,37 @@ static void send_packet_to(const struct sockaddr_in *destination, uint8_t type,
                sizeof(*destination));
 }
 
+static void send_to_active_peers(uint8_t type, uint8_t flags, uint32_t session,
+                                 uint32_t sequence, const uint8_t *payload,
+                                 uint16_t payload_len)
+{
+    peer_t peers[PEER_CAP];
+    uint32_t t = now_ms();
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    memcpy(peers, g.peers, sizeof(peers));
+    xSemaphoreGive(g_lock);
+
+    for (int i = 0; i < PEER_CAP; ++i) {
+        if (peers[i].id != 0 && t - peers[i].last_seen_ms <= PEER_EXPIRE_MS)
+            send_packet_to(&peers[i].address, type, flags, session, sequence,
+                           payload, payload_len);
+    }
+}
+
 static void send_packet(uint8_t type, uint32_t session, uint32_t sequence,
                         const uint8_t *payload, uint16_t payload_len)
 {
-    uint8_t flags = 0;
-    const struct sockaddr_in *destination = &g_group;
+    uint8_t flags = (g.tx_directed &&
+        (type == PKT_CLAIM || type == PKT_HEARTBEAT || type == PKT_END ||
+         type == PKT_AUDIO)) ? PROTO_FLAG_DIRECTED : 0;
     if (type == PKT_AUDIO && g.tx_directed) {
-        flags = PROTO_FLAG_DIRECTED;
-        destination = &g.tx_audio_destination;
+        send_packet_to(&g.tx_audio_destination, type, flags, session, sequence,
+                       payload, payload_len);
+        return;
     }
-    send_packet_to(destination, type, flags, session, sequence, payload, payload_len);
+    /* All message traffic is learned-peer unicast. HELLO is deliberately the
+     * sole multicast packet type, sent directly by hello_task below. */
+    send_to_active_peers(type, flags, session, sequence, payload, payload_len);
 }
 
 /* remote (session,sender) beats our claim if its tuple is strictly lower. */
@@ -257,15 +289,37 @@ static void begin_receiving(const intercom_pkt_t *p)
              (unsigned)p->sender_id, (unsigned)p->session_id);
 }
 
-static void handle_claim(const intercom_pkt_t *p)
+/* Call with g_lock held. Keep the most recently seen endpoints, replacing the
+ * oldest entry if the small fixed registry is full. */
+static void peer_seen(const intercom_pkt_t *p, const struct sockaddr_in *source)
+{
+    int free_slot = -1;
+    int oldest = 0;
+    for (int i = 0; i < PEER_CAP; ++i) {
+        if (g.peers[i].id == p->sender_id) {
+            g.peers[i].address = *source;
+            g.peers[i].last_seen_ms = now_ms();
+            return;
+        }
+        if (g.peers[i].id == 0 && free_slot < 0) free_slot = i;
+        if (g.peers[i].last_seen_ms < g.peers[oldest].last_seen_ms) oldest = i;
+    }
+    int slot = free_slot >= 0 ? free_slot : oldest;
+    g.peers[slot].id = p->sender_id;
+    g.peers[slot].address = *source;
+    g.peers[slot].last_seen_ms = now_ms();
+    ESP_LOGI(TAG, "Peer %08x discovered", (unsigned)p->sender_id);
+}
+
+static void handle_claim(const intercom_pkt_t *p, const struct sockaddr_in *source)
 {
     if (g.state == ST_CLAIMING || g.state == ST_TALKING) {
         if (remote_wins(p)) { begin_receiving(p); }
-        else { send_packet(PKT_BUSY, g.tx_session, 0, NULL, 0); }
+        else { send_packet_to(source, PKT_BUSY, 0, g.tx_session, 0, NULL, 0); }
     } else if (g.state == ST_IDLE) {
         begin_receiving(p);
     } else if (g.state == ST_RECEIVING && p->session_id != g.rx_session) {
-        send_packet(PKT_BUSY, g.rx_session, 0, NULL, 0);
+        send_packet_to(source, PKT_BUSY, 0, g.rx_session, 0, NULL, 0);
     }
 }
 
@@ -309,12 +363,12 @@ static void handle_config_packet(const intercom_pkt_t *p,
     char request[256] = {0};
     char response[256] = {0};
     memcpy(request, p->payload, p->payload_len);
-    bool wifi_changed = false;
-    usb_control_process(&g_config, request, response, sizeof(response), &wifi_changed);
+    bool restart_required = false;
+    usb_control_process(&g_config, request, response, sizeof(response), &restart_required);
     send_packet_to(source, PKT_CONFIG_REPLY, 0, p->session_id, 0,
                    (const uint8_t *)response, (uint16_t)strlen(response));
-    if (wifi_changed) {
-        ESP_LOGI(TAG, "Wi-Fi configuration changed; restarting");
+    if (restart_required) {
+        ESP_LOGI(TAG, "Configuration change requires restart");
         vTaskDelay(pdMS_TO_TICKS(300));
         esp_restart();
     }
@@ -337,8 +391,9 @@ static void net_rx_task(void *arg)
         if (!protocol_parse(buf, n, MESH_ID, NODE_ID, &pkt)) continue;
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
+        peer_seen(&pkt, &src);
         switch (pkt.type) {
-            case PKT_CLAIM: handle_claim(&pkt); break;
+            case PKT_CLAIM: handle_claim(&pkt, &src); break;
             case PKT_AUDIO: handle_audio(&pkt); break;
             case PKT_END:   handle_end(&pkt);   break;
             case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;
@@ -385,15 +440,11 @@ static void start_tx_locked(uint32_t t, bool directed,
              directed ? " directed" : " broadcast");
 }
 
-static void finish_tx(uint32_t session, uint32_t sequence, bool directed,
-                      const struct sockaddr_in *destination)
+static void finish_tx(uint32_t session, uint32_t sequence, bool directed)
 {
     for (int i = 0; i < END_COUNT; ++i) {
-        send_packet_to(&g_group, PKT_END, directed ? PROTO_FLAG_DIRECTED : 0,
-                       session, sequence, NULL, 0);
-        if (directed)
-            send_packet_to(destination, PKT_END, PROTO_FLAG_DIRECTED,
-                           session, sequence, NULL, 0);
+        send_to_active_peers(PKT_END, directed ? PROTO_FLAG_DIRECTED : 0,
+                             session, sequence, NULL, 0);
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -406,8 +457,11 @@ static void tx_task(void *arg)
 
     while (1) {
         uint32_t t = now_ms();
-        bool broadcast = button_pressed(BUTTON_BROADCAST_GPIO);
-        bool reply = button_pressed(BUTTON_REPLY_GPIO);
+        bool d10_pressed = button_pressed(BUTTON_BROADCAST_GPIO);
+        bool d9_pressed = button_pressed(BUTTON_REPLY_GPIO);
+        bool swapped = (g_config.hardware_flags & DEVICE_FLAG_BUTTONS_SWAPPED) != 0;
+        bool broadcast = swapped ? d9_pressed : d10_pressed;
+        bool reply = swapped ? d10_pressed : d9_pressed;
         bool any_pressed = broadcast || reply;
 
         if ((broadcast != previous_broadcast || reply != previous_reply) &&
@@ -448,10 +502,9 @@ static void tx_task(void *arg)
                 } else if (g.state == ST_CLAIMING || g.state == ST_TALKING) {
                     uint32_t session = g.tx_session, sequence = g.tx_sequence;
                     bool directed = g.tx_directed;
-                    struct sockaddr_in destination = g.tx_audio_destination;
                     g.state = ST_IDLE;
                     xSemaphoreGive(g_lock);
-                    finish_tx(session, sequence, directed, &destination);
+                    finish_tx(session, sequence, directed);
                     ESP_LOGI(TAG, "TX end");
                     xSemaphoreTake(g_lock, portMAX_DELAY);
                 }
@@ -480,11 +533,10 @@ static void tx_task(void *arg)
             if (g.claims_sent < CLAIM_COUNT &&
                 (g.last_claim_ms == 0 || t - g.last_claim_ms >= CLAIM_INTERVAL_MS)) {
                 uint32_t session = g.tx_session;
-                uint8_t flags = g.tx_directed ? PROTO_FLAG_DIRECTED : 0;
                 g.last_claim_ms = t;
                 g.claims_sent++;
                 xSemaphoreGive(g_lock);
-                send_packet_to(&g_group, PKT_CLAIM, flags, session, 0, NULL, 0);
+                send_packet(PKT_CLAIM, session, 0, NULL, 0);
                 xSemaphoreTake(g_lock, portMAX_DELAY);
             }
             if (t - g.claim_start_ms >= PRE_AUDIO_DELAY_MS && g.state == ST_CLAIMING) {
@@ -502,8 +554,7 @@ static void tx_task(void *arg)
         xSemaphoreGive(g_lock);
 
         if (send_heartbeat)
-            send_packet_to(&g_group, PKT_HEARTBEAT, PROTO_FLAG_DIRECTED,
-                           heartbeat_session, 0, NULL, 0);
+            send_packet(PKT_HEARTBEAT, heartbeat_session, 0, NULL, 0);
 
         if (!can_send) {
             if (xQueueReceive(mic_q, &frame, 0) == pdTRUE) {
@@ -562,6 +613,7 @@ static void write_i2s(const int16_t *mono)
 static void playback_task(void *arg)
 {
     static int16_t mono[FRAME_SAMPLES];
+    bool i2s_active = false;
     while (1) {
         xSemaphoreTake(g_lock, portMAX_DELAY);
         node_state_t st = g.state;
@@ -577,8 +629,9 @@ static void playback_task(void *arg)
             }
         }
 
+        bool real_audio = false;
         if (st == ST_RECEIVING) {
-            jb_pop(mono);
+            real_audio = jb_pop(mono);
             if (g.rx_ending && --g.rx_drain <= 0) {   /* tail drained */
                 g.state = ST_IDLE;
                 jb_reset();
@@ -588,20 +641,36 @@ static void playback_task(void *arg)
         }
         xSemaphoreGive(g_lock);
 
-        /* Half duplex and the hardware mute switch silence I2S playback.
-         * Ring noise is handled separately at the LED power/data path. */
-        if (local_floor || button_pressed(MUTE_SWITCH_GPIO))
+        /* Keep the amplifier in standby outside actual received playback.
+         * MAX98357A enters high-impedance standby when BCLK is stopped. */
+        bool output_allowed = !local_floor && !button_pressed(MUTE_SWITCH_GPIO) &&
+                              st == ST_RECEIVING;
+        if (!output_allowed)
             memset(mono, 0, sizeof(mono));
 
-        /* digital playback volume (SPK_VOLUME/256) with safe clipping */
-#if SPK_VOLUME != 256
+        /* Once a receive session has real audio, keep the I2S clocks running
+         * through its jitter-buffer tail for seamless packet-loss concealment. */
+        bool should_output = output_allowed && (i2s_active || real_audio);
+        if (should_output && !i2s_active) {
+            ESP_ERROR_CHECK(i2s_channel_enable(i2s_tx));
+            i2s_active = true;
+        } else if (!should_output && i2s_active) {
+            ESP_ERROR_CHECK(i2s_channel_disable(i2s_tx));
+            i2s_active = false;
+        }
+        if (!should_output) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
+        /* NVS-configured digital playback volume (/256) with safe clipping. */
+        uint16_t volume = g_config.speaker_volume;
         for (int i = 0; i < FRAME_SAMPLES; ++i) {
-            int32_t v = ((int32_t)mono[i] * SPK_VOLUME) >> 8;
+            int32_t v = ((int32_t)mono[i] * volume) >> 8;
             if (v > 32767)  v = 32767;
             if (v < -32768) v = -32768;
             mono[i] = (int16_t)v;
         }
-#endif
 
         write_i2s(mono);   /* paces the loop at ~20 ms (320 samples @16kHz) */
     }
@@ -624,13 +693,29 @@ static void capture_task(void *arg)
     int32_t acpk = 0;                      /* |centered| peak */
     uint32_t dcount = 0;
     bool warned_nomatch = false;
+    int consecutive_timeouts = 0;
 
     while (1) {
         bool matched_any = false;
         uint32_t got = 0;
-        if (adc_continuous_read(adc_handle, buf, sizeof(buf), &got,
-                                portMAX_DELAY) != ESP_OK)
+        esp_err_t read_err = adc_continuous_read(adc_handle, buf, sizeof(buf), &got,
+                                                 pdMS_TO_TICKS(500));
+        if (read_err == ESP_ERR_TIMEOUT) {
+            if (++consecutive_timeouts >= 3) {
+                ESP_LOGW(TAG, "MIC diag: ADC stream stalled; restarting capture");
+                adc_continuous_stop(adc_handle);
+                vTaskDelay(pdMS_TO_TICKS(20));
+                adc_continuous_start(adc_handle);
+                consecutive_timeouts = 0;
+            }
             continue;
+        }
+        if (read_err != ESP_OK) {
+            ESP_LOGW(TAG, "MIC diag: ADC read failed: %s", esp_err_to_name(read_err));
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        consecutive_timeouts = 0;
 
         for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= got;
              i += SOC_ADC_DIGI_RESULT_BYTES) {
@@ -702,7 +787,7 @@ static void i2s_init(void)
         },
     };
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2s_tx, &std_cfg));
-    ESP_ERROR_CHECK(i2s_channel_enable(i2s_tx));
+    /* BCLK remains stopped at idle, putting the MAX98357A into standby. */
 }
 
 static void adc_init(void)
@@ -777,50 +862,37 @@ static void hello_task(void *arg)
     }
 }
 
-/* Startup tone so the speaker/amp can be verified without a peer.
- * If you see this log but hear NOTHING, the problem is downstream of the
- * firmware: amp power, the SD/SD_MODE pin (must be tied to 3V3, not left
- * floating), DIN/BCLK/LRC wiring, or the speaker connection. */
-static void startup_tone(void)
-{
-    static int16_t mono[FRAME_SAMPLES];
-    const float freq = 1000.0f;
-    static float phase = 0.0f;
-    const float dphi = 2.0f * 3.14159265f * freq / SAMPLE_RATE;
-
-    ESP_LOGI(TAG, "Playing startup tone (3 beeps @ %d Hz) on I2S "
-                  "BCLK=%d LRC=%d DOUT=%d", (int)freq,
-                  I2S_BCLK_GPIO, I2S_LRC_GPIO, I2S_DOUT_GPIO);
-
-    for (int beep = 0; beep < 3; ++beep) {
-        for (int f = 0; f < 20; ++f) {          /* ~400 ms of tone */
-            for (int i = 0; i < FRAME_SAMPLES; ++i) {
-                mono[i] = (int16_t)(16000.0f * sinf(phase));  /* ~0.5 FS, loud */
-                phase += dphi;
-                if (phase > 6.2831853f) phase -= 6.2831853f;
-            }
-            write_i2s(mono);
-        }
-        memset(mono, 0, sizeof(mono));
-        for (int f = 0; f < 8; ++f) write_i2s(mono);   /* ~160 ms gap */
-    }
-    ESP_LOGI(TAG, "Startup tone done");
-}
-
 /* ======================================================================== */
 /* Wi-Fi                                                                     */
 /* ======================================================================== */
+static void udp_join_multicast(uint32_t interface_addr)
+{
+    if (g_sock < 0 || interface_addr == 0) return;
+    struct ip_mreq membership = {
+        .imr_multiaddr = g_group.sin_addr,
+        .imr_interface.s_addr = interface_addr,
+    };
+    if (setsockopt(g_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                   &membership, sizeof(membership)) == 0)
+        ESP_LOGI(TAG, "Joined multicast group %s", MULTICAST_GROUP);
+    else
+        ESP_LOGW(TAG, "Multicast join failed; will retry after reconnect");
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        g_wifi_ip_addr = 0;
         ESP_LOGW(TAG, "Wi-Fi disconnected, reconnecting...");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&e->ip_info.ip));
+        g_wifi_ip_addr = e->ip_info.ip.addr;
+        udp_join_multicast(g_wifi_ip_addr);
     }
 }
 
@@ -866,16 +938,11 @@ static void udp_init(void)
     g_group.sin_family = AF_INET;
     g_group.sin_port = htons(UDP_PORT);
     g_group.sin_addr.s_addr = inet_addr(MULTICAST_GROUP);
-    struct ip_mreq membership = {
-        .imr_multiaddr.s_addr = g_group.sin_addr.s_addr,
-        .imr_interface.s_addr = htonl(INADDR_ANY),
-    };
-    ESP_ERROR_CHECK(setsockopt(g_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                               &membership, sizeof(membership)) == 0 ? ESP_OK : ESP_FAIL);
     uint8_t ttl = MULTICAST_TTL;
     ESP_ERROR_CHECK(setsockopt(g_sock, IPPROTO_IP, IP_MULTICAST_TTL,
                                &ttl, sizeof(ttl)) == 0 ? ESP_OK : ESP_FAIL);
-    ESP_LOGI(TAG, "UDP ready on port %d, multicast group %s", UDP_PORT, MULTICAST_GROUP);
+    ESP_LOGI(TAG, "UDP ready on port %d; waiting for multicast join", UDP_PORT);
+    udp_join_multicast(g_wifi_ip_addr);  /* covers an exceptionally fast DHCP lease */
 }
 
 /* ======================================================================== */
@@ -902,7 +969,8 @@ void app_main(void)
 
     i2s_init();
     gpio_button_init();
-    ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness);
+    ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness,
+                         (g_config.hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
     adc_init();
 
     wifi_init();

@@ -14,15 +14,15 @@ static SemaphoreHandle_t s_lock;
 
 bool usb_control_process(device_config_t *config, const char *request,
                          char *response, size_t response_size,
-                         bool *wifi_changed)
+                         bool *restart_required)
 {
-    if (wifi_changed) *wifi_changed = false;
+    if (restart_required) *restart_required = false;
     cJSON *root = cJSON_Parse(request);
     cJSON *command = root ? cJSON_GetObjectItemCaseSensitive(root, "cmd") : NULL;
     bool get = cJSON_IsString(command) && strcmp(command->valuestring, "get") == 0;
     cJSON_Delete(root);
     if (get) return device_config_to_json(config, response, response_size) != 0;
-    if (!device_config_apply_json(config, request, wifi_changed)) {
+    if (!device_config_apply_json(config, request, restart_required)) {
         snprintf(response, response_size, "{\"type\":\"error\",\"message\":\"invalid configuration\"}");
         return false;
     }
@@ -47,16 +47,16 @@ static void usb_task(void *arg)
             if (used == 0) continue;
             line[used] = '\0';
             char response[256] = {0};
-            bool wifi_changed = false;
+            bool restart_required = false;
             xSemaphoreTake(s_lock, portMAX_DELAY);
-            usb_control_process(s_config, line, response, sizeof(response), &wifi_changed);
+            usb_control_process(s_config, line, response, sizeof(response), &restart_required);
             xSemaphoreGive(s_lock);
             strncat(response, "\n", sizeof(response) - strlen(response) - 1);
             usb_serial_jtag_write_bytes(response, strlen(response), pdMS_TO_TICKS(100));
             used = 0;
-            if (wifi_changed) {
-                /* A changed SSID/password is not live in esp_wifi. Ensure the
-                 * companion receives its acknowledgement before rebooting. */
+            if (restart_required) {
+                /* Wi-Fi, LED brightness and orientation are initialised at
+                 * boot. Ensure the companion receives its acknowledgement first. */
                 usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(250));
                 vTaskDelay(pdMS_TO_TICKS(250));
                 esp_restart();

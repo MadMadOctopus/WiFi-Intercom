@@ -2,8 +2,9 @@
 """
 Wi-Fi half-duplex push-to-talk intercom - PC peer node.
 
-This is one node of a two-peer intercom. The other peer is a Seeed XIAO
-ESP32-C3 running the firmware in ../firmware. Both nodes speak the exact same
+This is a companion node for any number of Seeed XIAO ESP32-C3 devices on one
+local network. Peers discover one another through a link-local UDP multicast
+group; no static IP address list is required. Both nodes speak the exact same
 UDP wire protocol and IMA ADPCM codec (implemented independently, byte-for-byte
 compatible - see protocol notes below and firmware/main/adpcm.c).
 
@@ -24,7 +25,9 @@ import socket
 import struct
 import threading
 import tkinter as tk
+import json
 from datetime import datetime
+from tkinter import messagebox, simpledialog
 
 import numpy as np
 
@@ -35,14 +38,17 @@ except Exception as exc:  # pragma: no cover - only hit without the dependency
     _SD_IMPORT_ERROR = exc
 
 # ---------------------------------------------------------------------------
-# Static configuration.  Hardcoded values are fine for this proof of concept.
-# Keep these in sync with firmware/main/config.h
+# Group transport. Keep the protocol values in sync with firmware/main/config.h.
 # ---------------------------------------------------------------------------
 MESH_ID = 0x4D455348          # "MESH" - must match firmware MESH_ID
-NODE_ID = 0x00000002          # this PC node's device id (ESP is 0x00000001)
-PEER_IP = "192.168.0.122"      # IPv4 of the other peer (the ESP32-C3)
+NODE_ID = random.SystemRandom().randrange(1, 0xFFFFFFFF)
 UDP_PORT = 45678              # single UDP port used for all packets
 BIND_IP = "0.0.0.0"           # listen on all interfaces
+MULTICAST_GROUP = "239.255.42.99"
+MULTICAST_TTL = 1
+PC_ALIAS = socket.gethostname()[:32] or "Companion"
+PEER_HELLO_MS = 3000
+PEER_EXPIRE_MS = 10000
 
 # Audio format (do not change without changing the firmware too).
 SAMPLE_RATE = 16000
@@ -85,13 +91,20 @@ TYPE_CLAIM = 1
 TYPE_BUSY = 2
 TYPE_AUDIO = 3
 TYPE_END = 4
+TYPE_HELLO = 5
+TYPE_HEARTBEAT = 6
+TYPE_CONFIG_GET = 7
+TYPE_CONFIG_SET = 8
+TYPE_CONFIG_REPLY = 9
+
+FLAG_DIRECTED = 0x01
 
 
-def pack_packet(ptype, session_id, sequence, timestamp_ms, payload=b""):
+def pack_packet(ptype, session_id, sequence, timestamp_ms, payload=b"", flags=0):
     """Serialise one packet (header + optional payload)."""
     header = struct.pack(
         HEADER_FMT,
-        MAGIC, ptype & 0xFF, 0, HEADER_LEN,
+        MAGIC, ptype & 0xFF, flags & 0xFF, HEADER_LEN,
         MESH_ID & 0xFFFFFFFF, NODE_ID & 0xFFFFFFFF,
         session_id & 0xFFFFFFFF, sequence & 0xFFFFFFFF,
         timestamp_ms & 0xFFFFFFFF, len(payload) & 0xFFFF, 0)
@@ -320,16 +333,22 @@ STATE_RECEIVING = "Receiving"
 
 
 class IntercomNode:
-    def __init__(self, on_state_change=None):
+    def __init__(self, on_state_change=None, on_peers_change=None,
+                 on_config=None):
         self.on_state_change = on_state_change
+        self.on_peers_change = on_peers_change
+        self.on_config = on_config
         self.lock = threading.RLock()
         self.state = STATE_IDLE
+        self.state_events = queue.Queue()
 
         # Transmit session bookkeeping.
         self.tx_session = 0
         self.tx_sequence = 0
         self.encoder = AdpcmEncoder()
         self._claim_cancel = threading.Event()
+        self.tx_directed = False
+        self.tx_destination = None
 
         # Receive session bookkeeping.
         self.rx_sender = 0
@@ -337,15 +356,21 @@ class IntercomNode:
         self.rx_last_ms = 0
         self.jitter = JitterBuffer()
         self.rx_pcm_log = []          # accumulated played frames for the WAV
+        self.last_talker_id = None
+        self.peers = {}                # node id -> {address, alias, seen_ms}
+        self.peers_dirty = True
+        self.config_events = queue.Queue()
 
         self.running = True
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        except OSError:
-            pass
         self.sock.bind((BIND_IP, UDP_PORT))
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL,
+                             MULTICAST_TTL)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                             struct.pack("=4s4s", socket.inet_aton(MULTICAST_GROUP),
+                                         socket.inet_aton("0.0.0.0")))
         self.sock.settimeout(0.2)
 
         os.makedirs(RECORDINGS_DIR, exist_ok=True)
@@ -353,6 +378,7 @@ class IntercomNode:
         self._threads = [
             threading.Thread(target=self._rx_loop, daemon=True),
             threading.Thread(target=self._timeout_loop, daemon=True),
+            threading.Thread(target=self._hello_loop, daemon=True),
         ]
 
     # -- lifecycle ----------------------------------------------------------
@@ -375,21 +401,81 @@ class IntercomNode:
     def _set_state(self, state):
         if self.state != state:
             self.state = state
-            if self.on_state_change:
-                self.on_state_change(state)
+            self.state_events.put(state)
 
-    def _send(self, ptype, session, sequence, payload=b""):
-        pkt = pack_packet(ptype, session, sequence, self._now_ms(), payload)
-        try:
-            self.sock.sendto(pkt, (PEER_IP, UDP_PORT))
-        except OSError:
-            pass
+    def _send(self, ptype, session, sequence, payload=b"", destination=None,
+              flags=0):
+        pkt = pack_packet(ptype, session, sequence, self._now_ms(), payload, flags)
+        if destination is not None:
+            destinations = [destination]
+        elif ptype == TYPE_HELLO:
+            # Multicast is discovery only. All floor and audio traffic uses
+            # normal Wi-Fi unicast learned from these beacons.
+            destinations = [(MULTICAST_GROUP, UDP_PORT)]
+        else:
+            now = self._now_ms()
+            with self.lock:
+                destinations = [peer["address"] for peer in self.peers.values()
+                                if (now - peer["seen_ms"]) & 0xFFFFFFFF <= PEER_EXPIRE_MS]
+        for endpoint in destinations:
+            try:
+                self.sock.sendto(pkt, endpoint)
+            except OSError:
+                pass
+
+    def _announce_peer(self, sender_id, address, alias=None):
+        if sender_id == NODE_ID:
+            return
+        with self.lock:
+            previous = self.peers.get(sender_id, {})
+            self.peers[sender_id] = {
+                "id": sender_id, "address": (address[0], UDP_PORT),
+                "alias": alias or previous.get("alias") or f"Device {sender_id:08x}",
+                "seen_ms": self._now_ms(),
+            }
+            self.peers_dirty = True
+
+    def active_peers(self):
+        with self.lock:
+            return sorted(self.peers.values(), key=lambda peer: peer["alias"].lower())
+
+    def consume_peers_dirty(self):
+        with self.lock:
+            dirty = self.peers_dirty
+            self.peers_dirty = False
+            return dirty
+
+    def drain_config_events(self):
+        events = []
+        while True:
+            try:
+                events.append(self.config_events.get_nowait())
+            except queue.Empty:
+                return events
+
+    def drain_state_events(self):
+        events = []
+        while True:
+            try:
+                events.append(self.state_events.get_nowait())
+            except queue.Empty:
+                return events
+
+    def request_config(self, peer):
+        self._send(TYPE_CONFIG_GET, random.getrandbits(32), 0,
+                   b'{"cmd":"get"}', peer["address"])
+
+    def set_config(self, peer, config):
+        payload = dict(config)
+        payload["cmd"] = "set"
+        self._send(TYPE_CONFIG_SET, random.getrandbits(32), 0,
+                   json.dumps(payload, separators=(",", ":")).encode(), peer["address"])
 
     def _remote_active(self):
         return self.state == STATE_RECEIVING
 
     # -- transmit (PTT) -----------------------------------------------------
-    def ptt_press(self):
+    def ptt_press(self, destination=None):
         with self.lock:
             if self.state != STATE_IDLE:
                 return                       # busy: receiving or already talking
@@ -397,6 +483,8 @@ class IntercomNode:
             self.tx_sequence = 0
             self.encoder.reset()
             self._claim_cancel.clear()
+            self.tx_directed = destination is not None
+            self.tx_destination = destination
             self._set_state(STATE_CLAIMING)
             session = self.tx_session
         threading.Thread(target=self._claim_sequence, args=(session,),
@@ -409,7 +497,8 @@ class IntercomNode:
             with self.lock:
                 if self.state != STATE_CLAIMING or self.tx_session != session:
                     return
-            self._send(TYPE_CLAIM, session, 0)
+            self._send(TYPE_CLAIM, session, 0,
+                       flags=FLAG_DIRECTED if self.tx_directed else 0)
             time.sleep(CLAIM_INTERVAL_MS / 1000.0)
         time.sleep(max(0, (PRE_AUDIO_DELAY_MS -
                           CLAIM_COUNT * CLAIM_INTERVAL_MS)) / 1000.0)
@@ -429,7 +518,8 @@ class IntercomNode:
             self._set_state(STATE_IDLE)
         # Signal end of our session (harmless even if we were only claiming).
         for _ in range(END_COUNT):
-            self._send(TYPE_END, session, seq)
+            self._send(TYPE_END, session, seq,
+                       flags=FLAG_DIRECTED if self.tx_directed else 0)
             time.sleep(0.005)
 
     def capture_frame(self, pcm_int16):
@@ -442,22 +532,25 @@ class IntercomNode:
             seq = self.tx_sequence
             self.tx_sequence += 1
         payload = self.encoder.encode_frame(pcm_int16)
-        self._send(TYPE_AUDIO, session, seq, payload)
+        self._send(TYPE_AUDIO, session, seq, payload,
+                   destination=self.tx_destination if self.tx_directed else None,
+                   flags=FLAG_DIRECTED if self.tx_directed else 0)
 
     # -- receive ------------------------------------------------------------
     def _rx_loop(self):
         while self.running:
             try:
-                data, _addr = self.sock.recvfrom(2048)
+                data, addr = self.sock.recvfrom(2048)
             except socket.timeout:
                 continue
             except OSError:
                 break
             pkt = parse_packet(data)
             if pkt:
-                self._handle_packet(pkt)
+                self._announce_peer(pkt["sender_id"], addr)
+                self._handle_packet(pkt, addr)
 
-    def _handle_packet(self, pkt):
+    def _handle_packet(self, pkt, address):
         with self.lock:
             ptype = pkt["type"]
             if ptype == TYPE_CLAIM:
@@ -471,6 +564,18 @@ class IntercomNode:
                 if self.state == STATE_CLAIMING:
                     self._claim_cancel.set()
                     self._set_state(STATE_IDLE)
+            elif ptype == TYPE_HELLO:
+                try:
+                    alias = pkt["payload"].decode("utf-8").strip()[:32]
+                except UnicodeDecodeError:
+                    alias = None
+                self._announce_peer(pkt["sender_id"], address, alias)
+            elif ptype == TYPE_CONFIG_REPLY:
+                try:
+                    config = json.loads(pkt["payload"].decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return
+                self.config_events.put((pkt["sender_id"], config))
 
     def _remote_wins(self, pkt):
         """Deterministic contention winner: lowest (session_id, sender_id)."""
@@ -500,6 +605,7 @@ class IntercomNode:
         self.rx_last_ms = self._now_ms()
         self.jitter.reset()
         self.rx_pcm_log = []
+        self.last_talker_id = pkt["sender_id"]
         self._set_state(STATE_RECEIVING)
 
     def _handle_audio(self, pkt):
@@ -575,6 +681,22 @@ class IntercomNode:
                     if age > RX_TIMEOUT_MS:
                         self._finalize_rx()
 
+                now = self._now_ms()
+                expired = [node_id for node_id, peer in self.peers.items()
+                           if (now - peer["seen_ms"]) & 0xFFFFFFFF > PEER_EXPIRE_MS]
+                for node_id in expired:
+                    del self.peers[node_id]
+                if expired:
+                    self.peers_dirty = True
+
+    def _hello_loop(self):
+        while self.running:
+            self._send(TYPE_HELLO, 0, 0, PC_ALIAS.encode("utf-8")[:32])
+            for _ in range(PEER_HELLO_MS // 100):
+                if not self.running:
+                    return
+                time.sleep(0.1)
+
 
 # ---------------------------------------------------------------------------
 # Audio engine: sounddevice capture (16 kHz mono) and non-blocking playback.
@@ -625,17 +747,17 @@ class AudioEngine:
 class IntercomUI:
     def __init__(self, root):
         self.root = root
-        root.title("Wi-Fi PTT Intercom")
-        root.geometry("380x300")
-
-        self.node = IntercomNode(on_state_change=self._on_state_change)
+        root.title("Wi-Fi Intercom Companion")
+        root.geometry("620x500")
+        self.peer_rows = []
+        self.node = IntercomNode()
 
         in_dev, out_dev = self._pick_devices()
 
-        header = tk.Label(root, text=f"Node {NODE_ID:08x}",
+        header = tk.Label(root, text=f"Companion {NODE_ID:08x}",
                           font=("Segoe UI", 12, "bold"))
         header.pack(pady=(10, 0))
-        tk.Label(root, text=f"Peer: {PEER_IP}:{UDP_PORT}").pack()
+        tk.Label(root, text=f"Mesh {MESH_ID:08x}  •  multicast {MULTICAST_GROUP}:{UDP_PORT}").pack()
         tk.Label(root, text=f"In:  {in_dev}",
                  font=("Segoe UI", 8)).pack()
         tk.Label(root, text=f"Out: {out_dev}",
@@ -646,16 +768,55 @@ class IntercomUI:
                                font=("Segoe UI", 20, "bold"), fg="gray")
         self.status.pack(pady=8)
 
-        self.ptt = tk.Button(root, text="HOLD TO TALK",
-                             font=("Segoe UI", 16, "bold"),
-                             bg="#2e7d32", fg="white", activebackground="#1b5e20",
-                             height=2, width=18)
-        self.ptt.pack(pady=6)
-        self.ptt.bind("<ButtonPress-1>", lambda e: self._press())
-        self.ptt.bind("<ButtonRelease-1>", lambda e: self._release())
+        ptt_frame = tk.Frame(root)
+        ptt_frame.pack(pady=4)
+        self.broadcast_ptt = tk.Button(ptt_frame, text="HOLD TO BROADCAST",
+            font=("Segoe UI", 16, "bold"), bg="#2e7d32", fg="white",
+            activebackground="#1b5e20", height=2, width=20)
+        self.broadcast_ptt.pack(side=tk.LEFT, padx=4)
+        self.broadcast_ptt.bind("<ButtonPress-1>", lambda e: self._press_broadcast())
+        self.broadcast_ptt.bind("<ButtonRelease-1>", lambda e: self._release())
+        self.reply_ptt = tk.Button(ptt_frame, text="HOLD TO REPLY",
+            font=("Segoe UI", 12, "bold"), bg="#1565c0", fg="white",
+            activebackground="#0d47a1", height=2)
+        self.reply_ptt.pack(side=tk.LEFT, padx=4)
+        self.reply_ptt.bind("<ButtonPress-1>", lambda e: self._press_reply())
+        self.reply_ptt.bind("<ButtonRelease-1>", lambda e: self._release())
 
-        tk.Label(root, text="(or hold SPACE while focused)",
+        tk.Label(root, text="Hold Space to broadcast. Select a device to direct-message or configure it.",
                  font=("Segoe UI", 8), fg="gray").pack()
+
+        body = tk.Frame(root)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        left = tk.LabelFrame(body, text="Active devices")
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        self.devices = tk.Listbox(left, height=10, exportselection=False)
+        self.devices.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.devices.bind("<<ListboxSelect>>", lambda _e: self._request_selected_config())
+        actions = tk.Frame(left)
+        actions.pack(fill=tk.X, padx=6, pady=(0, 6))
+        tk.Button(actions, text="Get config", command=self._request_selected_config).pack(side=tk.LEFT)
+        direct = tk.Button(actions, text="Hold to selected", bg="#6a1b9a", fg="white")
+        direct.pack(side=tk.RIGHT)
+        direct.bind("<ButtonPress-1>", lambda e: self._press_selected())
+        direct.bind("<ButtonRelease-1>", lambda e: self._release())
+
+        right = tk.LabelFrame(body, text="Selected device configuration")
+        right.pack(side=tk.LEFT, fill=tk.Y)
+        self.alias_var = tk.StringVar()
+        self.volume_var = tk.StringVar(value="512")
+        self.brightness_var = tk.StringVar(value="48")
+        self.button_swap_var = tk.BooleanVar(value=False)
+        self.orientation_var = tk.StringVar(value="0")
+        self._field(right, "Alias", self.alias_var)
+        self._field(right, "Volume (64–1024)", self.volume_var)
+        self._field(right, "LED brightness (0–255)", self.brightness_var)
+        tk.Checkbutton(right, text="Physical buttons swapped", variable=self.button_swap_var).pack(anchor=tk.W, padx=8, pady=2)
+        orient = tk.Frame(right)
+        orient.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(orient, text="Ring orientation").pack(side=tk.LEFT)
+        tk.OptionMenu(orient, self.orientation_var, "0", "180").pack(side=tk.RIGHT)
+        tk.Button(right, text="Apply configuration", command=self._apply_config).pack(padx=8, pady=8, fill=tk.X)
 
         # Space bar as PTT.  key-repeat fires many presses, so guard with a flag.
         self._space_down = False
@@ -663,6 +824,7 @@ class IntercomUI:
         root.bind("<KeyRelease-space>", self._on_space_release)
 
         self.node.start()
+        self.root.after(250, self._poll_node_events)
         try:
             self.audio = AudioEngine(self.node, in_dev if isinstance(in_dev, int)
                                      else None,
@@ -691,8 +853,33 @@ class IntercomUI:
         except Exception:
             return "default", "default"
 
-    def _press(self):
+    @staticmethod
+    def _field(parent, label, variable):
+        frame = tk.Frame(parent)
+        frame.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(frame, text=label).pack(anchor=tk.W)
+        tk.Entry(frame, textvariable=variable, width=24).pack(fill=tk.X)
+
+    def _selected_peer(self):
+        selection = self.devices.curselection()
+        return self.peer_rows[selection[0]] if selection and selection[0] < len(self.peer_rows) else None
+
+    def _press_broadcast(self):
         self.node.ptt_press()
+
+    def _press_selected(self):
+        peer = self._selected_peer()
+        if not peer:
+            messagebox.showinfo("Choose device", "Select an active device first.")
+            return
+        self.node.ptt_press(peer["address"])
+
+    def _press_reply(self):
+        peer = self.node.peers.get(self.node.last_talker_id)
+        if not peer:
+            messagebox.showinfo("Reply unavailable", "No active device has spoken to this companion yet.")
+            return
+        self.node.ptt_press(peer["address"])
 
     def _release(self):
         self.node.ptt_release()
@@ -700,23 +887,69 @@ class IntercomUI:
     def _on_space_press(self, _event):
         if not self._space_down:
             self._space_down = True
-            self._press()
+            self._press_broadcast()
 
     def _on_space_release(self, _event):
         if self._space_down:
             self._space_down = False
             self._release()
 
-    def _on_state_change(self, state):
-        colors = {STATE_IDLE: "gray", STATE_CLAIMING: "#f9a825",
-                  STATE_TALKING: "#c62828", STATE_RECEIVING: "#1565c0"}
-        # UI updates must happen on the Tk thread.
-        self.root.after(0, lambda: self._apply_state(state, colors.get(state,
-                                                                       "gray")))
-
     def _apply_state(self, state, color):
         self.status_var.set(state)
         self.status.config(fg=color)
+
+    def _poll_node_events(self):
+        if self.node.consume_peers_dirty():
+            self._refresh_peers()
+        colors = {STATE_IDLE: "gray", STATE_CLAIMING: "#f9a825",
+                  STATE_TALKING: "#c62828", STATE_RECEIVING: "#1565c0"}
+        for state in self.node.drain_state_events():
+            self._apply_state(state, colors.get(state, "gray"))
+        for sender_id, config in self.node.drain_config_events():
+            self._apply_config_response(sender_id, config)
+        if self.node.running:
+            self.root.after(250, self._poll_node_events)
+
+    def _refresh_peers(self):
+        selected = self._selected_peer()
+        selected_id = selected["id"] if selected else None
+        self.peer_rows = self.node.active_peers()
+        self.devices.delete(0, tk.END)
+        for index, peer in enumerate(self.peer_rows):
+            self.devices.insert(tk.END, f"{peer['alias']}  ({peer['id']:08x})  {peer['address'][0]}")
+            if peer["id"] == selected_id:
+                self.devices.selection_set(index)
+
+    def _request_selected_config(self):
+        peer = self._selected_peer()
+        if peer:
+            self.node.request_config(peer)
+
+    def _apply_config_response(self, sender_id, config):
+        peer = self._selected_peer()
+        if not peer or peer["id"] != sender_id:
+            return
+        self.alias_var.set(str(config.get("alias", "")))
+        self.volume_var.set(str(config.get("speaker_volume", 512)))
+        self.brightness_var.set(str(config.get("led_brightness", 48)))
+        self.button_swap_var.set(bool(config.get("buttons_swapped", False)))
+        self.orientation_var.set(str(config.get("ring_orientation", 0)))
+
+    def _apply_config(self):
+        peer = self._selected_peer()
+        if not peer:
+            messagebox.showinfo("Choose device", "Select an active device first.")
+            return
+        try:
+            config = {"alias": self.alias_var.get().strip()[:32],
+                      "speaker_volume": int(self.volume_var.get()),
+                      "led_brightness": int(self.brightness_var.get()),
+                      "buttons_swapped": self.button_swap_var.get(),
+                      "ring_orientation": int(self.orientation_var.get())}
+        except ValueError:
+            messagebox.showerror("Invalid value", "Volume, brightness and orientation must be numbers.")
+            return
+        self.node.set_config(peer, config)
 
     def _on_close(self):
         if self.audio:

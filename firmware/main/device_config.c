@@ -40,6 +40,7 @@ static void make_defaults(device_config_t *out)
     /* A restrained default cuts WS2812 current transients that can otherwise
      * bleed into the nearby class-D amplifier on USB-powered assemblies. */
     out->led_brightness = 48;
+    out->hardware_flags = 0;
 }
 
 void device_config_load(device_config_t *out)
@@ -91,13 +92,15 @@ static bool assign_string(cJSON *root, const char *key, char *out, size_t size)
 }
 
 bool device_config_apply_json(device_config_t *config, const char *json,
-                              bool *wifi_changed)
+                              bool *restart_required)
 {
     cJSON *root = cJSON_Parse(json);
     if (!root) return false;
     device_config_t updated = *config;
     char old_ssid[WIFI_SSID_MAX + 1];
     char old_password[WIFI_PASSWORD_MAX + 1];
+    uint8_t old_hardware_flags = updated.hardware_flags;
+    uint8_t old_brightness = updated.led_brightness;
     memcpy(old_ssid, updated.wifi_ssid, sizeof(old_ssid));
     memcpy(old_password, updated.wifi_password, sizeof(old_password));
     assign_string(root, "alias", updated.alias, sizeof(updated.alias));
@@ -106,17 +109,31 @@ bool device_config_apply_json(device_config_t *config, const char *json,
     cJSON *mesh = cJSON_GetObjectItemCaseSensitive(root, "mesh_id");
     cJSON *volume = cJSON_GetObjectItemCaseSensitive(root, "speaker_volume");
     cJSON *brightness = cJSON_GetObjectItemCaseSensitive(root, "led_brightness");
+    cJSON *buttons_swapped = cJSON_GetObjectItemCaseSensitive(root, "buttons_swapped");
+    cJSON *ring_orientation = cJSON_GetObjectItemCaseSensitive(root, "ring_orientation");
     if (cJSON_IsNumber(mesh) && mesh->valuedouble >= 1 && mesh->valuedouble <= UINT32_MAX)
         updated.mesh_id = (uint32_t)mesh->valuedouble;
     if (cJSON_IsNumber(volume) && volume->valuedouble >= 64 && volume->valuedouble <= 1024)
         updated.speaker_volume = (uint16_t)volume->valuedouble;
     if (cJSON_IsNumber(brightness) && brightness->valuedouble >= 0 && brightness->valuedouble <= 255)
         updated.led_brightness = (uint8_t)brightness->valuedouble;
+    if (cJSON_IsBool(buttons_swapped))
+        updated.hardware_flags = cJSON_IsTrue(buttons_swapped)
+            ? (updated.hardware_flags | DEVICE_FLAG_BUTTONS_SWAPPED)
+            : (updated.hardware_flags & ~DEVICE_FLAG_BUTTONS_SWAPPED);
+    if (cJSON_IsNumber(ring_orientation) &&
+        (ring_orientation->valuedouble == 0 || ring_orientation->valuedouble == 180)) {
+        updated.hardware_flags = ring_orientation->valuedouble == 180
+            ? (updated.hardware_flags | DEVICE_FLAG_RING_180)
+            : (updated.hardware_flags & ~DEVICE_FLAG_RING_180);
+    }
     cJSON_Delete(root);
     if (!device_config_save(&updated)) return false;
-    if (wifi_changed)
-        *wifi_changed = strcmp(old_ssid, updated.wifi_ssid) != 0 ||
-                        strcmp(old_password, updated.wifi_password) != 0;
+    if (restart_required)
+        *restart_required = strcmp(old_ssid, updated.wifi_ssid) != 0 ||
+                            strcmp(old_password, updated.wifi_password) != 0 ||
+                            old_hardware_flags != updated.hardware_flags ||
+                            old_brightness != updated.led_brightness;
     *config = updated;
     return true;
 }
@@ -132,6 +149,10 @@ size_t device_config_to_json(const device_config_t *config, char *out,
     cJSON_AddStringToObject(root, "ssid", config->wifi_ssid);
     cJSON_AddNumberToObject(root, "speaker_volume", config->speaker_volume);
     cJSON_AddNumberToObject(root, "led_brightness", config->led_brightness);
+    cJSON_AddBoolToObject(root, "buttons_swapped",
+                          (config->hardware_flags & DEVICE_FLAG_BUTTONS_SWAPPED) != 0);
+    cJSON_AddNumberToObject(root, "ring_orientation",
+                            (config->hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
     char *encoded = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!encoded) return 0;

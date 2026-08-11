@@ -95,9 +95,10 @@ class RmtRing final : public voicering::RingOutput {
   uint8_t size() const override { return count_; }
   void setPixel(uint8_t index, voicering::Rgb colour) override {
     if (index >= count_) return;
-    pixels_[index * 3] = colour.g;
-    pixels_[index * 3 + 1] = colour.r;
-    pixels_[index * 3 + 2] = colour.b;
+    const uint8_t physical = (index + offset_) % count_;
+    pixels_[physical * 3] = colour.g;
+    pixels_[physical * 3 + 1] = colour.r;
+    pixels_[physical * 3 + 2] = colour.b;
   }
   void show() override {
     rmt_transmit_config_t tx{};
@@ -117,10 +118,14 @@ class RmtRing final : public voicering::RingOutput {
     ESP_ERROR_CHECK(rmt_enable(channel_));
     memset(pixels_, 0, sizeof(pixels_));
   }
+  void setOrientation(uint16_t degrees) {
+    offset_ = degrees == 180 ? count_ / 2 : 0;
+  }
  private:
   rmt_channel_handle_t channel_ = nullptr;
   rmt_encoder_handle_t encoder_ = nullptr;
   uint8_t count_ = kMaxPixels;
+  uint8_t offset_ = 0;
   uint8_t pixels_[kMaxPixels * 3]{};
 };
 
@@ -129,8 +134,10 @@ voicering::AnimationEngine *animation = nullptr;
 ring_mode_t current = RING_IDLE;
 }  // namespace
 
-extern "C" void ring_controller_init(uint8_t gpio, uint8_t count, uint8_t brightness) {
+extern "C" void ring_controller_init(uint8_t gpio, uint8_t count, uint8_t brightness,
+                                      uint16_t orientation_degrees) {
   ring.begin(gpio, count);
+  ring.setOrientation(orientation_degrees);
   animation = new voicering::AnimationEngine(ring);
   animation->setGlobalBrightness(brightness);
   animation->startStartup(static_cast<uint32_t>(esp_timer_get_time() / 1000));

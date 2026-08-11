@@ -3,20 +3,22 @@
 ## Network model
 
 `mesh_id` is a logical intercom group, not an ESP-MESH radio network. Devices
-and companion applications join IPv4 multicast group `239.255.42.99:45678` on
-the existing 2.4 GHz LAN. Multicast keeps the group self-discovering and avoids
-any configured peer IP list. The Wi-Fi radio remains awake while the unit is
-USB-powered.
+and companion applications use IPv4 multicast group `239.255.42.99:45678` only
+for low-rate `HELLO` discovery on the existing 2.4 GHz LAN. Learned endpoint
+addresses are held only in a short-lived peer table, so no IP list is stored in
+configuration. The Wi-Fi radio remains awake while the unit is USB-powered.
 
-Every group packet carries a sender ID. Broadcast sessions use the multicast
-endpoint. Directed sessions use the target endpoint learned at runtime from
-`HELLO`; no device IP is stored in configuration. Their `CLAIM` and lightweight
-`HEARTBEAT` packets remain multicast, so every peer observes one shared,
-deterministic floor, while only the intended endpoint receives audio.
+Every group packet carries a sender ID. A PTT session snapshots the current
+learned peers and unicasts `CLAIM`, `BUSY`, `HEARTBEAT`, `END`, and broadcast
+audio to that set. Directed audio is unicast only to its selected endpoint,
+while its floor-control packets still fan out to the group snapshot. This keeps
+one deterministic floor without relying on unreliable Wi-Fi multicast for
+real-time traffic.
 
 ## Floor and PTT behaviour
 
-* A `CLAIM` is multicast before a sender streams audio. The smallest
+* A `CLAIM` is unicast to the active peer snapshot before a sender streams
+  audio. The smallest
   `(session_id, sender_id)` wins a simultaneous claim.
 * Button 1 creates a broadcast session and shows the green talk animation.
 * Button 2 targets the sender of the last received message and shows the blue

@@ -1,11 +1,15 @@
+using IntercomCompanion.Core;
+using System.Net.Sockets;
+
 namespace IntercomCompanion;
 
-/// <summary>
-/// Deliberately thin WinForms surface. Networking, protocol, state and audio
-/// will stay outside this class so no network or audio callback can block UI.
-/// </summary>
+/// <summary>UI-only WinForms surface; all intercom work lives in Core.</summary>
 internal sealed class MainForm : Form
 {
+    private readonly CompanionSettings settings = CompanionSettings.Load();
+    private IntercomNode? node;
+    private readonly Label identityLabel = new() { AutoSize = true };
+    private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label statusLabel = new()
     {
         AutoSize = true,
@@ -13,6 +17,22 @@ internal sealed class MainForm : Form
         ForeColor = Color.DimGray,
         Text = "Starting…"
     };
+    private readonly ListView devices = new()
+    {
+        Dock = DockStyle.Fill, FullRowSelect = true, GridLines = true,
+        MultiSelect = false, View = View.Details
+    };
+    private readonly Button broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
+    private readonly Button reply = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
+    private readonly Button selected = CreatePttButton("Hold to selected device", Color.FromArgb(106, 27, 154));
+    private readonly TextBox alias = new() { Enabled = false };
+    private readonly NumericUpDown volume = new() { Enabled = false, Minimum = 64, Maximum = 1024 };
+    private readonly NumericUpDown brightness = new() { Enabled = false, Minimum = 0, Maximum = 255 };
+    private readonly CheckBox buttonsSwapped = new() { Enabled = false };
+    private readonly ComboBox orientation = new() { Enabled = false, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly Button getConfig = new() { Text = "Get configuration", Enabled = false, AutoSize = true };
+    private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
 
     public MainForm()
     {
@@ -28,64 +48,40 @@ internal sealed class MainForm : Form
             Font = new Font("Segoe UI", 14, FontStyle.Bold),
             AutoSize = true,
         };
-        var network = new Label
-        {
-            Text = "Mesh discovery: starting…",
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-        };
+        identityLabel.Text = $"Companion: {settings.Alias}  ({settings.NodeId:x8})";
+        networkLabel.Text = "Discovery: starting…";
 
-        var broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
-        var reply = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
-        var selected = CreatePttButton("Hold to selected device", Color.FromArgb(106, 27, 154));
         broadcast.Enabled = reply.Enabled = selected.Enabled = false;
-
         var pttPanel = new FlowLayoutPanel
         {
-            AutoSize = true,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Padding = new Padding(0, 8, 0, 8),
+            AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false, Padding = new Padding(0, 8, 0, 8),
         };
         pttPanel.Controls.AddRange([broadcast, reply, selected]);
 
-        var devices = new ListView
-        {
-            Dock = DockStyle.Fill,
-            FullRowSelect = true,
-            GridLines = true,
-            MultiSelect = false,
-            View = View.Details,
-        };
         devices.Columns.Add("Alias", 150);
         devices.Columns.Add("Device ID", 110);
         devices.Columns.Add("Address", 135);
         devices.Columns.Add("Last seen", 90);
-
+        devices.SelectedIndexChanged += async (_, _) => await RequestSelectedConfigAsync();
         var deviceGroup = new GroupBox { Text = "Active devices", Dock = DockStyle.Fill };
         deviceGroup.Controls.Add(devices);
 
-        var config = new TableLayoutPanel
-        {
-            AutoSize = true,
-            ColumnCount = 2,
-            Dock = DockStyle.Top,
-            Padding = new Padding(8),
-        };
+        orientation.Items.AddRange(["0", "180"]);
+        var config = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Top, Padding = new Padding(8) };
         config.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         config.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        AddConfigField(config, "Alias", new TextBox { Enabled = false });
-        AddConfigField(config, "Volume", new NumericUpDown { Enabled = false, Minimum = 64, Maximum = 1024 });
-        AddConfigField(config, "Ring brightness", new NumericUpDown { Enabled = false, Minimum = 0, Maximum = 255 });
-        AddConfigField(config, "Buttons swapped", new CheckBox { Enabled = false });
-        AddConfigField(config, "Ring orientation", new ComboBox { Enabled = false, DropDownStyle = ComboBoxStyle.DropDownList });
-        var getConfig = new Button { Text = "Get configuration", Enabled = false, AutoSize = true };
-        var applyConfig = new Button { Text = "Apply configuration", Enabled = false, AutoSize = true };
+        AddConfigField(config, "Alias", alias);
+        AddConfigField(config, "Volume", volume);
+        AddConfigField(config, "Ring brightness", brightness);
+        AddConfigField(config, "Buttons swapped", buttonsSwapped);
+        AddConfigField(config, "Ring orientation", orientation);
         var configActions = new FlowLayoutPanel { AutoSize = true };
         configActions.Controls.AddRange([getConfig, applyConfig]);
         config.SetColumnSpan(configActions, 2);
         config.Controls.Add(configActions, 0, config.RowCount++);
-
+        getConfig.Click += async (_, _) => await RequestSelectedConfigAsync();
+        applyConfig.Click += async (_, _) => await ApplySelectedConfigAsync();
         var configGroup = new GroupBox { Text = "Selected device configuration", Dock = DockStyle.Fill };
         configGroup.Controls.Add(config);
 
@@ -97,30 +93,111 @@ internal sealed class MainForm : Form
 
         var top = new FlowLayoutPanel
         {
-            AutoSize = true,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Dock = DockStyle.Top,
-            Padding = new Padding(12, 12, 12, 0),
+            AutoSize = true, FlowDirection = FlowDirection.TopDown,
+            WrapContents = false, Dock = DockStyle.Top, Padding = new Padding(12, 12, 12, 0),
         };
-        top.Controls.AddRange([title, network, statusLabel, pttPanel]);
-
+        top.Controls.AddRange([title, identityLabel, networkLabel, statusLabel, pttPanel]);
         Controls.Add(body);
         Controls.Add(top);
+
+        Shown += OnShown;
+        FormClosing += OnFormClosing;
+        refreshTimer.Tick += (_, _) => RefreshPeers();
+    }
+
+    private void OnShown(object? sender, EventArgs e)
+    {
+        try
+        {
+            settings.Save();
+            node = new IntercomNode(settings);
+            node.PeersChanged += (_, _) => PostToUi(RefreshPeers);
+            node.ConfigurationReceived += (_, eventArgs) => PostToUi(() => ShowConfiguration(eventArgs));
+            node.Diagnostic += message => PostToUi(() => networkLabel.Text = $"Discovery: {message}");
+            node.Start();
+            networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
+            statusLabel.Text = "Ready — audio starting next";
+            refreshTimer.Start();
+        }
+        catch (SocketException exception)
+        {
+            networkLabel.Text = $"Discovery unavailable: {exception.SocketErrorCode}";
+            statusLabel.Text = "Network unavailable";
+            statusLabel.ForeColor = Color.Firebrick;
+        }
+    }
+
+    private void RefreshPeers()
+    {
+        if (node is null || IsDisposed) return;
+        var selectedId = SelectedPeer?.NodeId;
+        var peers = node.Peers.OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
+        devices.BeginUpdate();
+        devices.Items.Clear();
+        foreach (var peer in peers)
+        {
+            var age = DateTimeOffset.UtcNow - peer.LastSeen;
+            var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(), $"{Math.Max(0, age.TotalSeconds):0}s"])
+            {
+                Tag = peer
+            };
+            devices.Items.Add(item);
+            if (peer.NodeId == selectedId) item.Selected = true;
+        }
+        devices.EndUpdate();
+    }
+
+    private Peer? SelectedPeer => devices.SelectedItems.Count == 1
+        ? devices.SelectedItems[0].Tag as Peer : null;
+
+    private async Task RequestSelectedConfigAsync()
+    {
+        var peer = SelectedPeer;
+        if (node is null || peer is null) return;
+        try { await node.RequestConfigurationAsync(peer); }
+        catch (SocketException exception) { networkLabel.Text = $"Configuration request failed: {exception.SocketErrorCode}"; }
+    }
+
+    private async Task ApplySelectedConfigAsync()
+    {
+        var peer = SelectedPeer;
+        if (node is null || peer is null) return;
+        var configuration = new DeviceConfiguration(alias.Text.Trim(), (int)volume.Value,
+            (int)brightness.Value, buttonsSwapped.Checked, int.Parse(orientation.Text));
+        try { await node.SetConfigurationAsync(peer, configuration); }
+        catch (SocketException exception) { networkLabel.Text = $"Configuration update failed: {exception.SocketErrorCode}"; }
+    }
+
+    private void ShowConfiguration(DeviceConfigurationReceivedEventArgs eventArgs)
+    {
+        if (SelectedPeer?.NodeId != eventArgs.NodeId) return;
+        alias.Enabled = volume.Enabled = brightness.Enabled = buttonsSwapped.Enabled = orientation.Enabled = true;
+        getConfig.Enabled = applyConfig.Enabled = true;
+        alias.Text = eventArgs.Configuration.Alias;
+        volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, (int)volume.Minimum, (int)volume.Maximum);
+        brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, (int)brightness.Minimum, (int)brightness.Maximum);
+        buttonsSwapped.Checked = eventArgs.Configuration.ButtonsSwapped;
+        orientation.SelectedItem = eventArgs.Configuration.RingOrientation.ToString();
+    }
+
+    private void PostToUi(Action action)
+    {
+        if (!IsDisposed && IsHandleCreated)
+            BeginInvoke(action);
+    }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        refreshTimer.Stop();
+        if (node is not null) node.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private static Button CreatePttButton(string text, Color color) => new()
     {
-        Text = text,
-        AutoSize = true,
-        AutoSizeMode = AutoSizeMode.GrowAndShrink,
-        BackColor = color,
-        ForeColor = Color.White,
-        FlatStyle = FlatStyle.Flat,
-        Font = new Font("Segoe UI", 10, FontStyle.Bold),
-        Margin = new Padding(0, 0, 8, 0),
-        Padding = new Padding(12, 8, 12, 8),
-        UseVisualStyleBackColor = false,
+        Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        BackColor = color, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
+        Font = new Font("Segoe UI", 10, FontStyle.Bold), Margin = new Padding(0, 0, 8, 0),
+        Padding = new Padding(12, 8, 12, 8), UseVisualStyleBackColor = false,
     };
 
     private static void AddConfigField(TableLayoutPanel panel, string label, Control field)

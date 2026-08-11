@@ -42,8 +42,18 @@
 #include "lwip/sockets.h"
 
 #include "config.h"
+#include "device_config.h"
 #include "protocol.h"
 #include "adpcm.h"
+#include "ring_controller.h"
+#include "usb_control.h"
+
+/* The POC's call sites use these values extensively. They now resolve to the
+ * NVS-backed production configuration loaded during boot. */
+static device_config_t g_config;
+#define MESH_ID (g_config.mesh_id)
+#define NODE_ID (g_config.device_id)
+#define PTT_GPIO BUTTON_BROADCAST_GPIO
 
 static const char *TAG = "intercom";
 
@@ -68,10 +78,25 @@ static struct {
     /* transmit */
     uint32_t tx_session;
     uint32_t tx_sequence;
+    uint32_t tx_last_audio_ms;
+    uint32_t tx_last_heartbeat_ms;
+    int      tx_buffer_index;
+    int      tx_buffer_count;
     adpcm_state_t enc;
     uint32_t claim_start_ms;
     int claims_sent;
     uint32_t last_claim_ms;
+    bool     tx_directed;
+    struct sockaddr_in tx_audio_destination;
+
+    /* Pressing a PTT while another node owns the floor preserves only the
+     * requested 500 ms. It is sent first if the floor becomes free in time. */
+    bool     waiting_for_floor;
+    bool     waiting_directed;
+    struct sockaddr_in waiting_destination;
+    uint32_t waiting_started_ms;
+    int      waiting_count;
+    audio_frame_t waiting_frames[BUSY_BUFFER_FRAMES];
 
     /* receive */
     uint32_t rx_sender;
@@ -79,6 +104,11 @@ static struct {
     uint32_t rx_last_ms;
     bool     rx_ending;      /* END received: drain remaining frames then idle */
     int      rx_drain;       /* playout iterations left before going idle      */
+    uint32_t last_heartbeat_ms;
+    uint32_t last_talker_id;
+    bool     have_last_talker;
+    struct sockaddr_in last_talker_address;
+    uint32_t error_until_ms;
 
     /* jitter buffer */
     jb_slot_t slots[JB_CAP];
@@ -92,7 +122,7 @@ static SemaphoreHandle_t g_lock;
 static QueueHandle_t     mic_q;
 
 static int                 g_sock = -1;
-static struct sockaddr_in  g_peer;
+static struct sockaddr_in  g_group;
 
 static i2s_chan_handle_t          i2s_tx;
 static adc_continuous_handle_t    adc_handle;
@@ -105,15 +135,29 @@ static inline uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+static void send_packet_to(const struct sockaddr_in *destination, uint8_t type,
+                           uint8_t flags, uint32_t session, uint32_t sequence,
+                           const uint8_t *payload, uint16_t payload_len)
+{
+    /* stack-local: send_packet is called from several tasks concurrently */
+    uint8_t buf[PROTO_HEADER_LEN + 320];
+    size_t n = protocol_pack(buf, type, flags, MESH_ID, NODE_ID, session, sequence,
+                             now_ms(), payload, payload_len);
+    if (g_sock >= 0)
+        sendto(g_sock, buf, n, 0, (const struct sockaddr *)destination,
+               sizeof(*destination));
+}
+
 static void send_packet(uint8_t type, uint32_t session, uint32_t sequence,
                         const uint8_t *payload, uint16_t payload_len)
 {
-    /* stack-local: send_packet is called from several tasks concurrently */
-    uint8_t buf[PROTO_HEADER_LEN + ADPCM_PAYLOAD_LEN];
-    size_t n = protocol_pack(buf, type, MESH_ID, NODE_ID, session, sequence,
-                             now_ms(), payload, payload_len);
-    if (g_sock >= 0)
-        sendto(g_sock, buf, n, 0, (struct sockaddr *)&g_peer, sizeof(g_peer));
+    uint8_t flags = 0;
+    const struct sockaddr_in *destination = &g_group;
+    if (type == PKT_AUDIO && g.tx_directed) {
+        flags = PROTO_FLAG_DIRECTED;
+        destination = &g.tx_audio_destination;
+    }
+    send_packet_to(destination, type, flags, session, sequence, payload, payload_len);
 }
 
 /* remote (session,sender) beats our claim if its tuple is strictly lower. */
@@ -252,12 +296,36 @@ static void handle_end(const intercom_pkt_t *p)
     }
 }
 
+static void handle_heartbeat(const intercom_pkt_t *p)
+{
+    if (g.state == ST_RECEIVING && p->session_id == g.rx_session)
+        g.rx_last_ms = now_ms();
+}
+
+static void handle_config_packet(const intercom_pkt_t *p,
+                                 const struct sockaddr_in *source)
+{
+    if (p->payload_len == 0 || p->payload_len >= 256) return;
+    char request[256] = {0};
+    char response[256] = {0};
+    memcpy(request, p->payload, p->payload_len);
+    bool wifi_changed = false;
+    usb_control_process(&g_config, request, response, sizeof(response), &wifi_changed);
+    send_packet_to(source, PKT_CONFIG_REPLY, 0, p->session_id, 0,
+                   (const uint8_t *)response, (uint16_t)strlen(response));
+    if (wifi_changed) {
+        ESP_LOGI(TAG, "Wi-Fi configuration changed; restarting");
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_restart();
+    }
+}
+
 /* ======================================================================== */
 /* network receive task                                                      */
 /* ======================================================================== */
 static void net_rx_task(void *arg)
 {
-    uint8_t buf[PROTO_HEADER_LEN + ADPCM_PAYLOAD_LEN + 16];
+    uint8_t buf[PROTO_HEADER_LEN + 320];
     while (1) {
         struct sockaddr_in src;
         socklen_t slen = sizeof(src);
@@ -273,10 +341,19 @@ static void net_rx_task(void *arg)
             case PKT_CLAIM: handle_claim(&pkt); break;
             case PKT_AUDIO: handle_audio(&pkt); break;
             case PKT_END:   handle_end(&pkt);   break;
+            case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;
+            case PKT_CONFIG_GET:
+            case PKT_CONFIG_SET: handle_config_packet(&pkt, &src); break;
             case PKT_BUSY:
                 if (g.state == ST_CLAIMING) g.state = ST_IDLE;
                 break;
             default: break;
+        }
+        if (pkt.type == PKT_AUDIO && g.state == ST_RECEIVING &&
+            pkt.session_id == g.rx_session) {
+            g.last_talker_id = pkt.sender_id;
+            g.last_talker_address = src;
+            g.have_last_talker = true;
         }
         xSemaphoreGive(g_lock);
     }
@@ -285,50 +362,91 @@ static void net_rx_task(void *arg)
 /* ======================================================================== */
 /* transmit / PTT / floor-control task                                       */
 /* ======================================================================== */
-static bool ptt_pressed(void)
+static bool button_pressed(gpio_num_t pin)
 {
-    return gpio_get_level(PTT_GPIO) == 0;   /* active low */
+    return gpio_get_level(pin) == 0;       /* controls are active low */
+}
+
+static void start_tx_locked(uint32_t t, bool directed,
+                            const struct sockaddr_in *destination)
+{
+    g.tx_session = esp_random();
+    g.tx_sequence = 0;
+    g.tx_last_audio_ms = 0;
+    g.tx_last_heartbeat_ms = 0;
+    g.tx_directed = directed;
+    if (destination) g.tx_audio_destination = *destination;
+    adpcm_state_reset(&g.enc);
+    g.claim_start_ms = t;
+    g.last_claim_ms = 0;
+    g.claims_sent = 0;
+    g.state = ST_CLAIMING;
+    ESP_LOGI(TAG, "TX claim: session=%08x%s", (unsigned)g.tx_session,
+             directed ? " directed" : " broadcast");
+}
+
+static void finish_tx(uint32_t session, uint32_t sequence, bool directed,
+                      const struct sockaddr_in *destination)
+{
+    for (int i = 0; i < END_COUNT; ++i) {
+        send_packet_to(&g_group, PKT_END, directed ? PROTO_FLAG_DIRECTED : 0,
+                       session, sequence, NULL, 0);
+        if (directed)
+            send_packet_to(destination, PKT_END, PROTO_FLAG_DIRECTED,
+                           session, sequence, NULL, 0);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
 }
 
 static void tx_task(void *arg)
 {
-    bool prev_pressed = false;
+    bool previous_broadcast = false, previous_reply = false;
     uint32_t last_edge_ms = 0;
     audio_frame_t frame;
 
     while (1) {
         uint32_t t = now_ms();
-        bool pressed = ptt_pressed();
+        bool broadcast = button_pressed(BUTTON_BROADCAST_GPIO);
+        bool reply = button_pressed(BUTTON_REPLY_GPIO);
+        bool any_pressed = broadcast || reply;
 
-        /* debounce edge detection (~20 ms) */
-        if (pressed != prev_pressed && (t - last_edge_ms) > 20) {
+        if ((broadcast != previous_broadcast || reply != previous_reply) &&
+            t - last_edge_ms > 20) {
             last_edge_ms = t;
-            prev_pressed = pressed;
+            bool new_press = any_pressed && !(previous_broadcast || previous_reply);
+            bool released = !any_pressed && (previous_broadcast || previous_reply);
+            previous_broadcast = broadcast;
+            previous_reply = reply;
 
             xSemaphoreTake(g_lock, portMAX_DELAY);
-            if (pressed) {
-                if (g.state == ST_IDLE) {          /* start a new session */
-                    g.tx_session = esp_random();
-                    g.tx_sequence = 0;
-                    adpcm_state_reset(&g.enc);
-                    g.claim_start_ms = t;
-                    g.last_claim_ms = 0;
-                    g.claims_sent = 0;
-                    g.state = ST_CLAIMING;
-                    ESP_LOGI(TAG, "TX claim: session=%08x",
-                             (unsigned)g.tx_session);
-                } else {
-                    ESP_LOGI(TAG, "PTT ignored: floor busy");
+            if (new_press) {
+                bool directed = reply && !broadcast;
+                if (directed && !g.have_last_talker) {
+                    ESP_LOGI(TAG, "Reply ignored: no previous talker");
+                } else if (g.state == ST_IDLE) {
+                    g.tx_buffer_count = 0;
+                    g.tx_buffer_index = 0;
+                    start_tx_locked(t, directed,
+                                    directed ? &g.last_talker_address : NULL);
+                } else if (g.state == ST_RECEIVING) {
+                    g.waiting_for_floor = true;
+                    g.waiting_started_ms = t;
+                    g.waiting_count = 0;
+                    g.waiting_directed = directed;
+                    if (directed) g.waiting_destination = g.last_talker_address;
+                    ESP_LOGI(TAG, "PTT waiting for occupied floor");
                 }
-            } else {
-                if (g.state == ST_CLAIMING || g.state == ST_TALKING) {
-                    uint32_t sess = g.tx_session, seq = g.tx_sequence;
+            } else if (released) {
+                if (g.waiting_for_floor) {
+                    g.waiting_for_floor = false;
+                    g.waiting_count = 0;
+                } else if (g.state == ST_CLAIMING || g.state == ST_TALKING) {
+                    uint32_t session = g.tx_session, sequence = g.tx_sequence;
+                    bool directed = g.tx_directed;
+                    struct sockaddr_in destination = g.tx_audio_destination;
                     g.state = ST_IDLE;
                     xSemaphoreGive(g_lock);
-                    for (int i = 0; i < END_COUNT; ++i) {
-                        send_packet(PKT_END, sess, seq, NULL, 0);
-                        vTaskDelay(pdMS_TO_TICKS(5));
-                    }
+                    finish_tx(session, sequence, directed, &destination);
                     ESP_LOGI(TAG, "TX end");
                     xSemaphoreTake(g_lock, portMAX_DELAY);
                 }
@@ -336,40 +454,87 @@ static void tx_task(void *arg)
             xSemaphoreGive(g_lock);
         }
 
-        /* drive the claim sequence and transition to talking */
         xSemaphoreTake(g_lock, portMAX_DELAY);
+        if (g.waiting_for_floor) {
+            if (g.state == ST_IDLE) {
+                g.tx_buffer_count = g.waiting_count;
+                g.tx_buffer_index = 0;
+                g.waiting_for_floor = false;
+                start_tx_locked(t, g.waiting_directed,
+                                g.waiting_directed ? &g.waiting_destination : NULL);
+            } else if (t - g.waiting_started_ms >= BUSY_BUFFER_MS) {
+                g.waiting_for_floor = false;
+                g.waiting_count = 0;
+                g.error_until_ms = t + 750;
+                xSemaphoreGive(g_lock);
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
         if (g.state == ST_CLAIMING) {
             if (g.claims_sent < CLAIM_COUNT &&
                 (g.last_claim_ms == 0 || t - g.last_claim_ms >= CLAIM_INTERVAL_MS)) {
-                uint32_t sess = g.tx_session;
+                uint32_t session = g.tx_session;
+                uint8_t flags = g.tx_directed ? PROTO_FLAG_DIRECTED : 0;
                 g.last_claim_ms = t;
                 g.claims_sent++;
                 xSemaphoreGive(g_lock);
-                send_packet(PKT_CLAIM, sess, 0, NULL, 0);
+                send_packet_to(&g_group, PKT_CLAIM, flags, session, 0, NULL, 0);
                 xSemaphoreTake(g_lock, portMAX_DELAY);
             }
-            if (t - g.claim_start_ms >= PRE_AUDIO_DELAY_MS &&
-                g.state == ST_CLAIMING) {
+            if (t - g.claim_start_ms >= PRE_AUDIO_DELAY_MS && g.state == ST_CLAIMING) {
                 g.state = ST_TALKING;
                 adpcm_state_reset(&g.enc);
                 g.tx_sequence = 0;
                 ESP_LOGI(TAG, "TX talking");
             }
         }
+        bool can_send = g.state == ST_TALKING && t - g.tx_last_audio_ms >= 20;
+        bool send_heartbeat = g.state == ST_TALKING && g.tx_directed &&
+                              t - g.tx_last_heartbeat_ms >= 100;
+        uint32_t heartbeat_session = g.tx_session;
+        if (send_heartbeat) g.tx_last_heartbeat_ms = t;
         xSemaphoreGive(g_lock);
 
-        /* pump captured audio while we own the floor */
-        if (xQueueReceive(mic_q, &frame, pdMS_TO_TICKS(5)) == pdTRUE) {
-            xSemaphoreTake(g_lock, portMAX_DELAY);
-            if (g.state == ST_TALKING) {
-                static uint8_t payload[ADPCM_PAYLOAD_LEN];
-                adpcm_encode_frame(&g.enc, frame.pcm, payload);
-                uint32_t sess = g.tx_session, seq = g.tx_sequence++;
+        if (send_heartbeat)
+            send_packet_to(&g_group, PKT_HEARTBEAT, PROTO_FLAG_DIRECTED,
+                           heartbeat_session, 0, NULL, 0);
+
+        if (!can_send) {
+            if (xQueueReceive(mic_q, &frame, 0) == pdTRUE) {
+                xSemaphoreTake(g_lock, portMAX_DELAY);
+                if (g.waiting_for_floor && g.waiting_count < BUSY_BUFFER_FRAMES)
+                    g.waiting_frames[g.waiting_count++] = frame;
                 xSemaphoreGive(g_lock);
-                send_packet(PKT_AUDIO, sess, seq, payload, ADPCM_PAYLOAD_LEN);
-            } else {
-                xSemaphoreGive(g_lock);   /* not talking: discard mic frame */
             }
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+
+        bool have_frame = false;
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        if (g.tx_buffer_index < g.tx_buffer_count) {
+            frame = g.waiting_frames[g.tx_buffer_index++];
+            have_frame = true;
+        }
+        xSemaphoreGive(g_lock);
+        if (!have_frame)
+            have_frame = xQueueReceive(mic_q, &frame, 0) == pdTRUE;
+        if (!have_frame) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        if (g.state == ST_TALKING) {
+            static uint8_t payload[ADPCM_PAYLOAD_LEN];
+            adpcm_encode_frame(&g.enc, frame.pcm, payload);
+            uint32_t session = g.tx_session, sequence = g.tx_sequence++;
+            g.tx_last_audio_ms = t;
+            xSemaphoreGive(g_lock);
+            send_packet(PKT_AUDIO, session, sequence, payload, ADPCM_PAYLOAD_LEN);
+        } else if (g.waiting_for_floor && g.waiting_count < BUSY_BUFFER_FRAMES) {
+            g.waiting_frames[g.waiting_count++] = frame;
+            xSemaphoreGive(g_lock);
+        } else {
+            xSemaphoreGive(g_lock);
         }
     }
 }
@@ -418,8 +583,10 @@ static void playback_task(void *arg)
         }
         xSemaphoreGive(g_lock);
 
-        /* half duplex: never drive the speaker while transmitting */
-        if (local_floor) memset(mono, 0, sizeof(mono));
+        /* Half duplex and the hardware mute switch both silence only I2S.
+         * The node continues participating in floor control and discovery. */
+        if (local_floor || button_pressed(MUTE_SWITCH_GPIO))
+            memset(mono, 0, sizeof(mono));
 
         /* digital playback volume (SPK_VOLUME/256) with safe clipping */
 #if SPK_VOLUME != 256
@@ -561,13 +728,48 @@ static void adc_init(void)
 static void gpio_button_init(void)
 {
     gpio_config_t io = {
-        .pin_bit_mask = 1ULL << PTT_GPIO,
+        .pin_bit_mask = (1ULL << BUTTON_BROADCAST_GPIO) |
+                        (1ULL << BUTTON_REPLY_GPIO) |
+                        (1ULL << MUTE_SWITCH_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&io));
+}
+
+static void ring_task(void *arg)
+{
+    while (1) {
+        uint32_t t = now_ms();
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        node_state_t state = g.state;
+        bool directed = g.tx_directed;
+        bool error = (int32_t)(g.error_until_ms - t) > 0;
+        xSemaphoreGive(g_lock);
+
+        if (error) ring_controller_set(RING_ERROR);
+        else if (button_pressed(MUTE_SWITCH_GPIO)) ring_controller_set(RING_MUTE);
+        else if (state == ST_TALKING || state == ST_CLAIMING)
+            ring_controller_set(directed ? RING_TALK_REPLY : RING_TALK_BROADCAST);
+        else if (state == ST_RECEIVING) ring_controller_set(RING_SPEAKING);
+        else ring_controller_set(RING_IDLE);
+        ring_controller_update(t);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static void hello_task(void *arg)
+{
+    while (1) {
+        /* Alias is deliberately a small, plain UTF-8 payload; apps can show
+         * it immediately and query full configuration when selected. */
+        const uint8_t *alias = (const uint8_t *)g_config.alias;
+        uint16_t length = (uint16_t)strnlen(g_config.alias, DEVICE_ALIAS_MAX);
+        send_packet_to(&g_group, PKT_HELLO, 0, 0, 0, alias, length);
+        vTaskDelay(pdMS_TO_TICKS(PEER_HELLO_MS));
+    }
 }
 
 /* Startup tone so the speaker/amp can be verified without a peer.
@@ -632,32 +834,43 @@ static void wifi_init(void)
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
     wifi_config_t wc = { 0 };
-    strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, WIFI_PASSWORD, sizeof(wc.sta.password) - 1);
+    strncpy((char *)wc.sta.ssid, g_config.wifi_ssid, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, g_config.wifi_password, sizeof(wc.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
     /* disable power save for low latency */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_LOGI(TAG, "Wi-Fi started, connecting to \"%s\"", WIFI_SSID);
+    ESP_LOGI(TAG, "Wi-Fi started, connecting to \"%s\"", g_config.wifi_ssid);
 }
 
 static void udp_init(void)
 {
     g_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int reuse = 1;
+    setsockopt(g_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     struct sockaddr_in local = {
         .sin_family = AF_INET,
         .sin_port = htons(UDP_PORT),
         .sin_addr.s_addr = htonl(INADDR_ANY),
     };
-    bind(g_sock, (struct sockaddr *)&local, sizeof(local));
+    ESP_ERROR_CHECK(bind(g_sock, (struct sockaddr *)&local, sizeof(local)) == 0 ? ESP_OK : ESP_FAIL);
 
-    memset(&g_peer, 0, sizeof(g_peer));
-    g_peer.sin_family = AF_INET;
-    g_peer.sin_port = htons(UDP_PORT);
-    g_peer.sin_addr.s_addr = inet_addr(PEER_IP);
-    ESP_LOGI(TAG, "UDP ready on port %d, peer %s", UDP_PORT, PEER_IP);
+    memset(&g_group, 0, sizeof(g_group));
+    g_group.sin_family = AF_INET;
+    g_group.sin_port = htons(UDP_PORT);
+    g_group.sin_addr.s_addr = inet_addr(MULTICAST_GROUP);
+    struct ip_mreq membership = {
+        .imr_multiaddr.s_addr = g_group.sin_addr.s_addr,
+        .imr_interface.s_addr = htonl(INADDR_ANY),
+    };
+    ESP_ERROR_CHECK(setsockopt(g_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                               &membership, sizeof(membership)) == 0 ? ESP_OK : ESP_FAIL);
+    uint8_t ttl = MULTICAST_TTL;
+    ESP_ERROR_CHECK(setsockopt(g_sock, IPPROTO_IP, IP_MULTICAST_TTL,
+                               &ttl, sizeof(ttl)) == 0 ? ESP_OK : ESP_FAIL);
+    ESP_LOGI(TAG, "UDP ready on port %d, multicast group %s", UDP_PORT, MULTICAST_GROUP);
 }
 
 /* ======================================================================== */
@@ -673,14 +886,18 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(nvs);
 
+    device_config_load(&g_config);
+
     g_lock = xSemaphoreCreateMutex();
     mic_q  = xQueueCreate(8, sizeof(audio_frame_t));
     memset(&g, 0, sizeof(g));
     g.state = ST_IDLE;
     jb_reset();
+    usb_control_start(&g_config, g_lock);
 
     i2s_init();
     gpio_button_init();
+    ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness);
     startup_tone();          /* verify speaker before the network is up */
     adc_init();
 
@@ -691,6 +908,8 @@ void app_main(void)
     xTaskCreate(capture_task,  "capture",  4096, NULL, 6, NULL);
     xTaskCreate(tx_task,       "tx",       4096, NULL, 5, NULL);
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);
+    xTaskCreate(ring_task,     "ring",     4096, NULL, 4, NULL);
+    xTaskCreate(hello_task,    "hello",    3072, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "Intercom node %08x ready", (unsigned)NODE_ID);
 }

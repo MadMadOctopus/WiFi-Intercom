@@ -2,9 +2,8 @@
  * config.h - Static configuration for the Wi-Fi PTT intercom firmware.
  *
  * ============================================================================
- *  EDIT THESE VALUES for your network and deployment.  They are hardcoded on
- *  purpose for this proof of concept.  Keep MESH_ID / UDP_PORT / audio format
- *  identical to pc_app/app.py or the two peers will not understand each other.
+ *  Build-time defaults only. Production configuration is held in NVS and can
+ *  be changed through USB Serial/JTAG or an in-group companion application.
  * ============================================================================
  */
 #ifndef INTERCOM_CONFIG_H
@@ -15,12 +14,13 @@
 #define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
 
 /* ---- Mesh / node identity (must match the PC peer) --------------------- */
-#define MESH_ID         0x4D455348u   /* "MESH" - same constant as app.py   */
-#define NODE_ID         0x00000001u   /* this ESP node id (PC is 0x00000002)*/
+#define DEFAULT_MESH_ID 0x4D455348u   /* "MESH"                             */
+#define DEFAULT_ALIAS   "Intercom"
 
-/* ---- Peer (the PC application) ----------------------------------------- */
-#define PEER_IP         "192.168.1.100"  /* IPv4 of the PC running app.py    */
-#define UDP_PORT        45678           /* single UDP port for all packets  */
+/* ---- Group transport (no configured peers) ---------------------------- */
+#define UDP_PORT              45678
+#define MULTICAST_GROUP       "239.255.42.99"
+#define MULTICAST_TTL         1
 
 /* ---- Audio format (do NOT change without changing app.py) -------------- */
 #define SAMPLE_RATE     16000
@@ -41,8 +41,12 @@
 #define I2S_LRC_GPIO    7               /* D5  -> MAX98357A LRC              */
 #define I2S_DOUT_GPIO   5               /* D3  -> MAX98357A DIN              */
 
-/* ---- PTT button -------------------------------------------------------- */
-#define PTT_GPIO        20              /* D7, INPUT_PULLUP, pressed = LOW   */
+/* ---- Final XIAO ESP32-C3 controls -------------------------------------- */
+#define BUTTON_BROADCAST_GPIO 10        /* D10, INPUT_PULLUP, pressed = LOW  */
+#define BUTTON_REPLY_GPIO      9        /* D9,  INPUT_PULLUP, pressed = LOW  */
+#define MUTE_SWITCH_GPIO       8        /* D8,  INPUT_PULLUP, closed = LOW   */
+#define LED_RING_GPIO         20        /* D7 -> WS2812B DI                  */
+#define LED_RING_COUNT        24
 
 /* ---- Floor-control / jitter timing (match app.py) ---------------------- */
 #define CLAIM_COUNT         3
@@ -52,5 +56,9 @@
 #define RX_TIMEOUT_MS       750
 #define JITTER_PREBUFFER    4           /* 80 ms before playout begins       */
 #define REORDER_WINDOW      4
+#define BUSY_BUFFER_MS      500
+#define BUSY_BUFFER_FRAMES  (BUSY_BUFFER_MS / 20)
+#define PEER_HELLO_MS       3000
+#define PEER_EXPIRE_MS      10000
 
 #endif /* INTERCOM_CONFIG_H */

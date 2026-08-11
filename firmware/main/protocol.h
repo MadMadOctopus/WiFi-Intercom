@@ -18,10 +18,17 @@
 #define PROTO_HEADER_LEN 32
 
 /* Packet types. */
-#define PKT_CLAIM 1
-#define PKT_BUSY  2
-#define PKT_AUDIO 3
-#define PKT_END   4
+#define PKT_CLAIM        1
+#define PKT_BUSY         2
+#define PKT_AUDIO        3
+#define PKT_END          4
+#define PKT_HELLO        5
+#define PKT_HEARTBEAT    6
+#define PKT_CONFIG_GET   7
+#define PKT_CONFIG_SET   8
+#define PKT_CONFIG_REPLY 9
+
+#define PROTO_FLAG_DIRECTED 0x01u
 
 typedef struct {
     uint8_t  type;
@@ -39,8 +46,9 @@ typedef struct {
  * Serialise a packet into `buf` (must hold PROTO_HEADER_LEN + payload_len).
  * Returns the total number of bytes written.
  */
-size_t protocol_pack(uint8_t *buf, uint8_t type, uint32_t mesh_id,
-                     uint32_t sender_id, uint32_t session_id, uint32_t sequence,
+size_t protocol_pack(uint8_t *buf, uint8_t type, uint8_t flags,
+                     uint32_t mesh_id, uint32_t sender_id,
+                     uint32_t session_id, uint32_t sequence,
                      uint32_t timestamp_ms, const uint8_t *payload,
                      uint16_t payload_len);
 

@@ -95,6 +95,9 @@ class AnimationEngine {
   }
   void stopSpeaking(uint32_t now) { beginFadeOut(now); }
 
+  // Two short red fade-in/fade-out pulses for a rejected PTT attempt.
+  void startError(uint32_t now) { start(Mode::Error, now, 0); }
+
   // Clearly named aliases for the current single-button demonstration UI.
   void startMutePreview(uint8_t cycles, uint32_t now) { startMute(cycles, now); }
   void startSpeakingPreview(uint8_t cycles, uint32_t now) {
@@ -123,6 +126,9 @@ class AnimationEngine {
       case Mode::Speaking:
         updateBreathing(now, elapsed, speakingColour_, true);
         break;
+      case Mode::Error:
+        updateError(now, elapsed);
+        break;
       case Mode::FadeOut:
         updateFadeOut(now, elapsed);
         break;
@@ -132,7 +138,7 @@ class AnimationEngine {
   }
 
  private:
-  enum class Mode : uint8_t { Startup, Idle, Talk, Mute, Speaking, FadeOut };
+  enum class Mode : uint8_t { Startup, Idle, Talk, Mute, Speaking, Error, FadeOut };
 
   static constexpr uint16_t kFrameIntervalMs = 20;
   static constexpr uint16_t kStartupMs = 2000;
@@ -140,6 +146,7 @@ class AnimationEngine {
   static constexpr uint16_t kShadowFadeInMs = 700;
   static constexpr uint16_t kRotationMs = 5000;
   static constexpr uint16_t kBreathMs = 2000;
+  static constexpr uint16_t kErrorFadeMs = 180;
   static constexpr uint8_t kMuteBreathPeak = 72;  // About 28% brightness.
 
   RingOutput& ring_;
@@ -257,6 +264,20 @@ class AnimationEngine {
     const uint8_t brightness = scale8(fadeOutStartBrightness_,
                                       255 - linear(elapsed, kFadeMs));
     renderSolid(fadeOutColour_, brightness);
+  }
+
+  void updateError(uint32_t now, uint32_t elapsed) {
+    if (!shouldRender(now)) return;
+    const uint32_t pulseMs = uint32_t(kErrorFadeMs) * 2;
+    if (elapsed >= pulseMs * 2) {
+      startIdle(now);
+      return;
+    }
+    const uint32_t inPulse = elapsed % pulseMs;
+    const uint8_t brightness = inPulse < kErrorFadeMs
+        ? linear(inPulse, kErrorFadeMs)
+        : 255 - linear(inPulse - kErrorFadeMs, kErrorFadeMs);
+    renderSolid(defaultMuteColour(), brightness);
   }
 
   void renderStartup(uint32_t elapsed) {

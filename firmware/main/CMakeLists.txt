@@ -2,10 +2,16 @@ idf_component_register(
     SRCS
         "app_main.c"
         "adpcm.c"
+        "device_config.c"
         "protocol.c"
+        "ring_controller.cpp"
+        "usb_control.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver          # gpio + i2s_std (umbrella component, ESP-IDF 5.0-5.2)
+        esp_driver_rmt
+        esp_driver_usb_serial_jtag
+        json
         esp_adc         # adc_continuous
         esp_wifi
         esp_netif

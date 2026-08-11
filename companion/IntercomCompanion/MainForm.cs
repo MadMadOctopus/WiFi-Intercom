@@ -17,6 +17,13 @@ internal sealed class MainForm : Form
     private readonly ComboBox recordingDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox playbackDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly Button applyAudioDevices = new() { Text = "Apply audio devices", AutoSize = true };
+    private readonly ComboBox usbPort = new() { Width = 90, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly Button refreshUsbPorts = new() { Text = "Refresh ports", AutoSize = true };
+    private readonly TextBox usbSsid = new() { Width = 150, MaxLength = 32 };
+    private readonly TextBox usbPassword = new() { Width = 150, MaxLength = 64, UseSystemPasswordChar = true };
+    private readonly Button getUsbConfig = new() { Text = "Read USB config", AutoSize = true };
+    private readonly Button applyUsbWifi = new() { Text = "Apply Wi-Fi over USB", AutoSize = true };
+    private readonly Label usbStatus = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label statusLabel = new()
     {
@@ -127,7 +134,16 @@ internal sealed class MainForm : Form
             new Label { Text = "Playback", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, playbackDevice,
             applyAudioDevices]);
         applyAudioDevices.Click += (_, _) => ApplyAudioDeviceSelection();
-        top.Controls.AddRange([title, identityLabel, aliasRow, audioRow, networkLabel, statusLabel, pttPanel]);
+        var usbRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        usbRow.Controls.AddRange([
+            new Label { Text = "USB port", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, usbPort, refreshUsbPorts,
+            new Label { Text = "Wi-Fi SSID", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, usbSsid,
+            new Label { Text = "Password", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, usbPassword,
+            getUsbConfig, applyUsbWifi]);
+        refreshUsbPorts.Click += (_, _) => RefreshUsbPorts();
+        getUsbConfig.Click += async (_, _) => await ReadUsbConfigurationAsync();
+        applyUsbWifi.Click += async (_, _) => await ApplyUsbWifiAsync();
+        top.Controls.AddRange([title, identityLabel, aliasRow, audioRow, usbRow, usbStatus, networkLabel, statusLabel, pttPanel]);
         Controls.Add(body);
         Controls.Add(top);
 
@@ -151,6 +167,7 @@ internal sealed class MainForm : Form
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
             PopulateAudioDevices();
+            RefreshUsbPorts();
             StartAudioEngine();
             statusLabel.Text = "Idle — ready to receive";
             broadcast.Enabled = reply.Enabled = true;
@@ -367,6 +384,78 @@ internal sealed class MainForm : Form
             statusLabel.Text = $"Audio device change failed: {exception.Message}";
             statusLabel.ForeColor = Color.Firebrick;
         }
+    }
+
+    private void RefreshUsbPorts()
+    {
+        var current = usbPort.SelectedItem as string;
+        var ports = UsbConfigurationClient.GetPortNames();
+        usbPort.Items.Clear();
+        usbPort.Items.AddRange(ports.Cast<object>().ToArray());
+        usbPort.SelectedItem = ports.Contains(current, StringComparer.OrdinalIgnoreCase) ? current : ports.FirstOrDefault();
+        usbStatus.Text = ports.Count == 0
+            ? "USB provisioning: no serial ports found."
+            : "USB provisioning: password stays on this PC and is never saved by the companion.";
+    }
+
+    private async Task ReadUsbConfigurationAsync()
+    {
+        var port = usbPort.SelectedItem as string;
+        if (string.IsNullOrWhiteSpace(port))
+        {
+            usbStatus.Text = "Choose the device's USB serial port first.";
+            return;
+        }
+        SetUsbControlsEnabled(false);
+        usbStatus.Text = $"Reading configuration from {port}…";
+        try
+        {
+            var configuration = await UsbConfigurationClient.GetConfigurationAsync(port);
+            usbSsid.Text = configuration.Ssid == "YOUR_WIFI_SSID" ? "" : configuration.Ssid;
+            usbPassword.Clear();
+            usbStatus.Text = $"Read {port}: {configuration.Alias} ({configuration.DeviceId:x8}). Passwords are never read back.";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TimeoutException)
+        {
+            usbStatus.Text = $"USB read failed: {exception.Message}";
+        }
+        finally
+        {
+            SetUsbControlsEnabled(true);
+        }
+    }
+
+    private async Task ApplyUsbWifiAsync()
+    {
+        var port = usbPort.SelectedItem as string;
+        var ssid = usbSsid.Text.Trim();
+        if (string.IsNullOrWhiteSpace(port) || string.IsNullOrWhiteSpace(ssid))
+        {
+            usbStatus.Text = "Choose a USB port and enter the Wi-Fi SSID.";
+            return;
+        }
+        SetUsbControlsEnabled(false);
+        usbStatus.Text = $"Writing Wi-Fi configuration to {port}…";
+        try
+        {
+            var configuration = await UsbConfigurationClient.SetWifiAsync(port, ssid, usbPassword.Text);
+            usbPassword.Clear();
+            usbStatus.Text = $"Wi-Fi saved for {configuration.Alias}. The device is rebooting onto the network…";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TimeoutException)
+        {
+            usbStatus.Text = $"USB update failed: {exception.Message}";
+        }
+        finally
+        {
+            SetUsbControlsEnabled(true);
+        }
+    }
+
+    private void SetUsbControlsEnabled(bool enabled)
+    {
+        usbPort.Enabled = refreshUsbPorts.Enabled = usbSsid.Enabled = usbPassword.Enabled =
+            getUsbConfig.Enabled = applyUsbWifi.Enabled = enabled;
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)

@@ -1,5 +1,6 @@
 using IntercomCompanion.Core;
 using System.Net.Sockets;
+using IntercomCompanion.Audio;
 
 namespace IntercomCompanion;
 
@@ -8,6 +9,8 @@ internal sealed class MainForm : Form
 {
     private readonly CompanionSettings settings = CompanionSettings.Load();
     private IntercomNode? node;
+    private AudioEngine? audio;
+    private ReceiveSession? receiveSession;
     private readonly Label identityLabel = new() { AutoSize = true };
     private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label statusLabel = new()
@@ -116,7 +119,14 @@ internal sealed class MainForm : Form
             node.Diagnostic += message => PostToUi(() => networkLabel.Text = $"Discovery: {message}");
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
-            statusLabel.Text = "Ready — audio starting next";
+            audio = new AudioEngine();
+            audio.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
+            audio.Start();
+            receiveSession = new ReceiveSession(node, audio);
+            receiveSession.StateChanged += sessionState => PostToUi(() => ShowIntercomState(sessionState));
+            receiveSession.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
+            receiveSession.Start();
+            statusLabel.Text = "Idle — ready to receive";
             refreshTimer.Start();
         }
         catch (SocketException exception)
@@ -186,9 +196,17 @@ internal sealed class MainForm : Form
             BeginInvoke(action);
     }
 
+    private void ShowIntercomState(IntercomState sessionState)
+    {
+        statusLabel.Text = sessionState == IntercomState.Receiving ? "Receiving" : "Idle — ready to receive";
+        statusLabel.ForeColor = sessionState == IntercomState.Receiving ? Color.FromArgb(21, 101, 192) : Color.DimGray;
+    }
+
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
         refreshTimer.Stop();
+        if (receiveSession is not null) receiveSession.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        audio?.Dispose();
         if (node is not null) node.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 

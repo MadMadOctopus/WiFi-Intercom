@@ -6,6 +6,7 @@ using NAudio.Wave;
 namespace IntercomCompanion.Core;
 
 internal enum IntercomState { Idle, Receiving }
+internal sealed record ReceiveStatistics(long AudioPackets, long DecodedFrames, long PlayedFrames, long ConcealedFrames);
 
 /// <summary>
 /// Receive-only half of the floor state machine. TX is added separately once
@@ -33,6 +34,10 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private bool ending;
     private int drainFrames;
     private WaveFileWriter? recording;
+    private long audioPacketCount;
+    private long decodedFrameCount;
+    private long playedFrameCount;
+    private long concealedFrameCount;
 
     public ReceiveSession(IntercomNode node, AudioEngine audio)
     {
@@ -43,6 +48,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     public IntercomState State { get { lock (gate) return state; } }
     public Peer? LastTalker { get; private set; }
+    public ReceiveStatistics Statistics => new(Interlocked.Read(ref audioPacketCount),
+        Interlocked.Read(ref decodedFrameCount), Interlocked.Read(ref playedFrameCount),
+        Interlocked.Read(ref concealedFrameCount));
     public event Action<IntercomState>? StateChanged;
     public event Action<string>? Diagnostic;
 
@@ -67,6 +75,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         {
             // Do not decode under the UDP receive loop. A congested app should
             // drop only stale audio, never discovery/control packets.
+            Interlocked.Increment(ref audioPacketCount);
             audioPackets.Writer.TryWrite(eventArgs);
             return;
         }
@@ -91,6 +100,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
             {
                 var packet = eventArgs.Packet;
                 if (!ImaAdpcm.TryDecode(packet.Payload, out var pcm) || pcm is null) continue;
+                Interlocked.Increment(ref decodedFrameCount);
                 lock (gate)
                 {
                     if (state == IntercomState.Idle) BeginLocked(packet, eventArgs.Endpoint);
@@ -126,6 +136,8 @@ internal sealed class ReceiveSession : IAsyncDisposable
                         if (ending && --drainFrames <= 0) finish = true;
                     }
                     if (realAudio && pcm is not null) WriteRecordingLocked(pcm);
+                    if (realAudio) Interlocked.Increment(ref playedFrameCount);
+                    else if (pcm is not null) Interlocked.Increment(ref concealedFrameCount);
                     if (finish) FinishLocked();
                 }
                 if (pcm is not null && !finish) audio.EnqueuePlayback(pcm);
@@ -143,6 +155,10 @@ internal sealed class ReceiveSession : IAsyncDisposable
         drainFrames = 0;
         jitter.Reset();
         audio.ClearPlayback();
+        Interlocked.Exchange(ref audioPacketCount, 0);
+        Interlocked.Exchange(ref decodedFrameCount, 0);
+        Interlocked.Exchange(ref playedFrameCount, 0);
+        Interlocked.Exchange(ref concealedFrameCount, 0);
         Directory.CreateDirectory(CompanionSettings.RecordingsDirectory);
         var name = $"{DateTime.Now:yyyyMMdd-HHmmss}-{senderId:x8}-{sessionId:x8}.wav";
         recording = new WaveFileWriter(Path.Combine(CompanionSettings.RecordingsDirectory, name),

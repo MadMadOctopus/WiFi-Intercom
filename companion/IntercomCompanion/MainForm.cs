@@ -121,7 +121,7 @@ internal sealed class MainForm : Form
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
             audio = new AudioEngine();
             audio.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
-            audio.Start();
+            audio.StartPlayback();
             receiveSession = new ReceiveSession(node, audio);
             receiveSession.StateChanged += sessionState => PostToUi(() => ShowIntercomState(sessionState));
             receiveSession.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
@@ -155,6 +155,11 @@ internal sealed class MainForm : Form
             if (peer.NodeId == selectedId) item.Selected = true;
         }
         devices.EndUpdate();
+        if (receiveSession?.State == IntercomState.Receiving && audio is not null)
+        {
+            var stats = receiveSession.Statistics;
+            statusLabel.Text = $"Receiving — UDP {stats.AudioPackets}, decoded {stats.DecodedFrames}, played {stats.PlayedFrames}, PLC {stats.ConcealedFrames}, output {audio.BufferedMilliseconds} ms";
+        }
     }
 
     private Peer? SelectedPeer => devices.SelectedItems.Count == 1

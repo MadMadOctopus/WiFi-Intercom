@@ -1,0 +1,20 @@
+# Sensible defaults for the intercom firmware. Target: esp32c3.
+# These are applied on a fresh `idf.py build`; delete sdkconfig to regenerate.
+
+# --- Target ---
+CONFIG_IDF_TARGET="esp32c3"
+
+# --- Wi-Fi: disable power save for low latency (also forced in code) ---
+CONFIG_ESP_WIFI_POWER_SAVE_NONE=y
+
+# --- FreeRTOS tick at 1 kHz gives us clean 20 ms scheduling ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- Main task stack a little larger; we spawn our own tasks anyway ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# --- Log level: info over USB serial ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# --- Bump default UDP/LWIP buffers slightly for smoother audio ---
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16

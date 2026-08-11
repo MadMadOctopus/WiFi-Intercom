@@ -1,0 +1,17 @@
+# ESP-IDF generated files
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Local companion-app artefacts
+pc_app/.venv/
+pc_app/recordings/*.wav
+
+# IDE and OS files
+.vs/
+.vscode/
+bin/
+obj/
+*.user
+*.suo
+.DS_Store

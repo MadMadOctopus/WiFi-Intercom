@@ -2,6 +2,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     RING_IDLE,
     RING_TALK_BROADCAST,
@@ -15,3 +19,6 @@ void ring_controller_init(uint8_t gpio, uint8_t count, uint8_t brightness);
 void ring_controller_set(ring_mode_t mode);
 void ring_controller_update(uint32_t now_ms);
 
+#ifdef __cplusplus
+}
+#endif

@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "driver/usb_serial_jtag.h"
 #include "cJSON.h"
+#include "esp_system.h"
 
 static device_config_t *s_config;
 static SemaphoreHandle_t s_lock;
@@ -53,7 +54,13 @@ static void usb_task(void *arg)
             strncat(response, "\n", sizeof(response) - strlen(response) - 1);
             usb_serial_jtag_write_bytes(response, strlen(response), pdMS_TO_TICKS(100));
             used = 0;
-            if (wifi_changed) vTaskDelay(pdMS_TO_TICKS(500));
+            if (wifi_changed) {
+                /* A changed SSID/password is not live in esp_wifi. Ensure the
+                 * companion receives its acknowledgement before rebooting. */
+                usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(250));
+                vTaskDelay(pdMS_TO_TICKS(250));
+                esp_restart();
+            }
         }
     }
 }

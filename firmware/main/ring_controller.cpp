@@ -37,8 +37,8 @@ size_t encode(rmt_encoder_t *encoder, rmt_channel_handle_t channel,
   }
   if (self->state == 1) {
     encoded += self->copy->encode(self->copy, channel, &self->reset, sizeof(self->reset), &session);
-    if (session & RMT_ENCODING_COMPLETE) { self->state = 0; state |= RMT_ENCODING_COMPLETE; }
-    if (session & RMT_ENCODING_MEM_FULL) state |= RMT_ENCODING_MEM_FULL;
+    if (session & RMT_ENCODING_COMPLETE) { self->state = 0; state = static_cast<rmt_encode_state_t>(state | RMT_ENCODING_COMPLETE); }
+    if (session & RMT_ENCODING_MEM_FULL) state = static_cast<rmt_encode_state_t>(state | RMT_ENCODING_MEM_FULL);
   }
   *result = state;
   return encoded;
@@ -67,8 +67,14 @@ esp_err_t make_encoder(rmt_encoder_handle_t *out) {
   encoder->base.reset = reset;
   encoder->base.del = destroy;
   rmt_bytes_encoder_config_t bytes{};
-  bytes.bit0 = {.level0 = 1, .duration0 = 3, .level1 = 0, .duration1 = 9};
-  bytes.bit1 = {.level0 = 1, .duration0 = 9, .level1 = 0, .duration1 = 3};
+  bytes.bit0.level0 = 1;
+  bytes.bit0.duration0 = 3;
+  bytes.bit0.level1 = 0;
+  bytes.bit0.duration1 = 9;
+  bytes.bit1.level0 = 1;
+  bytes.bit1.duration0 = 9;
+  bytes.bit1.level1 = 0;
+  bytes.bit1.duration1 = 3;
   bytes.flags.msb_first = 1;
   esp_err_t err = rmt_new_bytes_encoder(&bytes, &encoder->bytes);
   if (err == ESP_OK) {
@@ -76,7 +82,10 @@ esp_err_t make_encoder(rmt_encoder_handle_t *out) {
     err = rmt_new_copy_encoder(&copy, &encoder->copy);
   }
   if (err != ESP_OK) { destroy(&encoder->base); return err; }
-  encoder->reset = {.level0 = 0, .duration0 = 250, .level1 = 0, .duration1 = 250};
+  encoder->reset.level0 = 0;
+  encoder->reset.duration0 = 250;
+  encoder->reset.level1 = 0;
+  encoder->reset.duration1 = 250;
   *out = &encoder->base;
   return ESP_OK;
 }

@@ -39,6 +39,7 @@ internal sealed class MainForm : Form
     private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
     private bool spaceHeld;
+    private uint? pendingConfigurationNodeId;
 
     public MainForm()
     {
@@ -77,12 +78,7 @@ internal sealed class MainForm : Form
         devices.Columns.Add("Device ID", 110);
         devices.Columns.Add("Address", 135);
         devices.Columns.Add("Last seen", 90);
-        devices.SelectedIndexChanged += async (_, _) =>
-        {
-            selected.Enabled = receiveSession is not null && SelectedPeer is not null;
-            getConfig.Enabled = SelectedPeer is not null;
-            await RequestSelectedConfigAsync();
-        };
+        devices.SelectedIndexChanged += (_, _) => OnSelectedDeviceChanged();
         var deviceGroup = new GroupBox { Text = "Active devices", Dock = DockStyle.Fill };
         deviceGroup.Controls.Add(devices);
 
@@ -193,6 +189,7 @@ internal sealed class MainForm : Form
     {
         var peer = SelectedPeer;
         if (node is null || peer is null) return;
+        pendingConfigurationNodeId = peer.NodeId;
         try { await node.RequestConfigurationAsync(peer); }
         catch (SocketException exception) { networkLabel.Text = $"Configuration request failed: {exception.SocketErrorCode}"; }
     }
@@ -209,14 +206,34 @@ internal sealed class MainForm : Form
 
     private void ShowConfiguration(DeviceConfigurationReceivedEventArgs eventArgs)
     {
-        if (SelectedPeer?.NodeId != eventArgs.NodeId) return;
-        alias.Enabled = volume.Enabled = brightness.Enabled = buttonsSwapped.Enabled = orientation.Enabled = true;
+        // A device can reply to another app's request or to an older selected
+        // row. Never overwrite in-progress edits unless this exact UI asked
+        // for the configuration of the still-selected peer.
+        if (pendingConfigurationNodeId != eventArgs.NodeId || SelectedPeer?.NodeId != eventArgs.NodeId) return;
+        pendingConfigurationNodeId = null;
+        SetConfigurationControlsEnabled(true);
         getConfig.Enabled = applyConfig.Enabled = true;
         alias.Text = eventArgs.Configuration.Alias;
         volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, (int)volume.Minimum, (int)volume.Maximum);
         brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, (int)brightness.Minimum, (int)brightness.Maximum);
         buttonsSwapped.Checked = eventArgs.Configuration.ButtonsSwapped;
         orientation.SelectedItem = eventArgs.Configuration.RingOrientation.ToString();
+    }
+
+    private void OnSelectedDeviceChanged()
+    {
+        pendingConfigurationNodeId = null;
+        selected.Enabled = receiveSession is not null && SelectedPeer is not null;
+        getConfig.Enabled = SelectedPeer is not null;
+        applyConfig.Enabled = false;
+        SetConfigurationControlsEnabled(false);
+        // Selecting a row intentionally does not perform network I/O. The user
+        // explicitly chooses Get configuration when they want to populate it.
+    }
+
+    private void SetConfigurationControlsEnabled(bool enabled)
+    {
+        alias.Enabled = volume.Enabled = brightness.Enabled = buttonsSwapped.Enabled = orientation.Enabled = enabled;
     }
 
     private void PostToUi(Action action)

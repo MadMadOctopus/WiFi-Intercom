@@ -835,6 +835,7 @@ static void ring_task(void *arg)
         uint32_t t = now_ms();
         xSemaphoreTake(g_lock, portMAX_DELAY);
         node_state_t state = g.state;
+        bool rx_audio_started = g.jb_started;
         bool directed = g.tx_directed;
         bool error = (int32_t)(g.error_until_ms - t) > 0;
         xSemaphoreGive(g_lock);
@@ -843,7 +844,10 @@ static void ring_task(void *arg)
         else if (button_pressed(MUTE_SWITCH_GPIO)) ring_controller_set(RING_MUTE);
         else if (state == ST_TALKING || state == ST_CLAIMING)
             ring_controller_set(directed ? RING_TALK_REPLY : RING_TALK_BROADCAST);
-        else if (state == ST_RECEIVING) ring_controller_set(RING_SPEAKING);
+        /* A CLAIM reserves the floor, but Speaking is strictly a playback
+         * indication. Configuration/control packets and empty claims must not
+         * cause the received-message animation. */
+        else if (state == ST_RECEIVING && rx_audio_started) ring_controller_set(RING_SPEAKING);
         else ring_controller_set(RING_IDLE);
         ring_controller_update(t);
         vTaskDelay(pdMS_TO_TICKS(20));

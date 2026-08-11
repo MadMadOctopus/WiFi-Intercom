@@ -12,6 +12,8 @@ internal sealed class MainForm : Form
     private AudioEngine? audio;
     private ReceiveSession? receiveSession;
     private readonly Label identityLabel = new() { AutoSize = true };
+    private readonly TextBox companionAlias = new() { Width = 180 };
+    private readonly Button saveCompanionAlias = new() { Text = "Save companion alias", AutoSize = true };
     private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label statusLabel = new()
     {
@@ -36,6 +38,7 @@ internal sealed class MainForm : Form
     private readonly Button getConfig = new() { Text = "Get configuration", Enabled = false, AutoSize = true };
     private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
+    private bool spaceHeld;
 
     public MainForm()
     {
@@ -51,10 +54,18 @@ internal sealed class MainForm : Form
             Font = new Font("Segoe UI", 14, FontStyle.Bold),
             AutoSize = true,
         };
-        identityLabel.Text = $"Companion: {settings.Alias}  ({settings.NodeId:x8})";
+        identityLabel.Text = $"Companion ID: {settings.NodeId:x8}";
+        companionAlias.Text = settings.Alias;
         networkLabel.Text = "Discovery: starting…";
 
         broadcast.Enabled = reply.Enabled = selected.Enabled = false;
+        BindPtt(broadcast, () => receiveSession?.PressBroadcast());
+        BindPtt(reply, () => receiveSession?.PressReply());
+        BindPtt(selected, () =>
+        {
+            var peer = SelectedPeer;
+            if (peer is not null) receiveSession?.PressSelected(peer);
+        });
         var pttPanel = new FlowLayoutPanel
         {
             AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
@@ -66,7 +77,12 @@ internal sealed class MainForm : Form
         devices.Columns.Add("Device ID", 110);
         devices.Columns.Add("Address", 135);
         devices.Columns.Add("Last seen", 90);
-        devices.SelectedIndexChanged += async (_, _) => await RequestSelectedConfigAsync();
+        devices.SelectedIndexChanged += async (_, _) =>
+        {
+            selected.Enabled = receiveSession is not null && SelectedPeer is not null;
+            getConfig.Enabled = SelectedPeer is not null;
+            await RequestSelectedConfigAsync();
+        };
         var deviceGroup = new GroupBox { Text = "Active devices", Dock = DockStyle.Fill };
         deviceGroup.Controls.Add(devices);
 
@@ -99,13 +115,19 @@ internal sealed class MainForm : Form
             AutoSize = true, FlowDirection = FlowDirection.TopDown,
             WrapContents = false, Dock = DockStyle.Top, Padding = new Padding(12, 12, 12, 0),
         };
-        top.Controls.AddRange([title, identityLabel, networkLabel, statusLabel, pttPanel]);
+        var aliasRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        aliasRow.Controls.AddRange([new Label { Text = "Companion alias", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, companionAlias, saveCompanionAlias]);
+        saveCompanionAlias.Click += (_, _) => SaveCompanionAlias();
+        top.Controls.AddRange([title, identityLabel, aliasRow, networkLabel, statusLabel, pttPanel]);
         Controls.Add(body);
         Controls.Add(top);
 
         Shown += OnShown;
         FormClosing += OnFormClosing;
         refreshTimer.Tick += (_, _) => RefreshPeers();
+        KeyPreview = true;
+        KeyDown += OnKeyDown;
+        KeyUp += OnKeyUp;
     }
 
     private void OnShown(object? sender, EventArgs e)
@@ -127,6 +149,8 @@ internal sealed class MainForm : Form
             receiveSession.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
             receiveSession.Start();
             statusLabel.Text = "Idle — ready to receive";
+            broadcast.Enabled = reply.Enabled = true;
+            selected.Enabled = SelectedPeer is not null;
             refreshTimer.Start();
         }
         catch (SocketException exception)
@@ -203,8 +227,56 @@ internal sealed class MainForm : Form
 
     private void ShowIntercomState(IntercomState sessionState)
     {
-        statusLabel.Text = sessionState == IntercomState.Receiving ? "Receiving" : "Idle — ready to receive";
-        statusLabel.ForeColor = sessionState == IntercomState.Receiving ? Color.FromArgb(21, 101, 192) : Color.DimGray;
+        (statusLabel.Text, statusLabel.ForeColor) = sessionState switch
+        {
+            IntercomState.Claiming => ("Claiming floor…", Color.FromArgb(249, 168, 37)),
+            IntercomState.Talking => ("Talking", Color.FromArgb(46, 125, 50)),
+            IntercomState.Receiving => ("Receiving", Color.FromArgb(21, 101, 192)),
+            IntercomState.WaitingForFloor => ("Floor occupied — buffering up to 500 ms", Color.FromArgb(249, 168, 37)),
+            _ => ("Idle — ready to receive", Color.DimGray),
+        };
+    }
+
+    private void BindPtt(Button button, Action press)
+    {
+        button.MouseDown += (_, eventArgs) =>
+        {
+            if (eventArgs.Button != MouseButtons.Left) return;
+            button.Capture = true;
+            press();
+        };
+        button.MouseUp += (_, eventArgs) =>
+        {
+            if (eventArgs.Button == MouseButtons.Left) receiveSession?.ReleasePtt();
+        };
+        button.MouseCaptureChanged += (_, _) =>
+        {
+            if (!button.Capture) receiveSession?.ReleasePtt();
+        };
+    }
+
+    private void OnKeyDown(object? sender, KeyEventArgs eventArgs)
+    {
+        if (eventArgs.KeyCode != Keys.Space || spaceHeld) return;
+        spaceHeld = true;
+        receiveSession?.PressBroadcast();
+        eventArgs.Handled = true;
+    }
+
+    private void OnKeyUp(object? sender, KeyEventArgs eventArgs)
+    {
+        if (eventArgs.KeyCode != Keys.Space) return;
+        spaceHeld = false;
+        receiveSession?.ReleasePtt();
+        eventArgs.Handled = true;
+    }
+
+    private void SaveCompanionAlias()
+    {
+        if (node is null) return;
+        node.SetAlias(companionAlias.Text);
+        companionAlias.Text = node.Alias;
+        identityLabel.Text = $"Companion ID: {node.NodeId:x8}";
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)

@@ -39,6 +39,13 @@ internal sealed class IntercomNode : IAsyncDisposable
     public string Alias => settings.Alias;
     public IReadOnlyCollection<Peer> Peers => peers.Values.ToArray();
 
+    /// <summary>Stable destination set for a single PTT session.</summary>
+    public IReadOnlyList<Peer> SnapshotActivePeers()
+    {
+        var expiry = DateTimeOffset.UtcNow - PeerLifetime;
+        return peers.Values.Where(peer => peer.LastSeen >= expiry).ToArray();
+    }
+
     public event EventHandler? PeersChanged;
     public event EventHandler<DeviceConfigurationReceivedEventArgs>? ConfigurationReceived;
     public event Action<string>? Diagnostic;
@@ -61,8 +68,8 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     public async Task RequestConfigurationAsync(Peer peer, CancellationToken cancellationToken = default)
     {
-        await SendDirectAsync(PacketType.ConfigGet, RandomSession(), 0,
-            Encoding.UTF8.GetBytes("{\"cmd\":\"get\"}"), peer.Endpoint, cancellationToken);
+        await SendToEndpointAsync(PacketType.ConfigGet, NewSessionId(), 0,
+            Encoding.UTF8.GetBytes("{\"cmd\":\"get\"}"), peer.Endpoint, cancellationToken: cancellationToken);
     }
 
     public async Task SetConfigurationAsync(Peer peer, DeviceConfiguration configuration,
@@ -77,8 +84,21 @@ internal sealed class IntercomNode : IAsyncDisposable
             buttons_swapped = configuration.ButtonsSwapped,
             ring_orientation = configuration.RingOrientation,
         });
-        await SendDirectAsync(PacketType.ConfigSet, RandomSession(), 0,
-            Encoding.UTF8.GetBytes(request), peer.Endpoint, cancellationToken);
+        await SendToEndpointAsync(PacketType.ConfigSet, NewSessionId(), 0,
+            Encoding.UTF8.GetBytes(request), peer.Endpoint, cancellationToken: cancellationToken);
+    }
+
+    public Task SendToEndpointAsync(PacketType type, uint session, uint sequence, byte[] payload,
+                                    IPEndPoint destination, byte flags = 0,
+                                    CancellationToken cancellationToken = default) =>
+        SendAsync(type, session, sequence, payload, destination, flags, cancellationToken);
+
+    public async Task SendToPeersAsync(PacketType type, uint session, uint sequence, byte[] payload,
+                                       IEnumerable<Peer> destinations, byte flags = 0,
+                                       CancellationToken cancellationToken = default)
+    {
+        foreach (var peer in destinations)
+            await SendAsync(type, session, sequence, payload, peer.Endpoint, flags, cancellationToken);
     }
 
     private async Task ReceiveLoopAsync()
@@ -168,23 +188,20 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     private Task SendHelloAsync(CancellationToken cancellationToken) => SendAsync(
         PacketType.Hello, 0, 0, Encoding.UTF8.GetBytes(Alias),
-        new IPEndPoint(MulticastGroup, Protocol.Port), cancellationToken);
-
-    private Task SendDirectAsync(PacketType type, uint session, uint sequence, byte[] payload,
-                                 IPEndPoint destination, CancellationToken cancellationToken) =>
-        SendAsync(type, session, sequence, payload, destination, cancellationToken);
+        new IPEndPoint(MulticastGroup, Protocol.Port), 0, cancellationToken);
 
     private async Task SendAsync(PacketType type, uint session, uint sequence, byte[] payload,
-                                 IPEndPoint destination, CancellationToken cancellationToken)
+                                 IPEndPoint destination, byte flags,
+                                 CancellationToken cancellationToken)
     {
-        var datagram = Protocol.Pack(NodeId, type, session, sequence, TimestampMs(), payload);
+        var datagram = Protocol.Pack(NodeId, type, session, sequence, TimestampMs(), payload, flags);
         await sendGate.WaitAsync(cancellationToken);
         try { await client.SendAsync(datagram, destination, cancellationToken); }
         finally { sendGate.Release(); }
     }
 
     private static uint TimestampMs() => unchecked((uint)Environment.TickCount64);
-    private static uint RandomSession()
+    public static uint NewSessionId()
     {
         var value = BitConverter.ToUInt32(Guid.NewGuid().ToByteArray());
         return value == 0 ? 1u : value;

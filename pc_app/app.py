@@ -64,8 +64,9 @@ RX_TIMEOUT_MS = 750           # release floor if remote silent this long
 JITTER_PREBUFFER = 4          # buffer 4 frames (80 ms) before playout
 REORDER_WINDOW = 4            # accept out-of-order frames within this window
 
-RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "recordings")
+APP_DATA_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.abspath(__file__)))
+RECORDINGS_DIR = os.path.join(APP_DATA_DIR, "recordings")
 
 # ---------------------------------------------------------------------------
 # UDP protocol - fixed 32-byte header, network byte order, packed explicitly.
@@ -708,6 +709,13 @@ class AudioEngine:
         self.output_device = output_device
         self.in_stream = None
         self.out_stream = None
+        # The PortAudio callback must never wait for the network thread or the
+        # jitter buffer lock.  A small producer/consumer FIFO decouples those
+        # schedules and absorbs a busy UI/GIL for several audio frames.
+        self.playback_fifo = queue.Queue(maxsize=16)
+        self.playback_running = threading.Event()
+        self.playback_thread = None
+        self.playback_underruns = 0
 
     def start(self):
         if sd is None:
@@ -716,14 +724,23 @@ class AudioEngine:
 
         self.in_stream = sd.InputStream(
             samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1,
-            dtype="int16", device=self.input_device, callback=self._on_input)
+            dtype="int16", device=self.input_device, latency="high",
+            callback=self._on_input)
         self.out_stream = sd.OutputStream(
             samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1,
-            dtype="int16", device=self.output_device, callback=self._on_output)
+            dtype="int16", device=self.output_device, latency="high",
+            callback=self._on_output)
+        self.playback_running.set()
+        self.playback_thread = threading.Thread(target=self._playback_producer,
+                                                daemon=True)
+        self.playback_thread.start()
         self.in_stream.start()
         self.out_stream.start()
 
     def stop(self):
+        self.playback_running.clear()
+        if self.playback_thread is not None:
+            self.playback_thread.join(timeout=0.25)
         for s in (self.in_stream, self.out_stream):
             if s is not None:
                 try:
@@ -737,8 +754,44 @@ class AudioEngine:
         self.node.capture_frame(indata[:, 0].copy())
 
     def _on_output(self, outdata, frames, time_info, status):
-        pcm = self.node.playout_frame()
-        outdata[:, 0] = pcm
+        try:
+            pcm = self.playback_fifo.get_nowait()
+        except queue.Empty:
+            self.playback_underruns += 1
+            outdata.fill(0)
+            return
+        # blocksize is fixed at one 20 ms protocol frame. Keeping this
+        # defensive makes a device/backend renegotiation fail silent rather
+        # than throwing inside PortAudio's real-time callback.
+        if frames == FRAME_SAMPLES:
+            outdata[:, 0] = pcm
+        else:
+            outdata.fill(0)
+            self.playback_underruns += 1
+
+    def _playback_producer(self):
+        """Clock jitter-buffer playout outside the PortAudio callback."""
+        next_frame = time.monotonic()
+        while self.playback_running.is_set():
+            pcm = self.node.playout_frame()
+            try:
+                self.playback_fifo.put_nowait(pcm)
+            except queue.Full:
+                # Output is temporarily stalled. Discard stale audio rather
+                # than adding latency to the live intercom stream.
+                try:
+                    self.playback_fifo.get_nowait()
+                    self.playback_fifo.put_nowait(pcm)
+                except queue.Empty:
+                    pass
+            next_frame += FRAME_MS / 1000.0
+            wait = next_frame - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            else:
+                # Do not let a short scheduler stall create an ever-growing
+                # catch-up loop; resume from the next real-time frame.
+                next_frame = time.monotonic()
 
 
 # ---------------------------------------------------------------------------

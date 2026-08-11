@@ -80,13 +80,19 @@ def main():
     sock.settimeout(0.25)
     deadline = time.monotonic() + args.seconds
     last_hello = 0.0
+    next_report = 0.0
     frames, sequences, samples = 0, [], []
+    print(f"Listening for device {device_id:08x} for {args.seconds:.0f} seconds...", flush=True)
     while time.monotonic() < deadline:
         now = time.monotonic()
         if now - last_hello >= 1.0:
             sock.sendto(make_packet(TYPE_HELLO, payload=b"audio-capture"),
                         (MULTICAST_GROUP, UDP_PORT))
             last_hello = now
+        if now >= next_report:
+            remaining = max(0, int(deadline - now))
+            print(f"  {remaining:2d}s remaining — received {frames} audio frames", flush=True)
+            next_report = now + 1.0
         try:
             packet, _address = sock.recvfrom(2048)
         except socket.timeout:

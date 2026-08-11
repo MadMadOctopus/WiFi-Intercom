@@ -4,6 +4,7 @@ cd /d "%~dp0"
 echo.
 echo This records the exact UDP audio transmitted by Production XIAO.
 echo Close the Companion app first, then press any key to start a 30-second capture.
+echo The window will show a live received-frame count every second.
 pause >nul
 "C:\Users\anton\AppData\Local\Programs\Python\Python314\python.exe" "%~dp0capture_device_audio.py" --seconds 30 --output "%~dp0device-capture.wav"
 echo.

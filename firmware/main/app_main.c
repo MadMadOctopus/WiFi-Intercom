@@ -61,7 +61,7 @@ typedef struct { int16_t pcm[FRAME_SAMPLES]; } audio_frame_t;
 /* ---- floor-control states ---------------------------------------------- */
 typedef enum { ST_IDLE, ST_CLAIMING, ST_TALKING, ST_RECEIVING } node_state_t;
 
-#define PEER_CAP 8
+#define PEER_CAP 16
 typedef struct {
     uint32_t id;
     struct sockaddr_in address;
@@ -126,6 +126,7 @@ static struct {
     bool      jb_started;
     int16_t   jb_last[FRAME_SAMPLES];
     bool      jb_have_last;
+    int       jb_missing_polls;
 } g;
 
 static SemaphoreHandle_t g_lock;
@@ -209,11 +210,21 @@ static void jb_reset(void)
     g.jb_expected = 0;
     g.jb_started = false;
     g.jb_have_last = false;
+    g.jb_missing_polls = 0;
 }
 
 static void jb_push(uint32_t seq, const int16_t *pcm)
 {
     if (g.jb_started && seq < g.jb_expected) return;      /* too late */
+
+    /* A late I2S/DMA wake-up must not let a finite ring overwrite frames the
+     * playout side still expects. Rejoin close to the live edge instead. */
+    if (g.jb_started && seq - g.jb_expected >= JB_CAP) {
+        for (int i = 0; i < JB_CAP; ++i) g.slots[i].present = false;
+        g.jb_expected = seq - (JITTER_PREBUFFER - 1);
+        g.jb_missing_polls = 0;
+        ESP_LOGW(TAG, "RX jitter resynchronised at sequence %u", (unsigned)seq);
+    }
     jb_slot_t *s = &g.slots[seq % JB_CAP];
     if (s->present && s->seq == seq) return;              /* duplicate */
     s->present = true;
@@ -234,6 +245,7 @@ static void jb_push(uint32_t seq, const int16_t *pcm)
         if (cnt >= JITTER_PREBUFFER) {
             g.jb_started = true;
             g.jb_expected = minseq;
+            g.jb_missing_polls = 0;
         }
     }
 }
@@ -253,16 +265,41 @@ static bool jb_pop(int16_t *out)
         s->present = false;
         memcpy(g.jb_last, out, sizeof(int16_t) * FRAME_SAMPLES);
         g.jb_have_last = true;
+        g.jb_missing_polls = 0;
         real = true;
-    } else if (g.jb_have_last) {
+        g.jb_expected++;
+    } else {
+        /* Do not advance immediately on one missing frame. A normal Wi-Fi or
+         * task-scheduling delay used to make all later frames look late and
+         * produced permanent silence. If a future frame is already present,
+         * resynchronise to it; otherwise wait up to 80 ms before declaring a
+         * loss. This matches the companion's proven receiver behavior. */
+        bool have_future = false;
+        uint32_t next = 0;
+        for (int i = 0; i < JB_CAP; ++i) {
+            if (!g.slots[i].present) continue;
+            if (g.slots[i].seq > g.jb_expected &&
+                (!have_future || g.slots[i].seq < next)) {
+                next = g.slots[i].seq;
+                have_future = true;
+            }
+        }
+        if (have_future) {
+            g.jb_expected = next;
+            g.jb_missing_polls = 0;
+        } else if (++g.jb_missing_polls >= 4) {
+            g.jb_expected++;
+            g.jb_missing_polls = 0;
+        }
+    }
+    if (!real && g.jb_have_last) {
         /* packet-loss concealment: replay previous frame at half amplitude */
         for (int i = 0; i < FRAME_SAMPLES; ++i)
             g.jb_last[i] = (int16_t)(g.jb_last[i] / 2);
         memcpy(out, g.jb_last, sizeof(int16_t) * FRAME_SAMPLES);
-    } else {
+    } else if (!real) {
         memset(out, 0, sizeof(int16_t) * FRAME_SAMPLES);
     }
-    g.jb_expected++;
 
     /* drop anything now hopelessly late */
     for (int i = 0; i < JB_CAP; ++i) {
@@ -614,7 +651,12 @@ static void playback_task(void *arg)
 {
     static int16_t mono[FRAME_SAMPLES];
     bool i2s_active = false;
+    TickType_t next_tick = xTaskGetTickCount();
     while (1) {
+        /* i2s_channel_write can accept several DMA frames immediately. The
+         * jitter buffer itself must therefore enforce the 20 ms media clock;
+         * otherwise its expected sequence races ahead of the UDP stream. */
+        vTaskDelayUntil(&next_tick, pdMS_TO_TICKS(20));
         xSemaphoreTake(g_lock, portMAX_DELAY);
         node_state_t st = g.state;
         bool local_floor = (st == ST_CLAIMING || st == ST_TALKING);
@@ -658,10 +700,7 @@ static void playback_task(void *arg)
             ESP_ERROR_CHECK(i2s_channel_disable(i2s_tx));
             i2s_active = false;
         }
-        if (!should_output) {
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
-        }
+        if (!should_output) continue;
 
         /* NVS-configured digital playback volume (/256) with safe clipping. */
         uint16_t volume = g_config.speaker_volume;

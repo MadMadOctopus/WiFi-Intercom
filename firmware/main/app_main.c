@@ -588,8 +588,8 @@ static void playback_task(void *arg)
         }
         xSemaphoreGive(g_lock);
 
-        /* Half duplex and the hardware mute switch both silence only I2S.
-         * The node continues participating in floor control and discovery. */
+        /* Half duplex and the hardware mute switch silence I2S playback.
+         * Ring noise is handled separately at the LED power/data path. */
         if (local_floor || button_pressed(MUTE_SWITCH_GPIO))
             memset(mono, 0, sizeof(mono));
 

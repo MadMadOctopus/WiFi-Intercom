@@ -37,7 +37,9 @@ static void make_defaults(device_config_t *out)
     strncpy(out->wifi_ssid, WIFI_SSID, WIFI_SSID_MAX);
     strncpy(out->wifi_password, WIFI_PASSWORD, WIFI_PASSWORD_MAX);
     out->speaker_volume = SPK_VOLUME;
-    out->led_brightness = 96;
+    /* A restrained default cuts WS2812 current transients that can otherwise
+     * bleed into the nearby class-D amplifier on USB-powered assemblies. */
+    out->led_brightness = 48;
 }
 
 void device_config_load(device_config_t *out)

@@ -40,6 +40,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
     private bool spaceHeld;
     private uint? pendingConfigurationNodeId;
+    private bool refreshingDeviceList;
 
     public MainForm()
     {
@@ -78,7 +79,10 @@ internal sealed class MainForm : Form
         devices.Columns.Add("Device ID", 110);
         devices.Columns.Add("Address", 135);
         devices.Columns.Add("Last seen", 90);
-        devices.SelectedIndexChanged += (_, _) => OnSelectedDeviceChanged();
+        devices.SelectedIndexChanged += (_, _) =>
+        {
+            if (!refreshingDeviceList) OnSelectedDeviceChanged();
+        };
         var deviceGroup = new GroupBox { Text = "Active devices", Dock = DockStyle.Fill };
         deviceGroup.Controls.Add(devices);
 
@@ -162,19 +166,28 @@ internal sealed class MainForm : Form
         if (node is null || IsDisposed) return;
         var selectedId = SelectedPeer?.NodeId;
         var peers = node.Peers.OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
-        devices.BeginUpdate();
-        devices.Items.Clear();
-        foreach (var peer in peers)
+        refreshingDeviceList = true;
+        try
         {
-            var age = DateTimeOffset.UtcNow - peer.LastSeen;
-            var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(), $"{Math.Max(0, age.TotalSeconds):0}s"])
+            devices.BeginUpdate();
+            devices.Items.Clear();
+            foreach (var peer in peers)
             {
-                Tag = peer
-            };
-            devices.Items.Add(item);
-            if (peer.NodeId == selectedId) item.Selected = true;
+                var age = DateTimeOffset.UtcNow - peer.LastSeen;
+                var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(), $"{Math.Max(0, age.TotalSeconds):0}s"])
+                {
+                    Tag = peer
+                };
+                devices.Items.Add(item);
+                if (peer.NodeId == selectedId) item.Selected = true;
+            }
+            devices.EndUpdate();
         }
-        devices.EndUpdate();
+        finally
+        {
+            refreshingDeviceList = false;
+        }
+        if (selectedId is not null && SelectedPeer is null) OnSelectedDeviceChanged();
         if (receiveSession?.State == IntercomState.Receiving && audio is not null)
         {
             var stats = receiveSession.Statistics;

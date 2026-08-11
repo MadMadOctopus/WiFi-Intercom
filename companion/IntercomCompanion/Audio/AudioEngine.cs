@@ -42,7 +42,10 @@ internal sealed class AudioEngine : IDisposable
         // Shared WASAPI hands format conversion and device clocking to the
         // Windows audio engine. The older waveOut path can be unreliable with
         // 16 kHz mono on some consumer output drivers.
-        speaker = new WasapiOut(AudioClientShareMode.Shared, useEventSync: true, latency: 120);
+        // Timed shared-mode rendering is intentionally used instead of the
+        // endpoint event callback. Some consumer drivers signal one primed
+        // buffer but do not continue signalling event-driven 16 kHz streams.
+        speaker = new WasapiOut(AudioClientShareMode.Shared, useEventSync: false, latency: 120);
         speaker.Init(output);
         speaker.PlaybackStopped += (_, eventArgs) =>
         {

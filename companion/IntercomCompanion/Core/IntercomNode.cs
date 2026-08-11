@@ -192,12 +192,18 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        stopping.Cancel();
-        client.Dispose();
+        Stop();
         var tasks = new[] { receiveTask, helloTask, expiryTask }.OfType<Task>();
         try { await Task.WhenAll(tasks); } catch (OperationCanceledException) { }
         sendGate.Dispose();
         stopping.Dispose();
+    }
+
+    /// <summary>Non-blocking shutdown for the WinForms UI thread.</summary>
+    public void Stop()
+    {
+        if (!stopping.IsCancellationRequested) stopping.Cancel();
+        client.Dispose();
     }
 }
 

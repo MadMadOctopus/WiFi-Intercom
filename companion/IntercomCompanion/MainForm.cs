@@ -210,9 +210,11 @@ internal sealed class MainForm : Form
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
         refreshTimer.Stop();
-        if (receiveSession is not null) receiveSession.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        // Never wait for a timer/socket/audio worker from the UI close path.
+        // Cancellation is enough; process shutdown cleans up background tasks.
+        receiveSession?.Stop();
         audio?.Dispose();
-        if (node is not null) node.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        node?.Stop();
     }
 
     private static Button CreatePttButton(string text, Color color) => new()

@@ -164,6 +164,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         recording = new WaveFileWriter(Path.Combine(CompanionSettings.RecordingsDirectory, name),
             new WaveFormat(AudioEngine.SampleRate, 16, 1));
         state = IntercomState.Receiving;
+        DiagnosticLog.Write($"rx begin sender={senderId:x8} session={sessionId:x8}");
         StateChanged?.Invoke(state);
         Diagnostic?.Invoke($"Receiving {senderId:x8}.");
     }
@@ -178,6 +179,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     private void FinishLocked()
     {
+        var stats = Statistics;
+        DiagnosticLog.Write($"rx finish sender={senderId:x8} session={sessionId:x8} " +
+                            $"udp={stats.AudioPackets} decoded={stats.DecodedFrames} played={stats.PlayedFrames} plc={stats.ConcealedFrames}");
         recording?.Dispose();
         recording = null;
         jitter.Reset();
@@ -190,12 +194,29 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        node.PacketReceived -= OnPacketReceived;
-        stopping.Cancel();
-        audioPackets.Writer.TryComplete();
+        Stop();
         var tasks = new[] { decodeTask, playbackTask }.OfType<Task>();
         try { await Task.WhenAll(tasks); } catch (OperationCanceledException) { }
         lock (gate) { recording?.Dispose(); recording = null; }
         stopping.Dispose();
+    }
+
+    /// <summary>Non-blocking shutdown for the WinForms UI thread.</summary>
+    public void Stop()
+    {
+        node.PacketReceived -= OnPacketReceived;
+        if (!stopping.IsCancellationRequested) stopping.Cancel();
+        audioPackets.Writer.TryComplete();
+        lock (gate)
+        {
+            if (state == IntercomState.Receiving)
+            {
+                var stats = Statistics;
+                DiagnosticLog.Write($"rx stopped sender={senderId:x8} session={sessionId:x8} " +
+                                    $"udp={stats.AudioPackets} decoded={stats.DecodedFrames} played={stats.PlayedFrames} plc={stats.ConcealedFrames}");
+            }
+            recording?.Dispose();
+            recording = null;
+        }
     }
 }

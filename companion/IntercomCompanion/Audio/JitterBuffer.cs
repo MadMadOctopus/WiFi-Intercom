@@ -9,6 +9,7 @@ internal sealed class JitterBuffer
     private uint expectedSequence;
     private bool started;
     private short[]? lastFrame;
+    private int missingPolls;
 
     public void Reset()
     {
@@ -18,6 +19,7 @@ internal sealed class JitterBuffer
             expectedSequence = 0;
             started = false;
             lastFrame = null;
+            missingPolls = 0;
         }
     }
 
@@ -31,6 +33,7 @@ internal sealed class JitterBuffer
             {
                 expectedSequence = frames.Keys.Min();
                 started = true;
+                missingPolls = 0;
             }
         }
     }
@@ -46,12 +49,30 @@ internal sealed class JitterBuffer
             {
                 expectedSequence++;
                 lastFrame = frame;
+                missingPolls = 0;
                 pcm = frame;
                 realAudio = true;
                 return true;
             }
 
-            expectedSequence++;
+            // A normal Windows scheduling hiccup can delay a packet by more
+            // than one 20 ms playout tick. Do not advance expectedSequence on
+            // the first miss: doing so made every subsequently arriving frame
+            // look late, turning a one-frame delay into permanent silence.
+            // If a later frame is already queued, resynchronise to it after a
+            // single PLC frame. With no queued future frame, allow 60 ms for
+            // the expected frame before treating it as genuinely lost.
+            if (frames.Count > 0)
+            {
+                var nextSequence = frames.Keys.Min();
+                if (nextSequence > expectedSequence)
+                    expectedSequence = nextSequence;
+            }
+            else if (++missingPolls >= 4)
+            {
+                expectedSequence++;
+                missingPolls = 0;
+            }
             foreach (var stale in frames.Keys.Where(key => key + ReorderWindow < expectedSequence).ToArray())
                 frames.Remove(stale);
             if (lastFrame is null)

@@ -158,7 +158,7 @@ internal sealed class MainForm : Form
         if (receiveSession?.State == IntercomState.Receiving && audio is not null)
         {
             var stats = receiveSession.Statistics;
-            statusLabel.Text = $"Receiving — UDP {stats.AudioPackets}, decoded {stats.DecodedFrames}, played {stats.PlayedFrames}, PLC {stats.ConcealedFrames}, output {audio.BufferedMilliseconds} ms";
+            statusLabel.Text = $"Receiving — UDP {stats.AudioPackets}, decoded {stats.DecodedFrames}, played {stats.PlayedFrames}, PLC {stats.ConcealedFrames}, gaps {stats.SequenceGaps}, output {audio.BufferedMilliseconds} ms";
         }
     }
 

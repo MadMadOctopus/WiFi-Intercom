@@ -6,7 +6,8 @@ using NAudio.Wave;
 namespace IntercomCompanion.Core;
 
 internal enum IntercomState { Idle, Receiving }
-internal sealed record ReceiveStatistics(long AudioPackets, long DecodedFrames, long PlayedFrames, long ConcealedFrames);
+internal sealed record ReceiveStatistics(long AudioPackets, long DecodedFrames, long PlayedFrames,
+                                         long ConcealedFrames, long SequenceGaps);
 
 /// <summary>
 /// Receive-only half of the floor state machine. TX is added separately once
@@ -38,6 +39,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private long decodedFrameCount;
     private long playedFrameCount;
     private long concealedFrameCount;
+    private long sequenceGapCount;
+    private uint previousSequence;
+    private bool havePreviousSequence;
 
     public ReceiveSession(IntercomNode node, AudioEngine audio)
     {
@@ -50,7 +54,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     public Peer? LastTalker { get; private set; }
     public ReceiveStatistics Statistics => new(Interlocked.Read(ref audioPacketCount),
         Interlocked.Read(ref decodedFrameCount), Interlocked.Read(ref playedFrameCount),
-        Interlocked.Read(ref concealedFrameCount));
+        Interlocked.Read(ref concealedFrameCount), Interlocked.Read(ref sequenceGapCount));
     public event Action<IntercomState>? StateChanged;
     public event Action<string>? Diagnostic;
 
@@ -106,6 +110,10 @@ internal sealed class ReceiveSession : IAsyncDisposable
                     if (state == IntercomState.Idle) BeginLocked(packet, eventArgs.Endpoint);
                     if (state != IntercomState.Receiving || packet.SenderId != senderId || packet.SessionId != sessionId)
                         continue;
+                    if (havePreviousSequence && packet.Sequence > previousSequence + 1)
+                        Interlocked.Add(ref sequenceGapCount, packet.Sequence - previousSequence - 1);
+                    previousSequence = packet.Sequence;
+                    havePreviousSequence = true;
                     lastAudioAt = DateTimeOffset.UtcNow;
                     LastTalker = new Peer(packet.SenderId, eventArgs.Endpoint,
                         node.Peers.FirstOrDefault(peer => peer.NodeId == packet.SenderId)?.Alias ?? $"Device {packet.SenderId:x8}",
@@ -159,6 +167,8 @@ internal sealed class ReceiveSession : IAsyncDisposable
         Interlocked.Exchange(ref decodedFrameCount, 0);
         Interlocked.Exchange(ref playedFrameCount, 0);
         Interlocked.Exchange(ref concealedFrameCount, 0);
+        Interlocked.Exchange(ref sequenceGapCount, 0);
+        havePreviousSequence = false;
         Directory.CreateDirectory(CompanionSettings.RecordingsDirectory);
         var name = $"{DateTime.Now:yyyyMMdd-HHmmss}-{senderId:x8}-{sessionId:x8}.wav";
         recording = new WaveFileWriter(Path.Combine(CompanionSettings.RecordingsDirectory, name),
@@ -181,7 +191,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     {
         var stats = Statistics;
         DiagnosticLog.Write($"rx finish sender={senderId:x8} session={sessionId:x8} " +
-                            $"udp={stats.AudioPackets} decoded={stats.DecodedFrames} played={stats.PlayedFrames} plc={stats.ConcealedFrames}");
+                            $"udp={stats.AudioPackets} decoded={stats.DecodedFrames} played={stats.PlayedFrames} plc={stats.ConcealedFrames} gaps={stats.SequenceGaps}");
         recording?.Dispose();
         recording = null;
         jitter.Reset();
@@ -213,7 +223,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
             {
                 var stats = Statistics;
                 DiagnosticLog.Write($"rx stopped sender={senderId:x8} session={sessionId:x8} " +
-                                    $"udp={stats.AudioPackets} decoded={stats.DecodedFrames} played={stats.PlayedFrames} plc={stats.ConcealedFrames}");
+                                    $"udp={stats.AudioPackets} decoded={stats.DecodedFrames} played={stats.PlayedFrames} plc={stats.ConcealedFrames} gaps={stats.SequenceGaps}");
             }
             recording?.Dispose();
             recording = null;

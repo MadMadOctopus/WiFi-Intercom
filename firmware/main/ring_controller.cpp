@@ -133,7 +133,7 @@ extern "C" void ring_controller_init(uint8_t gpio, uint8_t count, uint8_t bright
   ring.begin(gpio, count);
   animation = new voicering::AnimationEngine(ring);
   animation->setGlobalBrightness(brightness);
-  animation->startStartup(0);
+  animation->startStartup(static_cast<uint32_t>(esp_timer_get_time() / 1000));
 }
 
 extern "C" void ring_controller_set(ring_mode_t mode) {

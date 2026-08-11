@@ -421,8 +421,13 @@ static void tx_task(void *arg)
             xSemaphoreTake(g_lock, portMAX_DELAY);
             if (new_press) {
                 bool directed = reply && !broadcast;
+                ESP_LOGI(TAG, "PTT button: %s", directed ? "reply" : "broadcast");
                 if (directed && !g.have_last_talker) {
-                    ESP_LOGI(TAG, "Reply ignored: no previous talker");
+                    /* A reply has no meaning until an incoming AUDIO packet
+                     * establishes the last talker. Make that visible rather
+                     * than failing silently, and log it for wiring checks. */
+                    g.error_until_ms = t + 750;
+                    ESP_LOGW(TAG, "Reply unavailable: no previous talker");
                 } else if (g.state == ST_IDLE) {
                     g.tx_buffer_count = 0;
                     g.tx_buffer_index = 0;
@@ -898,7 +903,6 @@ void app_main(void)
     i2s_init();
     gpio_button_init();
     ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness);
-    startup_tone();          /* verify speaker before the network is up */
     adc_init();
 
     wifi_init();

@@ -20,7 +20,7 @@ internal sealed class AudioEngine : IDisposable
     private bool captureStarted;
     private bool disposed;
 
-    public AudioEngine()
+    public AudioEngine(string? recordingDeviceName = null, string? playbackDeviceId = null)
     {
         output = new BufferedWaveProvider(format)
         {
@@ -33,6 +33,7 @@ internal sealed class AudioEngine : IDisposable
             WaveFormat = format,
             BufferMilliseconds = 20,
             NumberOfBuffers = 3,
+            DeviceNumber = ResolveRecordingDevice(recordingDeviceName),
         };
         input.DataAvailable += OnDataAvailable;
         input.RecordingStopped += (_, eventArgs) =>
@@ -45,7 +46,11 @@ internal sealed class AudioEngine : IDisposable
         // Timed shared-mode rendering is intentionally used instead of the
         // endpoint event callback. Some consumer drivers signal one primed
         // buffer but do not continue signalling event-driven 16 kHz streams.
-        speaker = new WasapiOut(AudioClientShareMode.Shared, useEventSync: false, latency: 120);
+        using var enumerator = new MMDeviceEnumerator();
+        var playbackDevice = string.IsNullOrWhiteSpace(playbackDeviceId)
+            ? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)
+            : enumerator.GetDevice(playbackDeviceId);
+        speaker = new WasapiOut(playbackDevice, AudioClientShareMode.Shared, useEventSync: false, latency: 120);
         speaker.Init(output);
         speaker.PlaybackStopped += (_, eventArgs) =>
         {
@@ -58,6 +63,29 @@ internal sealed class AudioEngine : IDisposable
 
     public int BufferedMilliseconds => output.BufferedBytes * 1000 / format.AverageBytesPerSecond;
     public long QueuedPlaybackFrames => Interlocked.Read(ref queuedPlaybackFrames);
+
+    public static IReadOnlyList<RecordingDevice> RecordingDevices()
+    {
+        var devices = new List<RecordingDevice>();
+        for (var index = 0; index < WaveInEvent.DeviceCount; index++)
+            devices.Add(new RecordingDevice(index, WaveInEvent.GetCapabilities(index).ProductName));
+        return devices;
+    }
+
+    public static IReadOnlyList<PlaybackDevice> PlaybackDevices()
+    {
+        using var enumerator = new MMDeviceEnumerator();
+        return enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+            .Select(device => new PlaybackDevice(device.ID, device.FriendlyName)).ToArray();
+    }
+
+    private static int ResolveRecordingDevice(string? requestedName)
+    {
+        var devices = RecordingDevices();
+        if (devices.Count == 0) throw new InvalidOperationException("No Windows recording devices are available.");
+        return devices.FirstOrDefault(device => string.Equals(device.Name, requestedName, StringComparison.Ordinal))?.Index
+               ?? devices[0].Index;
+    }
 
     public void StartPlayback()
     {
@@ -122,4 +150,14 @@ internal sealed class AudioEngine : IDisposable
         speaker.Stop();
         speaker.Dispose();
     }
+}
+
+internal sealed record RecordingDevice(int Index, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record PlaybackDevice(string Id, string Name)
+{
+    public override string ToString() => Name;
 }

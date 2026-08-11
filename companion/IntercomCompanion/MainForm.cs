@@ -14,6 +14,9 @@ internal sealed class MainForm : Form
     private readonly Label identityLabel = new() { AutoSize = true };
     private readonly TextBox companionAlias = new() { Width = 180 };
     private readonly Button saveCompanionAlias = new() { Text = "Save companion alias", AutoSize = true };
+    private readonly ComboBox recordingDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox playbackDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly Button applyAudioDevices = new() { Text = "Apply audio devices", AutoSize = true };
     private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label statusLabel = new()
     {
@@ -118,7 +121,13 @@ internal sealed class MainForm : Form
         var aliasRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
         aliasRow.Controls.AddRange([new Label { Text = "Companion alias", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, companionAlias, saveCompanionAlias]);
         saveCompanionAlias.Click += (_, _) => SaveCompanionAlias();
-        top.Controls.AddRange([title, identityLabel, aliasRow, networkLabel, statusLabel, pttPanel]);
+        var audioRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        audioRow.Controls.AddRange([
+            new Label { Text = "Recording", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, recordingDevice,
+            new Label { Text = "Playback", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, playbackDevice,
+            applyAudioDevices]);
+        applyAudioDevices.Click += (_, _) => ApplyAudioDeviceSelection();
+        top.Controls.AddRange([title, identityLabel, aliasRow, audioRow, networkLabel, statusLabel, pttPanel]);
         Controls.Add(body);
         Controls.Add(top);
 
@@ -141,13 +150,8 @@ internal sealed class MainForm : Form
             node.Diagnostic += message => PostToUi(() => networkLabel.Text = $"Discovery: {message}");
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
-            audio = new AudioEngine();
-            audio.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
-            audio.StartPlayback();
-            receiveSession = new ReceiveSession(node, audio);
-            receiveSession.StateChanged += sessionState => PostToUi(() => ShowIntercomState(sessionState));
-            receiveSession.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
-            receiveSession.Start();
+            PopulateAudioDevices();
+            StartAudioEngine();
             statusLabel.Text = "Idle — ready to receive";
             broadcast.Enabled = reply.Enabled = true;
             selected.Enabled = SelectedPeer is not null;
@@ -157,6 +161,11 @@ internal sealed class MainForm : Form
         {
             networkLabel.Text = $"Discovery unavailable: {exception.SocketErrorCode}";
             statusLabel.Text = "Network unavailable";
+            statusLabel.ForeColor = Color.Firebrick;
+        }
+        catch (Exception exception)
+        {
+            statusLabel.Text = $"Audio unavailable: {exception.Message}";
             statusLabel.ForeColor = Color.Firebrick;
         }
     }
@@ -307,6 +316,57 @@ internal sealed class MainForm : Form
         node.SetAlias(companionAlias.Text);
         companionAlias.Text = node.Alias;
         identityLabel.Text = $"Companion ID: {node.NodeId:x8}";
+    }
+
+    private void PopulateAudioDevices()
+    {
+        recordingDevice.Items.Clear();
+        recordingDevice.Items.AddRange(AudioEngine.RecordingDevices().Cast<object>().ToArray());
+        recordingDevice.SelectedItem = recordingDevice.Items.Cast<RecordingDevice>()
+            .FirstOrDefault(device => device.Name == settings.RecordingDeviceName) ?? recordingDevice.Items.Cast<RecordingDevice>().FirstOrDefault();
+
+        playbackDevice.Items.Clear();
+        playbackDevice.Items.AddRange(AudioEngine.PlaybackDevices().Cast<object>().ToArray());
+        playbackDevice.SelectedItem = playbackDevice.Items.Cast<PlaybackDevice>()
+            .FirstOrDefault(device => device.Id == settings.PlaybackDeviceId) ?? playbackDevice.Items.Cast<PlaybackDevice>().FirstOrDefault();
+    }
+
+    private void StartAudioEngine()
+    {
+        audio = new AudioEngine(settings.RecordingDeviceName, settings.PlaybackDeviceId);
+        audio.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
+        audio.StartPlayback();
+        receiveSession = new ReceiveSession(node!, audio);
+        receiveSession.StateChanged += sessionState => PostToUi(() => ShowIntercomState(sessionState));
+        receiveSession.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
+        receiveSession.Start();
+    }
+
+    private void ApplyAudioDeviceSelection()
+    {
+        var recorder = recordingDevice.SelectedItem as RecordingDevice;
+        var playback = playbackDevice.SelectedItem as PlaybackDevice;
+        if (recorder is null || playback is null) return;
+        if (receiveSession?.State != IntercomState.Idle)
+        {
+            statusLabel.Text = "Release the floor before changing audio devices.";
+            return;
+        }
+        receiveSession?.Stop();
+        audio?.Dispose();
+        settings.RecordingDeviceName = recorder.Name;
+        settings.PlaybackDeviceId = playback.Id;
+        settings.Save();
+        try
+        {
+            StartAudioEngine();
+            statusLabel.Text = $"Audio devices applied: {recorder.Name} → {playback.Name}";
+        }
+        catch (Exception exception)
+        {
+            statusLabel.Text = $"Audio device change failed: {exception.Message}";
+            statusLabel.ForeColor = Color.Firebrick;
+        }
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)

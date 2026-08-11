@@ -7,6 +7,8 @@ internal sealed class CompanionSettings
 {
     public uint NodeId { get; set; }
     public string Alias { get; set; } = Environment.MachineName[..Math.Min(32, Environment.MachineName.Length)];
+    public string? RecordingDeviceName { get; set; }
+    public string? PlaybackDeviceId { get; set; }
 
     public static string AppDataDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WiFi-Intercom");

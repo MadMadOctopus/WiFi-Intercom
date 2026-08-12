@@ -19,9 +19,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
 {
     private const int FrameMs = 20;
     private const int ReleaseMs = 750;
-    // Allow the full 200 ms prebuffer plus the reorder window to drain after
+    // Allow the full 400 ms prebuffer plus the reorder window to drain after
     // END, otherwise the increased playout delay would cut the message tail.
-    private const int EndDrainFrames = 18;
+    private const int EndDrainFrames = 32;
     private const int ClaimCount = 3;
     private const int ClaimIntervalMs = 30;
     private const int PreAudioDelayMs = 100;
@@ -432,7 +432,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
         recording?.Dispose();
         recording = null;
         jitter.Reset();
-        audio.ClearPlayback();
+        // Do not clear the Windows output here: with a jitter-buffer delay,
+        // it can still contain the final audio frames. The next receive session
+        // clears it before it begins, so stale sound cannot cross sessions.
         ending = false;
         if (state == IntercomState.WaitingForFloor && pttHeld)
             StartTransmitLocked(heldKind, heldTarget);

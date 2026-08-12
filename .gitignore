@@ -17,6 +17,7 @@ pc_app/__pycache__/
 .vscode/
 bin/
 obj/
+tools/MicTransportCapture/capture/
 *.user
 *.suo
 .DS_Store

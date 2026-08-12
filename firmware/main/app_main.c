@@ -11,7 +11,7 @@
  *   capture_task   ADC continuous @16kHz -> conditioned 320-sample frames -> mic_q
  *   tx_task        PTT + floor control; drains mic_q, encodes, sends RTP
  *   net_rx_task    receives PTT1 control and runs receive-side floor logic
- *   rtp_rx_task    receives RTP/G.722 and fills the jitter buffer
+ *   rtp_rx_task    receives RTP/Opus and fills the jitter buffer
  *   playback_task  every 20 ms pops jitter buffer -> I2S (muted while we talk)
  *
  * Pin map (see README / config.h):
@@ -44,8 +44,8 @@
 #include "config.h"
 #include "device_config.h"
 #include "protocol.h"
-#include "esp_g722_enc.h"
-#include "esp_g722_dec.h"
+#include "esp_opus_enc.h"
+#include "esp_opus_dec.h"
 #include "ring_controller.h"
 #include "usb_control.h"
 
@@ -142,8 +142,8 @@ static uint32_t            g_wifi_ip_addr;
 
 static i2s_chan_handle_t          i2s_tx;
 static adc_continuous_handle_t    adc_handle;
-static void                      *g_g722_encoder;
-static void                      *g_g722_decoder;
+static void                      *g_opus_encoder;
+static void                      *g_opus_decoder;
 
 /* ======================================================================== */
 /* helpers                                                                   */
@@ -187,10 +187,10 @@ static void send_rtp_to(const struct sockaddr_in *control_destination,
                         uint32_t session, uint16_t sequence, uint32_t timestamp,
                         const uint8_t *payload, uint16_t payload_len)
 {
-    if (g_rtp_sock < 0 || payload_len > G722_PAYLOAD_LEN) return;
-    uint8_t packet[12 + G722_PAYLOAD_LEN];
+    if (g_rtp_sock < 0 || payload_len > OPUS_MAX_PAYLOAD_LEN) return;
+    uint8_t packet[12 + OPUS_MAX_PAYLOAD_LEN];
     packet[0] = 0x80;                       /* RTP v2, no extensions/CSRC */
-    packet[1] = RTP_PAYLOAD_TYPE_G722;      /* static G.722 payload type */
+    packet[1] = RTP_PAYLOAD_TYPE_OPUS;      /* agreed dynamic Opus payload */
     packet[2] = (uint8_t)(sequence >> 8);
     packet[3] = (uint8_t)sequence;
     packet[4] = (uint8_t)(timestamp >> 24);
@@ -364,7 +364,7 @@ static void begin_receiving(const intercom_pkt_t *p)
     g.rx_ending = false;
     g.rx_drain = 0;
     jb_reset();
-    esp_g722_dec_reset(g_g722_decoder);
+    esp_opus_dec_reset(g_opus_decoder);
     g.state = ST_RECEIVING;
     ESP_LOGI(TAG, "RX start: sender=%08x session=%08x",
              (unsigned)p->sender_id, (unsigned)p->session_id);
@@ -418,7 +418,7 @@ static void handle_rtp(uint32_t session, uint16_t sequence,
         .buffer = (uint8_t *)pcm, .len = sizeof(pcm),
     };
     esp_audio_dec_info_t info = {0};
-    if (esp_g722_dec_decode(g_g722_decoder, &raw, &frame, &info) == ESP_AUDIO_ERR_OK &&
+    if (esp_opus_dec_decode(g_opus_decoder, &raw, &frame, &info) == ESP_AUDIO_ERR_OK &&
         frame.decoded_size == sizeof(pcm))
         jb_push(sequence, pcm);
 }
@@ -500,14 +500,14 @@ static void net_rx_task(void *arg)
 
 static void rtp_rx_task(void *arg)
 {
-    uint8_t buf[12 + G722_PAYLOAD_LEN];
+    uint8_t buf[12 + OPUS_MAX_PAYLOAD_LEN];
     while (1) {
         struct sockaddr_in source;
         socklen_t source_len = sizeof(source);
         int n = recvfrom(g_rtp_sock, buf, sizeof(buf), 0,
                          (struct sockaddr *)&source, &source_len);
-        if (n != 12 + G722_PAYLOAD_LEN || (buf[0] >> 6) != 2 ||
-            (buf[1] & 0x7f) != RTP_PAYLOAD_TYPE_G722)
+        if (n <= 12 || n > 12 + OPUS_MAX_PAYLOAD_LEN || (buf[0] >> 6) != 2 ||
+            (buf[1] & 0x7f) != RTP_PAYLOAD_TYPE_OPUS)
             continue;
         uint16_t sequence = ((uint16_t)buf[2] << 8) | buf[3];
         uint32_t session = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
@@ -537,7 +537,7 @@ static void start_tx_locked(uint32_t t, bool directed,
     g.tx_rtp_timestamp = esp_random();
     g.tx_directed = directed;
     if (destination) g.tx_audio_destination = *destination;
-    esp_g722_enc_reset(g_g722_encoder);
+    esp_opus_enc_reset(g_opus_encoder);
     g.claim_start_ms = t;
     g.last_claim_ms = 0;
     g.claims_sent = 0;
@@ -685,7 +685,7 @@ static void tx_task(void *arg)
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
         if (g.state == ST_TALKING) {
-            static uint8_t payload[G722_PAYLOAD_LEN];
+            static uint8_t payload[OPUS_MAX_PAYLOAD_LEN];
             esp_audio_enc_in_frame_t input = {
                 .buffer = (uint8_t *)frame.pcm, .len = sizeof(frame.pcm),
             };
@@ -701,8 +701,8 @@ static void tx_task(void *arg)
             bool directed = g.tx_directed;
             struct sockaddr_in destination = g.tx_audio_destination;
             xSemaphoreGive(g_lock);
-            if (esp_g722_enc_process(g_g722_encoder, &input, &output) == ESP_AUDIO_ERR_OK &&
-                output.encoded_bytes == G722_PAYLOAD_LEN) {
+            if (esp_opus_enc_process(g_opus_encoder, &input, &output) == ESP_AUDIO_ERR_OK &&
+                output.encoded_bytes > 0 && output.encoded_bytes <= OPUS_MAX_PAYLOAD_LEN) {
                 if (directed)
                     send_rtp_to(&destination, session, rtp_sequence, rtp_timestamp,
                                 payload, output.encoded_bytes);
@@ -1087,20 +1087,31 @@ static void udp_init(void)
     };
     ESP_ERROR_CHECK(bind(g_rtp_sock, (struct sockaddr *)&rtp_local,
                          sizeof(rtp_local)) == 0 ? ESP_OK : ESP_FAIL);
-    ESP_LOGI(TAG, "RTP/G.722 ready on port %d (WMM video priority)", RTP_PORT);
+    ESP_LOGI(TAG, "RTP/Opus ready on port %d (WMM video priority)", RTP_PORT);
 }
 
-static void g722_init(void)
+static void opus_init(void)
 {
-    esp_g722_enc_config_t enc_cfg = ESP_G722_ENC_CONFIG_DEFAULT();
-    esp_g722_dec_cfg_t dec_cfg = {
+    esp_opus_enc_config_t enc_cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
+    enc_cfg.sample_rate = SAMPLE_RATE;
+    enc_cfg.channel = 1;
+    enc_cfg.bits_per_sample = 16;
+    enc_cfg.bitrate = 48000;
+    enc_cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
+    enc_cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
+    enc_cfg.complexity = 0;
+    enc_cfg.enable_fec = false;
+    enc_cfg.enable_dtx = false;
+    enc_cfg.enable_vbr = false;
+    esp_opus_dec_cfg_t dec_cfg = {
         .sample_rate = SAMPLE_RATE,
-        .bitrate = 64000,
-        .packed = true,
+        .channel = 1,
+        .frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS,
+        .self_delimited = false,
     };
-    ESP_ERROR_CHECK(esp_g722_enc_open(&enc_cfg, sizeof(enc_cfg), &g_g722_encoder) ==
+    ESP_ERROR_CHECK(esp_opus_enc_open(&enc_cfg, sizeof(enc_cfg), &g_opus_encoder) ==
                     ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
-    ESP_ERROR_CHECK(esp_g722_dec_open(&dec_cfg, sizeof(dec_cfg), &g_g722_decoder) ==
+    ESP_ERROR_CHECK(esp_opus_dec_open(&dec_cfg, sizeof(dec_cfg), &g_opus_decoder) ==
                     ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
 }
 
@@ -1131,15 +1142,15 @@ void app_main(void)
     ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness,
                          (g_config.hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
     adc_init();
-    g722_init();
+    opus_init();
 
     wifi_init();
     udp_init();
 
     xTaskCreate(net_rx_task,   "net_rx",   4096, NULL, 6, NULL);
-    xTaskCreate(rtp_rx_task,   "rtp_rx",   4096, NULL, 6, NULL);
+    xTaskCreate(rtp_rx_task,   "rtp_rx",  12288, NULL, 6, NULL);
     xTaskCreate(capture_task,  "capture",  4096, NULL, 6, NULL);
-    xTaskCreate(tx_task,       "tx",       4096, NULL, 5, NULL);
+    xTaskCreate(tx_task,       "tx",       8192, NULL, 5, NULL);
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);
     xTaskCreate(ring_task,     "ring",     4096, NULL, 4, NULL);
     xTaskCreate(hello_task,    "hello",    3072, NULL, 3, NULL);

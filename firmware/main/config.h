@@ -26,12 +26,12 @@
 /* ---- Audio format (must match the companion RTP/G.722 implementation) -- */
 #define SAMPLE_RATE     16000
 #define FRAME_SAMPLES   320             /* 20 ms at 16 kHz                   */
-#define G722_PAYLOAD_LEN 160             /* 64 kb/s, 20 ms G.722 RTP payload */
+#define OPUS_MAX_PAYLOAD_LEN 200          /* 48 kb/s CBR, 20 ms = 120 bytes */
 
-/* RTP static payload type 9 is G.722. Per RFC 3551 it carries a 16 kHz
- * G.722 signal but its RTP timestamp clock advances at 8 kHz. */
-#define RTP_PAYLOAD_TYPE_G722 9
-#define RTP_TIMESTAMP_STEP    160
+/* Dynamic RTP payload type 111 is agreed by this intercom protocol for
+ * 16 kHz mono Opus. Opus RTP timestamps always advance at 48 kHz. */
+#define RTP_PAYLOAD_TYPE_OPUS 111
+#define RTP_TIMESTAMP_STEP    960
 
 /* ESP32-C3 maps precedence 4 to WMM AC_VI, retaining AMPDU while giving
  * voice traffic priority over best-effort data. */

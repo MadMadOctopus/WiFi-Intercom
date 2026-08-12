@@ -2,8 +2,10 @@ namespace IntercomCompanion.Audio;
 
 internal sealed class JitterBuffer
 {
-    private const int PrebufferFrames = 4;
-    private const int ReorderWindow = 4;
+    // 200 ms initial playout delay absorbs short Wi-Fi delivery bursts. The
+    // companion queue is bounded by session lifetime; stale frames are pruned.
+    private const int PrebufferFrames = 10;
+    private const int ReorderWindow = 8;
     private readonly object gate = new();
     private readonly Dictionary<uint, short[]> frames = [];
     private uint expectedSequence;

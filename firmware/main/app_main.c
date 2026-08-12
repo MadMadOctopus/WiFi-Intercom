@@ -71,7 +71,9 @@ typedef struct {
 } peer_t;
 
 /* ---- jitter buffer ------------------------------------------------------ */
-#define JB_CAP 16
+/* 32 decoded frames consume 20.7 KiB of static RAM. This leaves enough headroom
+ * on C3 while accommodating Wi-Fi burst jitter beyond the 200 ms playout delay. */
+#define JB_CAP 32
 typedef struct {
     int16_t  pcm[FRAME_SAMPLES];
     uint32_t seq;
@@ -1167,5 +1169,7 @@ void app_main(void)
     xTaskCreate(ring_task,     "ring",     4096, NULL, 4, NULL);
     xTaskCreate(hello_task,    "hello",    3072, NULL, 3, NULL);
 
+    ESP_LOGI(TAG, "RX jitter: %d-frame capacity / %d-frame prebuffer; free heap=%u bytes",
+             JB_CAP, JITTER_PREBUFFER, (unsigned)esp_get_free_heap_size());
     ESP_LOGI(TAG, "Intercom node %08x ready", (unsigned)NODE_ID);
 }

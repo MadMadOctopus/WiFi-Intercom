@@ -68,8 +68,10 @@
 #define PRE_AUDIO_DELAY_MS  100
 #define END_COUNT           3
 #define RX_TIMEOUT_MS       750
-#define JITTER_PREBUFFER    4           /* 80 ms before playout begins       */
-#define REORDER_WINDOW      4
+/* Start playout after 200 ms (10 frames). The ring stores 640 ms, allowing
+ * late/reordered Wi-Fi bursts to arrive before their playout deadline. */
+#define JITTER_PREBUFFER    10
+#define REORDER_WINDOW      8
 #define BUSY_BUFFER_MS      500
 #define BUSY_BUFFER_FRAMES  (BUSY_BUFFER_MS / 20)
 #define PEER_HELLO_MS       3000

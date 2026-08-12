@@ -19,7 +19,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
 {
     private const int FrameMs = 20;
     private const int ReleaseMs = 750;
-    private const int EndDrainFrames = 8;
+    // Allow the full 200 ms prebuffer plus the reorder window to drain after
+    // END, otherwise the increased playout delay would cut the message tail.
+    private const int EndDrainFrames = 18;
     private const int ClaimCount = 3;
     private const int ClaimIntervalMs = 30;
     private const int PreAudioDelayMs = 100;

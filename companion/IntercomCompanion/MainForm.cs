@@ -40,16 +40,19 @@ internal sealed class MainForm : Form
     private readonly Button broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
     private readonly Button reply = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
     private readonly Button selected = CreatePttButton("Hold to selected device", Color.FromArgb(106, 27, 154));
-    private readonly TextBox alias = new() { Enabled = false };
-    private readonly NumericUpDown volume = new() { Enabled = false, Minimum = 64, Maximum = 1024 };
-    private readonly NumericUpDown brightness = new() { Enabled = false, Minimum = 0, Maximum = 255 };
-    private readonly CheckBox buttonsSwapped = new() { Enabled = false };
-    private readonly ComboBox orientation = new() { Enabled = false, DropDownStyle = ComboBoxStyle.DropDownList };
+    // This is a local draft, not a view of the live device list. Discovery
+    // must never lock or discard a user's in-progress settings edit.
+    private readonly TextBox alias = new();
+    private readonly NumericUpDown volume = new() { Minimum = 64, Maximum = 1024 };
+    private readonly NumericUpDown brightness = new() { Minimum = 0, Maximum = 255 };
+    private readonly CheckBox buttonsSwapped = new();
+    private readonly ComboBox orientation = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly Button getConfig = new() { Text = "Get configuration", Enabled = false, AutoSize = true };
     private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
     private bool spaceHeld;
     private uint? pendingConfigurationNodeId;
+    private uint? selectedDeviceId;
     private bool refreshingDeviceList;
 
     public MainForm()
@@ -97,6 +100,7 @@ internal sealed class MainForm : Form
         deviceGroup.Controls.Add(devices);
 
         orientation.Items.AddRange(["0", "180"]);
+        orientation.SelectedItem = "0";
         var config = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Top, Padding = new Padding(8) };
         config.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         config.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -190,7 +194,7 @@ internal sealed class MainForm : Form
     private void RefreshPeers()
     {
         if (node is null || IsDisposed) return;
-        var selectedId = SelectedPeer?.NodeId;
+        var selectedId = selectedDeviceId;
         var peers = node.Peers.OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
         refreshingDeviceList = true;
         try
@@ -213,7 +217,7 @@ internal sealed class MainForm : Form
         {
             refreshingDeviceList = false;
         }
-        if (selectedId is not null && SelectedPeer is null) OnSelectedDeviceChanged();
+        UpdateSelectedDeviceActions();
         if (receiveSession?.State == IntercomState.Receiving && audio is not null)
         {
             var stats = receiveSession.Statistics;
@@ -221,8 +225,9 @@ internal sealed class MainForm : Form
         }
     }
 
-    private Peer? SelectedPeer => devices.SelectedItems.Count == 1
-        ? devices.SelectedItems[0].Tag as Peer : null;
+    private Peer? SelectedPeer => selectedDeviceId is uint deviceId && node is not null
+        ? node.Peers.FirstOrDefault(peer => peer.NodeId == deviceId)
+        : null;
 
     private async Task RequestSelectedConfigAsync()
     {
@@ -248,10 +253,8 @@ internal sealed class MainForm : Form
         // A device can reply to another app's request or to an older selected
         // row. Never overwrite in-progress edits unless this exact UI asked
         // for the configuration of the still-selected peer.
-        if (pendingConfigurationNodeId != eventArgs.NodeId || SelectedPeer?.NodeId != eventArgs.NodeId) return;
+        if (pendingConfigurationNodeId != eventArgs.NodeId || selectedDeviceId != eventArgs.NodeId) return;
         pendingConfigurationNodeId = null;
-        SetConfigurationControlsEnabled(true);
-        getConfig.Enabled = applyConfig.Enabled = true;
         alias.Text = eventArgs.Configuration.Alias;
         volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, (int)volume.Minimum, (int)volume.Maximum);
         brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, (int)brightness.Minimum, (int)brightness.Maximum);
@@ -261,18 +264,21 @@ internal sealed class MainForm : Form
 
     private void OnSelectedDeviceChanged()
     {
+        selectedDeviceId = devices.SelectedItems.Count == 1
+            ? (devices.SelectedItems[0].Tag as Peer)?.NodeId
+            : null;
         pendingConfigurationNodeId = null;
-        selected.Enabled = receiveSession is not null && SelectedPeer is not null;
-        getConfig.Enabled = SelectedPeer is not null;
-        applyConfig.Enabled = false;
-        SetConfigurationControlsEnabled(false);
+        UpdateSelectedDeviceActions();
         // Selecting a row intentionally does not perform network I/O. The user
         // explicitly chooses Get configuration when they want to populate it.
     }
 
-    private void SetConfigurationControlsEnabled(bool enabled)
+    private void UpdateSelectedDeviceActions()
     {
-        alias.Enabled = volume.Enabled = brightness.Enabled = buttonsSwapped.Enabled = orientation.Enabled = enabled;
+        var hasSelectedPeer = SelectedPeer is not null;
+        selected.Enabled = receiveSession is not null && hasSelectedPeer;
+        getConfig.Enabled = hasSelectedPeer;
+        applyConfig.Enabled = hasSelectedPeer;
     }
 
     private void PostToUi(Action action)

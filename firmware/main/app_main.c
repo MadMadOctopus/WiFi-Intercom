@@ -37,6 +37,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_adc/adc_continuous.h"
 
 #include "lwip/sockets.h"
@@ -59,6 +60,55 @@ static const char *TAG = "intercom";
 
 /* ---- audio frame passed capture -> tx ---------------------------------- */
 typedef struct { int16_t pcm[FRAME_SAMPLES]; } audio_frame_t;
+
+/* Diagnostic-only source capture. The data is the exact conditioned PCM fed
+ * to Opus: ADC conversion, DC removal and MIC_GAIN have already happened,
+ * while no codec or network operation has touched it. */
+#ifndef INTERCOM_USB_RAW_MIC_CAPTURE
+#define INTERCOM_USB_RAW_MIC_CAPTURE 0
+#endif
+
+#if INTERCOM_USB_RAW_MIC_CAPTURE
+#define RAW_MIC_MAGIC          "MICP"
+#define RAW_MIC_PAYLOAD_BYTES  (FRAME_SAMPLES * sizeof(int16_t))
+#define RAW_MIC_PACKET_BYTES   (4 + 4 + 2 + RAW_MIC_PAYLOAD_BYTES + 2)
+static QueueHandle_t raw_mic_q;
+
+static uint16_t raw_mic_crc16(const uint8_t *data, size_t length)
+{
+    uint16_t crc = 0xffff; /* CRC-CCITT-FALSE */
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+
+static void raw_mic_usb_task(void *arg)
+{
+    audio_frame_t frame;
+    uint32_t sequence = 0;
+    uint8_t packet[RAW_MIC_PACKET_BYTES];
+    while (1) {
+        if (xQueueReceive(raw_mic_q, &frame, portMAX_DELAY) != pdTRUE) continue;
+        memcpy(packet, RAW_MIC_MAGIC, 4);
+        packet[4] = (uint8_t)(sequence >> 24);
+        packet[5] = (uint8_t)(sequence >> 16);
+        packet[6] = (uint8_t)(sequence >> 8);
+        packet[7] = (uint8_t)sequence++;
+        packet[8] = (uint8_t)(RAW_MIC_PAYLOAD_BYTES >> 8);
+        packet[9] = (uint8_t)RAW_MIC_PAYLOAD_BYTES;
+        memcpy(packet + 10, frame.pcm, RAW_MIC_PAYLOAD_BYTES); /* little-endian PCM */
+        uint16_t crc = raw_mic_crc16(packet, 10 + RAW_MIC_PAYLOAD_BYTES);
+        packet[10 + RAW_MIC_PAYLOAD_BYTES] = (uint8_t)(crc >> 8);
+        packet[11 + RAW_MIC_PAYLOAD_BYTES] = (uint8_t)crc;
+        /* Never block capture/network: a saturated USB host drops diagnostic
+         * frames, which the PC tool records as source-frame gaps. */
+        usb_serial_jtag_write_bytes((const char *)packet, sizeof(packet), pdMS_TO_TICKS(2));
+    }
+}
+#endif
 
 /* ---- floor-control states ---------------------------------------------- */
 typedef enum { ST_IDLE, ST_CLAIMING, ST_TALKING, ST_RECEIVING } node_state_t;
@@ -885,6 +935,9 @@ static void capture_task(void *arg)
             frame.pcm[fill++] = (int16_t)s;
             if (fill == FRAME_SAMPLES) {
                 fill = 0;
+#if INTERCOM_USB_RAW_MIC_CAPTURE
+                if (raw_mic_q) xQueueSend(raw_mic_q, &frame, 0);
+#endif
                 xQueueSend(mic_q, &frame, 0);   /* drop if full: stay realtime */
             }
         }
@@ -1158,6 +1211,13 @@ void app_main(void)
 
     wifi_init();
     udp_init();
+
+#if INTERCOM_USB_RAW_MIC_CAPTURE
+    raw_mic_q = xQueueCreate(16, sizeof(audio_frame_t));
+    ESP_ERROR_CHECK(raw_mic_q ? ESP_OK : ESP_ERR_NO_MEM);
+    xTaskCreate(raw_mic_usb_task, "raw_mic_usb", 4096, NULL, 3, NULL);
+    ESP_LOGW(TAG, "DIAGNOSTIC build: streaming conditioned 16 kHz PCM over USB");
+#endif
 
     xTaskCreate(net_rx_task,   "net_rx",   4096, NULL, 6, NULL);
     xTaskCreate(rtp_rx_task,   "rtp_rx",  12288, NULL, 6, NULL);

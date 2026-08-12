@@ -20,3 +20,10 @@ idf_component_register(
         lwip
         espressif__esp_audio_codec
 )
+
+# Enabled only for the hardware diagnostic image built with
+# -DINTERCOM_USB_RAW_MIC_CAPTURE=ON. The production image has no raw mic
+# stream and retains its normal USB configuration channel.
+if(INTERCOM_USB_RAW_MIC_CAPTURE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE INTERCOM_USB_RAW_MIC_CAPTURE=1)
+endif()

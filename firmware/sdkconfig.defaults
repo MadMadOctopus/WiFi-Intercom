@@ -13,7 +13,7 @@ CONFIG_FREERTOS_HZ=1000
 # --- Main task stack a little larger; we spawn our own tasks anyway ---
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 
-# --- 4 MB XIAOs: room for the C3 Opus codec while retaining one factory app ---
+# --- 4 MB XIAOs: application partition while retaining one factory app ---
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
 # --- Log level: info over USB serial ---

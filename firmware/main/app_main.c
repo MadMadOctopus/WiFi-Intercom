@@ -3,7 +3,7 @@
  *
  * One node of a two-peer intercom.  The other peer is the PC application in
  * ../companion. Floor control/configuration use the compact PTT1 UDP protocol;
- * media uses standards-compatible RTP/G.722 over a separate UDP port.
+ * media uses RTP/IMA ADPCM over a separate UDP port.
  *
  * Tasks (FreeRTOS), decoupled by queues / a shared mutex so Wi-Fi, capture,
  * playback and button handling never block each other:
@@ -11,7 +11,7 @@
  *   capture_task   ADC continuous @16kHz -> conditioned 320-sample frames -> mic_q
  *   tx_task        PTT + floor control; drains mic_q, encodes, sends RTP
  *   net_rx_task    receives PTT1 control and runs receive-side floor logic
- *   rtp_rx_task    receives RTP/Opus and fills the jitter buffer
+ *   rtp_rx_task    receives RTP/IMA ADPCM and fills the jitter buffer
  *   playback_task  every 20 ms pops jitter buffer -> I2S (muted while we talk)
  *
  * Pin map (see README / config.h):
@@ -43,10 +43,9 @@
 #include "lwip/sockets.h"
 
 #include "config.h"
+#include "adpcm.h"
 #include "device_config.h"
 #include "protocol.h"
-#include "esp_opus_enc.h"
-#include "esp_opus_dec.h"
 #include "ring_controller.h"
 #include "usb_control.h"
 
@@ -62,8 +61,8 @@ static const char *TAG = "intercom";
 typedef struct { int16_t pcm[FRAME_SAMPLES]; } audio_frame_t;
 
 /* Diagnostic-only source capture. The data is the exact conditioned PCM fed
- * to Opus: ADC conversion, DC removal and MIC_GAIN have already happened,
- * while no codec or network operation has touched it. */
+ * to IMA ADPCM: ADC conversion, DC removal and MIC_GAIN have already
+ * happened, while no codec or network operation has touched it. */
 #ifndef INTERCOM_USB_RAW_MIC_CAPTURE
 #define INTERCOM_USB_RAW_MIC_CAPTURE 0
 #endif
@@ -194,8 +193,7 @@ static uint32_t            g_wifi_ip_addr;
 
 static i2s_chan_handle_t          i2s_tx;
 static adc_continuous_handle_t    adc_handle;
-static void                      *g_opus_encoder;
-static void                      *g_opus_decoder;
+static adpcm_state_t              g_adpcm_encoder;
 
 /* ======================================================================== */
 /* helpers                                                                   */
@@ -239,10 +237,10 @@ static void send_rtp_to(const struct sockaddr_in *control_destination,
                         uint32_t session, uint16_t sequence, uint32_t timestamp,
                         const uint8_t *payload, uint16_t payload_len)
 {
-    if (g_rtp_sock < 0 || payload_len > OPUS_MAX_PAYLOAD_LEN) return;
-    uint8_t packet[12 + OPUS_MAX_PAYLOAD_LEN];
+    if (g_rtp_sock < 0 || payload_len != ADPCM_PAYLOAD_LEN) return;
+    uint8_t packet[12 + ADPCM_PAYLOAD_LEN];
     packet[0] = 0x80;                       /* RTP v2, no extensions/CSRC */
-    packet[1] = RTP_PAYLOAD_TYPE_OPUS;      /* agreed dynamic Opus payload */
+    packet[1] = RTP_PAYLOAD_TYPE_ADPCM;     /* agreed dynamic IMA payload */
     packet[2] = (uint8_t)(sequence >> 8);
     packet[3] = (uint8_t)sequence;
     packet[4] = (uint8_t)(timestamp >> 24);
@@ -416,7 +414,6 @@ static void begin_receiving(const intercom_pkt_t *p)
     g.rx_ending = false;
     g.rx_drain = 0;
     jb_reset();
-    esp_opus_dec_reset(g_opus_decoder);
     g.state = ST_RECEIVING;
     ESP_LOGI(TAG, "RX start: sender=%08x session=%08x",
              (unsigned)p->sender_id, (unsigned)p->session_id);
@@ -462,16 +459,7 @@ static void handle_rtp(uint32_t session, uint16_t sequence,
     if (g.state != ST_RECEIVING || session != g.rx_session) return;
     g.rx_last_ms = now_ms();
     static int16_t pcm[FRAME_SAMPLES];
-    esp_audio_dec_in_raw_t raw = {
-        .buffer = (uint8_t *)payload, .len = payload_len,
-        .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
-    };
-    esp_audio_dec_out_frame_t frame = {
-        .buffer = (uint8_t *)pcm, .len = sizeof(pcm),
-    };
-    esp_audio_dec_info_t info = {0};
-    if (esp_opus_dec_decode(g_opus_decoder, &raw, &frame, &info) == ESP_AUDIO_ERR_OK &&
-        frame.decoded_size == sizeof(pcm))
+    if (adpcm_decode_frame(payload, payload_len, pcm) == 0)
         jb_push(sequence, pcm);
 }
 
@@ -552,14 +540,14 @@ static void net_rx_task(void *arg)
 
 static void rtp_rx_task(void *arg)
 {
-    uint8_t buf[12 + OPUS_MAX_PAYLOAD_LEN];
+    uint8_t buf[12 + ADPCM_PAYLOAD_LEN];
     while (1) {
         struct sockaddr_in source;
         socklen_t source_len = sizeof(source);
         int n = recvfrom(g_rtp_sock, buf, sizeof(buf), 0,
                          (struct sockaddr *)&source, &source_len);
-        if (n <= 12 || n > 12 + OPUS_MAX_PAYLOAD_LEN || (buf[0] >> 6) != 2 ||
-            (buf[1] & 0x7f) != RTP_PAYLOAD_TYPE_OPUS)
+        if (n != 12 + ADPCM_PAYLOAD_LEN || (buf[0] >> 6) != 2 ||
+            (buf[1] & 0x7f) != RTP_PAYLOAD_TYPE_ADPCM)
             continue;
         uint16_t sequence = ((uint16_t)buf[2] << 8) | buf[3];
         uint32_t session = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
@@ -589,7 +577,7 @@ static void start_tx_locked(uint32_t t, bool directed,
     g.tx_rtp_timestamp = esp_random();
     g.tx_directed = directed;
     if (destination) g.tx_audio_destination = *destination;
-    esp_opus_enc_reset(g_opus_encoder);
+    adpcm_state_reset(&g_adpcm_encoder);
     g.claim_start_ms = t;
     g.last_claim_ms = 0;
     g.claims_sent = 0;
@@ -737,13 +725,7 @@ static void tx_task(void *arg)
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
         if (g.state == ST_TALKING) {
-            static uint8_t payload[OPUS_MAX_PAYLOAD_LEN];
-            esp_audio_enc_in_frame_t input = {
-                .buffer = (uint8_t *)frame.pcm, .len = sizeof(frame.pcm),
-            };
-            esp_audio_enc_out_frame_t output = {
-                .buffer = payload, .len = sizeof(payload),
-            };
+            uint8_t payload[ADPCM_PAYLOAD_LEN];
             uint32_t session = g.tx_session;
             uint16_t rtp_sequence = g.tx_rtp_sequence++;
             uint32_t rtp_timestamp = g.tx_rtp_timestamp;
@@ -753,19 +735,13 @@ static void tx_task(void *arg)
             bool directed = g.tx_directed;
             struct sockaddr_in destination = g.tx_audio_destination;
             xSemaphoreGive(g_lock);
-            esp_audio_err_t encode_result = esp_opus_enc_process(g_opus_encoder, &input, &output);
-            if (encode_result == ESP_AUDIO_ERR_OK && output.encoded_bytes > 0 &&
-                output.encoded_bytes <= OPUS_MAX_PAYLOAD_LEN) {
-                if (directed)
-                    send_rtp_to(&destination, session, rtp_sequence, rtp_timestamp,
-                                payload, output.encoded_bytes);
-                else
-                    send_rtp_to_active_peers(session, rtp_sequence, rtp_timestamp,
-                                             payload, output.encoded_bytes);
-            } else {
-                ESP_LOGW(TAG, "Opus encode rejected: result=%d bytes=%u", encode_result,
-                         (unsigned)output.encoded_bytes);
-            }
+            adpcm_encode_frame(&g_adpcm_encoder, frame.pcm, payload);
+            if (directed)
+                send_rtp_to(&destination, session, rtp_sequence, rtp_timestamp,
+                            payload, sizeof(payload));
+            else
+                send_rtp_to_active_peers(session, rtp_sequence, rtp_timestamp,
+                                         payload, sizeof(payload));
         } else if (g.waiting_for_floor && g.waiting_count < BUSY_BUFFER_FRAMES) {
             g.waiting_frames[g.waiting_count++] = frame;
             xSemaphoreGive(g_lock);
@@ -1146,38 +1122,7 @@ static void udp_init(void)
     };
     ESP_ERROR_CHECK(bind(g_rtp_sock, (struct sockaddr *)&rtp_local,
                          sizeof(rtp_local)) == 0 ? ESP_OK : ESP_FAIL);
-    ESP_LOGI(TAG, "RTP/Opus ready on port %d (WMM video priority)", RTP_PORT);
-}
-
-static void opus_init(void)
-{
-    esp_opus_enc_config_t enc_cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
-    enc_cfg.sample_rate = SAMPLE_RATE;
-    enc_cfg.channel = 1;
-    enc_cfg.bits_per_sample = 16;
-    enc_cfg.bitrate = 48000;
-    enc_cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
-    enc_cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
-    enc_cfg.complexity = 0;
-    enc_cfg.enable_fec = false;
-    enc_cfg.enable_dtx = false;
-    enc_cfg.enable_vbr = false;
-    esp_opus_dec_cfg_t dec_cfg = {
-        .sample_rate = SAMPLE_RATE,
-        .channel = 1,
-        .frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS,
-        .self_delimited = false,
-    };
-    ESP_ERROR_CHECK(esp_opus_enc_open(&enc_cfg, sizeof(enc_cfg), &g_opus_encoder) ==
-                    ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
-    ESP_ERROR_CHECK(esp_opus_dec_open(&dec_cfg, sizeof(dec_cfg), &g_opus_decoder) ==
-                    ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
-    int input_size = 0, output_size = 0;
-    ESP_ERROR_CHECK(esp_opus_enc_get_frame_size(g_opus_encoder, &input_size,
-                                                 &output_size) == ESP_AUDIO_ERR_OK ?
-                    ESP_OK : ESP_FAIL);
-    ESP_LOGI(TAG, "Opus encoder: input=%d bytes, recommended output=%d bytes",
-             input_size, output_size);
+    ESP_LOGI(TAG, "RTP/IMA ADPCM ready on port %d (WMM video priority)", RTP_PORT);
 }
 
 /* ======================================================================== */
@@ -1207,7 +1152,7 @@ void app_main(void)
     ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness,
                          (g_config.hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
     adc_init();
-    opus_init();
+    adpcm_state_reset(&g_adpcm_encoder);
 
     wifi_init();
     udp_init();
@@ -1220,11 +1165,9 @@ void app_main(void)
 #endif
 
     xTaskCreate(net_rx_task,   "net_rx",   4096, NULL, 6, NULL);
-    xTaskCreate(rtp_rx_task,   "rtp_rx",  12288, NULL, 6, NULL);
+    xTaskCreate(rtp_rx_task,   "rtp_rx",   4096, NULL, 6, NULL);
     xTaskCreate(capture_task,  "capture",  4096, NULL, 6, NULL);
-    /* The Espressif Opus encoder uses a large temporary call stack on C3.
-     * 8 KiB causes a deterministic stack-protection reset on first PTT. */
-    xTaskCreate(tx_task,       "tx",      24576, NULL, 5, NULL);
+    xTaskCreate(tx_task,       "tx",       4096, NULL, 5, NULL);
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);
     xTaskCreate(ring_task,     "ring",     4096, NULL, 4, NULL);
     xTaskCreate(hello_task,    "hello",    3072, NULL, 3, NULL);

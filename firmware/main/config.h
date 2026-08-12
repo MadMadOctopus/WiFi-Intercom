@@ -23,18 +23,17 @@
 #define MULTICAST_GROUP       "239.255.42.99"
 #define MULTICAST_TTL         1
 
-/* ---- Audio format (must match the companion RTP/G.722 implementation) -- */
+/* ---- Audio format (must match the companion RTP/IMA ADPCM implementation) */
 #define SAMPLE_RATE     16000
 #define FRAME_SAMPLES   320             /* 20 ms at 16 kHz                   */
-/* The Espressif 16 kHz / 20 ms Opus encoder reports 220 bytes as its required
- * output capacity. 256 bytes gives a small safety margin while keeping every
- * node's RTP receive buffer identical. Normal 48 kb/s CBR packets are 120 B. */
-#define OPUS_MAX_PAYLOAD_LEN 256
+/* Packet-independent IMA ADPCM: 4-byte state header plus 320 four-bit
+ * samples. This costs 64 kb/s per recipient and is inexpensive enough to
+ * encode in real time on an ESP32-C3. */
 
-/* Dynamic RTP payload type 111 is agreed by this intercom protocol for
- * 16 kHz mono Opus. Opus RTP timestamps always advance at 48 kHz. */
-#define RTP_PAYLOAD_TYPE_OPUS 111
-#define RTP_TIMESTAMP_STEP    960
+/* Dynamic RTP payload type 96 is agreed by this intercom protocol for
+ * 16 kHz mono IMA ADPCM. Its RTP clock is the native 16 kHz sample clock. */
+#define RTP_PAYLOAD_TYPE_ADPCM 96
+#define RTP_TIMESTAMP_STEP     FRAME_SAMPLES
 
 /* ESP32-C3 maps precedence 4 to WMM AC_VI, retaining AMPDU while giving
  * voice traffic priority over best-effort data. */

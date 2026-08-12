@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.IO.Ports;
 using Concentus;
-using Concentus.Enums;
+using IntercomCompanion.Audio;
 using static CaptureFormat;
 
 const uint MeshId = 0x4D455348; // MESH
@@ -110,10 +110,17 @@ static async Task MediaLoopAsync(UdpClient socket, TransportRecorder transport, 
     {
         var received = await socket.ReceiveAsync(cancellationToken);
         var data = received.Buffer;
-        if (data.Length <= 12 || data[0] != 0x80 || (data[1] & 0x7f) != 111) continue;
+        if (data.Length <= 12 || data[0] != 0x80) continue;
+        var codec = (data[1] & 0x7f) switch
+        {
+            111 when data.Length <= 12 + 256 => MediaCodec.Opus,
+            96 when data.Length == 12 + ImaAdpcm.PayloadLength => MediaCodec.ImaAdpcm,
+            _ => (MediaCodec?)null,
+        };
+        if (codec is null) continue;
         var sequence = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(2, 2));
         var session = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(8, 4));
-        transport.Accept(session, sequence, data.AsSpan(12));
+        transport.Accept(session, sequence, codec.Value, data.AsSpan(12));
     }
 }
 
@@ -148,6 +155,8 @@ static byte[] PackControl(byte type, uint session, uint sequence, ReadOnlySpan<b
     payload.CopyTo(packet.AsSpan(32));
     return packet;
 }
+
+enum MediaCodec { Opus, ImaAdpcm }
 
 static class CaptureFormat
 {
@@ -263,9 +272,10 @@ sealed class RawSourceRecorder(string path) : IDisposable
 sealed class TransportRecorder(string path) : IDisposable
 {
     private readonly PcmWaveWriter wav = new(path);
-    private readonly SortedDictionary<ushort, byte[]> packetsBySequence = [];
+    private readonly SortedDictionary<ushort, CapturedPacket> packetsBySequence = [];
     private uint session;
     private bool started, ended;
+    private MediaCodec? codec;
     private long packets, duplicates, missing;
     public bool TryStart(uint newSession)
     {
@@ -275,27 +285,32 @@ sealed class TransportRecorder(string path) : IDisposable
     }
     public bool IsSession(uint value) => started && value == session;
     public void MarkEnded() => ended = true;
-    public void Accept(uint packetSession, ushort sequence, ReadOnlySpan<byte> payload)
+    public void Accept(uint packetSession, ushort sequence, MediaCodec packetCodec, ReadOnlySpan<byte> payload)
     {
         if (!IsSession(packetSession) || packetsBySequence.ContainsKey(sequence)) { if (IsSession(packetSession)) duplicates++; return; }
-        packetsBySequence[sequence] = payload.ToArray();
+        if (codec is MediaCodec activeCodec && activeCodec != packetCodec) return;
+        codec ??= packetCodec;
+        packetsBySequence[sequence] = new CapturedPacket(packetCodec, payload.ToArray());
         packets++;
     }
     public void Finish()
     {
         if (packetsBySequence.Count > 0)
         {
-            var decoder = OpusCodecFactory.CreateDecoder(16000, 1, null);
+            IOpusDecoder? opusDecoder = codec == MediaCodec.Opus ? OpusCodecFactory.CreateDecoder(16000, 1, null) : null;
             short[]? last = null;
             var expected = packetsBySequence.Keys.Min();
             var lastSequence = packetsBySequence.Keys.Max();
             while (true)
             {
-                if (packetsBySequence.Remove(expected, out var payload))
+                if (packetsBySequence.Remove(expected, out var packet))
                 {
-                    var pcm = new short[FrameSamples];
-                    var count = decoder.Decode(payload, pcm, pcm.Length, false);
-                    if (count == FrameSamples) { wav.Write(pcm); last = pcm; }
+                    short[]? pcm = null;
+                    if (packet.Codec == MediaCodec.ImaAdpcm)
+                        ImaAdpcm.TryDecode(packet.Payload, out pcm);
+                    else if (opusDecoder?.Decode(packet.Payload, pcm = new short[FrameSamples], FrameSamples, false) != FrameSamples)
+                        pcm = null;
+                    if (pcm is not null) { wav.Write(pcm); last = pcm; }
                     else { missing++; wav.Write(last is null ? new short[FrameSamples] : last.Select(sample => (short)(sample / 2)).ToArray()); }
                 }
                 else { missing++; wav.Write(last is null ? new short[FrameSamples] : last.Select(sample => (short)(sample / 2)).ToArray()); }
@@ -305,8 +320,10 @@ sealed class TransportRecorder(string path) : IDisposable
         }
         wav.Finish();
     }
-    public string Summary => $"Transport: {packets} RTP packets ({packets / 50.0:F2}s), sequence gaps {missing}, duplicates {duplicates}, END seen {ended}.";
+    public string Summary => $"Transport: {packets} {codec?.ToString() ?? "unknown"} RTP packets ({packets / 50.0:F2}s), sequence gaps {missing}, duplicates {duplicates}, END seen {ended}.";
     public void Dispose() => wav.Dispose();
+
+    private sealed record CapturedPacket(MediaCodec Codec, byte[] Payload);
 }
 
 sealed class PcmWaveWriter : IDisposable

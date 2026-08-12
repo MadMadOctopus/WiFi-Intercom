@@ -2,24 +2,22 @@ using System.Buffers.Binary;
 
 namespace IntercomCompanion.Core;
 
-/// <summary>Minimal RFC 3550 RTP framing for agreed Opus payload type 111.</summary>
+/// <summary>Minimal RFC 3550 RTP framing for agreed IMA ADPCM payload type 96.</summary>
 internal sealed record RtpPacket(ushort Sequence, uint Timestamp, uint Ssrc, byte[] Payload);
 
 internal static class Rtp
 {
     public const int Port = 45679;
-    public const byte OpusPayloadType = 111;
+    public const byte AdpcmPayloadType = 96;
     public const int HeaderLength = 12;
-    // Espressif's 16 kHz / 20 ms encoder requests 220 bytes; 256 keeps all
-    // device and PC RTP buffers compatible. Normal CBR packets are 120 bytes.
-    public const int OpusMaxPayloadLength = 256;
-    public const uint TimestampStep = 960; // Opus RTP always uses a 48 kHz clock
+    public const int AdpcmPayloadLength = 164;
+    public const uint TimestampStep = 320; // Native 16 kHz sample clock, 20 ms/frame
 
     public static byte[] Pack(uint ssrc, ushort sequence, uint timestamp, ReadOnlySpan<byte> payload)
     {
         var datagram = new byte[HeaderLength + payload.Length];
         datagram[0] = 0x80;
-        datagram[1] = OpusPayloadType;
+        datagram[1] = AdpcmPayloadType;
         BinaryPrimitives.WriteUInt16BigEndian(datagram.AsSpan(2), sequence);
         BinaryPrimitives.WriteUInt32BigEndian(datagram.AsSpan(4), timestamp);
         BinaryPrimitives.WriteUInt32BigEndian(datagram.AsSpan(8), ssrc);
@@ -30,8 +28,8 @@ internal static class Rtp
     public static bool TryParse(ReadOnlySpan<byte> datagram, out RtpPacket? packet)
     {
         packet = null;
-        if (datagram.Length <= HeaderLength || datagram.Length > HeaderLength + OpusMaxPayloadLength ||
-            datagram[0] != 0x80 || (datagram[1] & 0x7f) != OpusPayloadType) return false;
+        if (datagram.Length != HeaderLength + AdpcmPayloadLength || datagram[0] != 0x80 ||
+            (datagram[1] & 0x7f) != AdpcmPayloadType) return false;
         packet = new RtpPacket(BinaryPrimitives.ReadUInt16BigEndian(datagram[2..]),
             BinaryPrimitives.ReadUInt32BigEndian(datagram[4..]),
             BinaryPrimitives.ReadUInt32BigEndian(datagram[8..]), datagram[HeaderLength..].ToArray());

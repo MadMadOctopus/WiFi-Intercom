@@ -30,8 +30,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private readonly IntercomNode node;
     private readonly AudioEngine audio;
     private readonly JitterBuffer jitter = new();
-    private readonly Opus encoder = new();
-    private readonly Opus decoder = new();
+    private readonly ImaAdpcm encoder = new();
     private readonly Channel<RtpPacketReceivedEventArgs> audioPackets = Channel.CreateBounded<RtpPacketReceivedEventArgs>(
         new BoundedChannelOptions(128) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
     private readonly object gate = new();
@@ -171,7 +170,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         transmitSequence = 0;
         transmitRtpSequence = (ushort)Random.Shared.Next(ushort.MaxValue + 1);
         transmitRtpTimestamp = unchecked((uint)Random.Shared.NextInt64(uint.MaxValue + 1L));
-        encoder.ResetEncoder();
+        encoder.Reset();
         transmitStopping?.Cancel();
         transmitStopping?.Dispose();
         transmitStopping = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
@@ -353,8 +352,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
             {
                 var packet = eventArgs.Packet;
                 short[] pcm;
-                try { pcm = decoder.Decode(packet.Payload); }
-                catch (InvalidOperationException) { continue; }
+                if (!ImaAdpcm.TryDecode(packet.Payload, out pcm) || pcm is null) continue;
                 Interlocked.Increment(ref decodedFrameCount);
                 lock (gate)
                 {
@@ -409,7 +407,6 @@ internal sealed class ReceiveSession : IAsyncDisposable
         CancelTransmitLocked();
         senderId = packet.SenderId;
         sessionId = packet.SessionId;
-        decoder.ResetDecoder();
         lastAudioAt = DateTimeOffset.UtcNow;
         ending = false;
         drainFrames = 0;

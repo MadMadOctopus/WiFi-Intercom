@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.c"
+        "adpcm.c"
         "device_config.c"
         "protocol.c"
         "ring_controller.cpp"
@@ -18,7 +19,6 @@ idf_component_register(
         esp_timer
         nvs_flash
         lwip
-        espressif__esp_audio_codec
 )
 
 # Enabled only for the hardware diagnostic image built with

@@ -28,8 +28,9 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private readonly IntercomNode node;
     private readonly AudioEngine audio;
     private readonly JitterBuffer jitter = new();
-    private readonly ImaAdpcm encoder = new();
-    private readonly Channel<IntercomPacketReceivedEventArgs> audioPackets = Channel.CreateBounded<IntercomPacketReceivedEventArgs>(
+    private readonly G722 encoder = new();
+    private readonly G722 decoder = new();
+    private readonly Channel<RtpPacketReceivedEventArgs> audioPackets = Channel.CreateBounded<RtpPacketReceivedEventArgs>(
         new BoundedChannelOptions(128) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
     private readonly object gate = new();
     private readonly CancellationTokenSource stopping = new();
@@ -53,6 +54,8 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private bool pttHeld;
     private uint transmitSession;
     private uint transmitSequence;
+    private ushort transmitRtpSequence;
+    private uint transmitRtpTimestamp;
     private bool transmitDirected;
     private Peer? transmitTarget;
     private IReadOnlyList<Peer> transmitPeers = [];
@@ -66,7 +69,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private long playedFrameCount;
     private long concealedFrameCount;
     private long sequenceGapCount;
-    private uint previousSequence;
+    private ushort previousSequence;
     private bool havePreviousSequence;
 
     public ReceiveSession(IntercomNode node, AudioEngine audio)
@@ -74,6 +77,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         this.node = node;
         this.audio = audio;
         node.PacketReceived += OnPacketReceived;
+        node.RtpPacketReceived += OnRtpPacketReceived;
     }
 
     public IntercomState State { get { lock (gate) return state; } }
@@ -163,6 +167,8 @@ internal sealed class ReceiveSession : IAsyncDisposable
         transmitTarget = target;
         transmitSession = IntercomNode.NewSessionId();
         transmitSequence = 0;
+        transmitRtpSequence = (ushort)Random.Shared.Next(ushort.MaxValue + 1);
+        transmitRtpTimestamp = unchecked((uint)Random.Shared.NextInt64(uint.MaxValue + 1L));
         encoder.Reset();
         transmitStopping?.Cancel();
         transmitStopping?.Dispose();
@@ -229,11 +235,11 @@ internal sealed class ReceiveSession : IAsyncDisposable
         {
             await foreach (var liveFrame in audio.CapturedFrames.ReadAllAsync(stopping.Token))
             {
-                uint outgoingSession = 0, outgoingSequence = 0;
+                uint outgoingSession = 0, outgoingTimestamp = 0;
+                ushort outgoingSequence = 0;
                 byte[]? payload = null;
                 IReadOnlyList<Peer>? peers = null;
                 Peer? target = null;
-                byte flags = 0;
                 lock (gate)
                 {
                     if (state == IntercomState.WaitingForFloor)
@@ -250,18 +256,22 @@ internal sealed class ReceiveSession : IAsyncDisposable
                     var frame = heldFrames.Count > 0 ? heldFrames.Dequeue() : liveFrame;
                     payload = encoder.Encode(frame);
                     outgoingSession = transmitSession;
-                    outgoingSequence = transmitSequence++;
+                    outgoingSequence = transmitRtpSequence++;
+                    outgoingTimestamp = transmitRtpTimestamp;
+                    transmitRtpTimestamp += Rtp.TimestampStep;
+                    transmitSequence++;
                     peers = transmitPeers;
                     target = transmitTarget;
-                    flags = transmitDirected ? Protocol.DirectedFlag : (byte)0;
                 }
                 if (payload is null) continue;
                 try
                 {
                     if (target is not null)
-                        await node.SendToEndpointAsync(PacketType.Audio, outgoingSession, outgoingSequence, payload, target.Endpoint, flags, stopping.Token);
+                        await node.SendRtpToEndpointAsync(outgoingSession, outgoingSequence, outgoingTimestamp,
+                            payload, target.Endpoint, stopping.Token);
                     else if (peers is not null)
-                        await node.SendToPeersAsync(PacketType.Audio, outgoingSession, outgoingSequence, payload, peers, flags, stopping.Token);
+                        await node.SendRtpToPeersAsync(outgoingSession, outgoingSequence, outgoingTimestamp,
+                            payload, peers, stopping.Token);
                 }
                 catch (OperationCanceledException) { }
                 catch (SocketException exception) { Diagnostic?.Invoke($"Audio send failed: {exception.SocketErrorCode}"); }
@@ -303,20 +313,6 @@ internal sealed class ReceiveSession : IAsyncDisposable
                 _ = node.SendToEndpointAsync(PacketType.Busy, sessionId, 0, [], eventArgs.Endpoint);
             return;
         }
-        if (packet.Type == PacketType.Audio)
-        {
-            lock (gate)
-            {
-                if (state is IntercomState.Claiming or IntercomState.Talking)
-                {
-                    if (RemoteWins(packet)) { CancelTransmitLocked(); BeginReceivingLocked(packet, eventArgs.Endpoint); }
-                    else return;
-                }
-            }
-            Interlocked.Increment(ref audioPacketCount);
-            audioPackets.Writer.TryWrite(eventArgs);
-            return;
-        }
         lock (gate)
         {
             if (packet.Type == PacketType.Busy && state == IntercomState.Claiming)
@@ -333,6 +329,17 @@ internal sealed class ReceiveSession : IAsyncDisposable
         }
     }
 
+    private void OnRtpPacketReceived(object? sender, RtpPacketReceivedEventArgs eventArgs)
+    {
+        lock (gate)
+        {
+            if (state is not (IntercomState.Receiving or IntercomState.WaitingForFloor) ||
+                eventArgs.Packet.Ssrc != sessionId) return;
+            Interlocked.Increment(ref audioPacketCount);
+            audioPackets.Writer.TryWrite(eventArgs);
+        }
+    }
+
     private bool RemoteWins(IntercomPacket packet) =>
         packet.SessionId < transmitSession || (packet.SessionId == transmitSession && packet.SenderId < node.NodeId);
 
@@ -343,20 +350,19 @@ internal sealed class ReceiveSession : IAsyncDisposable
             await foreach (var eventArgs in audioPackets.Reader.ReadAllAsync(stopping.Token))
             {
                 var packet = eventArgs.Packet;
-                if (!ImaAdpcm.TryDecode(packet.Payload, out var pcm) || pcm is null) continue;
+                short[] pcm;
+                try { pcm = decoder.Decode(packet.Payload); }
+                catch (InvalidOperationException) { continue; }
                 Interlocked.Increment(ref decodedFrameCount);
                 lock (gate)
                 {
-                    if (state == IntercomState.Idle) BeginReceivingLocked(packet, eventArgs.Endpoint);
                     if (state is not (IntercomState.Receiving or IntercomState.WaitingForFloor) ||
-                        packet.SenderId != senderId || packet.SessionId != sessionId) continue;
-                    if (havePreviousSequence && packet.Sequence > previousSequence + 1)
-                        Interlocked.Add(ref sequenceGapCount, packet.Sequence - previousSequence - 1);
+                        packet.Ssrc != sessionId) continue;
+                    if (havePreviousSequence && packet.Sequence != unchecked((ushort)(previousSequence + 1)))
+                        Interlocked.Increment(ref sequenceGapCount);
                     previousSequence = packet.Sequence;
                     havePreviousSequence = true;
                     lastAudioAt = DateTimeOffset.UtcNow;
-                    LastTalker = new Peer(packet.SenderId, eventArgs.Endpoint,
-                        node.Peers.FirstOrDefault(peer => peer.NodeId == packet.SenderId)?.Alias ?? $"Device {packet.SenderId:x8}", DateTimeOffset.UtcNow);
                     jitter.Push(packet.Sequence, pcm);
                 }
             }
@@ -401,6 +407,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         CancelTransmitLocked();
         senderId = packet.SenderId;
         sessionId = packet.SessionId;
+        decoder.Reset();
         lastAudioAt = DateTimeOffset.UtcNow;
         ending = false;
         drainFrames = 0;
@@ -474,6 +481,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     public void Stop()
     {
         node.PacketReceived -= OnPacketReceived;
+        node.RtpPacketReceived -= OnRtpPacketReceived;
         if (!stopping.IsCancellationRequested) stopping.Cancel();
         audioPackets.Writer.TryComplete();
         lock (gate)

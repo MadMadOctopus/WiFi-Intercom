@@ -19,12 +19,23 @@
 
 /* ---- Group transport (no configured peers) ---------------------------- */
 #define UDP_PORT              45678
+#define RTP_PORT              45679
 #define MULTICAST_GROUP       "239.255.42.99"
 #define MULTICAST_TTL         1
 
-/* ---- Audio format (do NOT change without changing app.py) -------------- */
+/* ---- Audio format (must match the companion RTP/G.722 implementation) -- */
 #define SAMPLE_RATE     16000
 #define FRAME_SAMPLES   320             /* 20 ms at 16 kHz                   */
+#define G722_PAYLOAD_LEN 160             /* 64 kb/s, 20 ms G.722 RTP payload */
+
+/* RTP static payload type 9 is G.722. Per RFC 3551 it carries a 16 kHz
+ * G.722 signal but its RTP timestamp clock advances at 8 kHz. */
+#define RTP_PAYLOAD_TYPE_G722 9
+#define RTP_TIMESTAMP_STEP    160
+
+/* ESP32-C3 maps precedence 4 to WMM AC_VI, retaining AMPDU while giving
+ * voice traffic priority over best-effort data. */
+#define INTERCOM_IP_TOS_VIDEO 0x80
 
 /* ---- Microphone conditioning ------------------------------------------- */
 #define MIC_GAIN        6               /* conservative capture gain         */

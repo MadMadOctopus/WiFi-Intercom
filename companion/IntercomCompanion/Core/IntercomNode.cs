@@ -21,9 +21,12 @@ internal sealed class IntercomNode : IAsyncDisposable
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<DeviceConfigurationReceivedEventArgs>>
         configurationRequests = new();
     private readonly SemaphoreSlim sendGate = new(1, 1);
+    private readonly SemaphoreSlim mediaSendGate = new(1, 1);
     private readonly CancellationTokenSource stopping = new();
     private readonly UdpClient client;
+    private readonly UdpClient mediaClient;
     private Task? receiveTask;
+    private Task? mediaReceiveTask;
     private Task? helloTask;
     private Task? expiryTask;
 
@@ -32,9 +35,15 @@ internal sealed class IntercomNode : IAsyncDisposable
         this.settings = settings;
         client = new UdpClient(AddressFamily.InterNetwork);
         client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        SetVideoPriority(client.Client);
         client.Client.Bind(new IPEndPoint(IPAddress.Any, Protocol.Port));
         client.JoinMulticastGroup(MulticastGroup, 1);
         client.Ttl = 1;
+
+        mediaClient = new UdpClient(AddressFamily.InterNetwork);
+        mediaClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        SetVideoPriority(mediaClient.Client);
+        mediaClient.Client.Bind(new IPEndPoint(IPAddress.Any, Rtp.Port));
     }
 
     public uint NodeId => settings.NodeId;
@@ -51,10 +60,12 @@ internal sealed class IntercomNode : IAsyncDisposable
     public event EventHandler? PeersChanged;
     public event Action<string>? Diagnostic;
     public event EventHandler<IntercomPacketReceivedEventArgs>? PacketReceived;
+    public event EventHandler<RtpPacketReceivedEventArgs>? RtpPacketReceived;
 
     public void Start()
     {
         receiveTask = Task.Run(ReceiveLoopAsync);
+        mediaReceiveTask = Task.Run(MediaReceiveLoopAsync);
         helloTask = Task.Run(HelloLoopAsync);
         expiryTask = Task.Run(ExpiryLoopAsync);
         _ = SendHelloAsync(stopping.Token);
@@ -137,6 +148,21 @@ internal sealed class IntercomNode : IAsyncDisposable
             await SendAsync(type, session, sequence, payload, peer.Endpoint, flags, cancellationToken);
     }
 
+    public Task SendRtpToEndpointAsync(uint session, ushort sequence, uint timestamp, byte[] payload,
+                                       IPEndPoint controlDestination,
+                                       CancellationToken cancellationToken = default) =>
+        SendRtpAsync(session, sequence, timestamp, payload,
+            new IPEndPoint(controlDestination.Address, Rtp.Port), cancellationToken);
+
+    public async Task SendRtpToPeersAsync(uint session, ushort sequence, uint timestamp, byte[] payload,
+                                          IEnumerable<Peer> destinations,
+                                          CancellationToken cancellationToken = default)
+    {
+        foreach (var peer in destinations)
+            await SendRtpAsync(session, sequence, timestamp, payload,
+                new IPEndPoint(peer.Endpoint.Address, Rtp.Port), cancellationToken);
+    }
+
     private async Task ReceiveLoopAsync()
     {
         try
@@ -158,6 +184,26 @@ internal sealed class IntercomNode : IAsyncDisposable
         catch (SocketException exception) when (!stopping.IsCancellationRequested)
         {
             Diagnostic?.Invoke($"Network receive stopped: {exception.SocketErrorCode}");
+        }
+    }
+
+    private async Task MediaReceiveLoopAsync()
+    {
+        try
+        {
+            while (!stopping.IsCancellationRequested)
+            {
+                var received = await mediaClient.ReceiveAsync(stopping.Token);
+                if (!Rtp.TryParse(received.Buffer, out var packet) || packet is null)
+                    continue;
+                RtpPacketReceived?.Invoke(this, new RtpPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (SocketException exception) when (!stopping.IsCancellationRequested)
+        {
+            Diagnostic?.Invoke($"RTP receive stopped: {exception.SocketErrorCode}");
         }
     }
 
@@ -244,6 +290,23 @@ internal sealed class IntercomNode : IAsyncDisposable
         finally { sendGate.Release(); }
     }
 
+    private async Task SendRtpAsync(uint session, ushort sequence, uint timestamp, byte[] payload,
+                                    IPEndPoint destination, CancellationToken cancellationToken)
+    {
+        var datagram = Rtp.Pack(session, sequence, timestamp, payload);
+        await mediaSendGate.WaitAsync(cancellationToken);
+        try { await mediaClient.SendAsync(datagram, destination, cancellationToken); }
+        finally { mediaSendGate.Release(); }
+    }
+
+    // WMM maps DSCP precedence 4 to the video access category, which keeps
+    // voice media ahead of best-effort traffic without abusing voice AC.
+    private static void SetVideoPriority(Socket socket)
+    {
+        try { socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.TypeOfService, 0x80); }
+        catch (SocketException) { }
+    }
+
     private static uint TimestampMs() => unchecked((uint)Environment.TickCount64);
     public static uint NewSessionId()
     {
@@ -254,9 +317,10 @@ internal sealed class IntercomNode : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         Stop();
-        var tasks = new[] { receiveTask, helloTask, expiryTask }.OfType<Task>();
+        var tasks = new[] { receiveTask, mediaReceiveTask, helloTask, expiryTask }.OfType<Task>();
         try { await Task.WhenAll(tasks); } catch (OperationCanceledException) { }
         sendGate.Dispose();
+        mediaSendGate.Dispose();
         stopping.Dispose();
     }
 
@@ -265,6 +329,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     {
         if (!stopping.IsCancellationRequested) stopping.Cancel();
         client.Dispose();
+        mediaClient.Dispose();
     }
 }
 
@@ -280,5 +345,11 @@ internal sealed class DeviceConfigurationReceivedEventArgs(uint nodeId, uint ses
 internal sealed class IntercomPacketReceivedEventArgs(IntercomPacket packet, IPEndPoint endpoint) : EventArgs
 {
     public IntercomPacket Packet { get; } = packet;
+    public IPEndPoint Endpoint { get; } = endpoint;
+}
+
+internal sealed class RtpPacketReceivedEventArgs(RtpPacket packet, IPEndPoint endpoint) : EventArgs
+{
+    public RtpPacket Packet { get; } = packet;
     public IPEndPoint Endpoint { get; } = endpoint;
 }

@@ -2,15 +2,16 @@
  * app_main.c - Wi-Fi half-duplex push-to-talk intercom (ESP32-C3 peer).
  *
  * One node of a two-peer intercom.  The other peer is the PC application in
- * ../pc_app.  Both speak the identical UDP protocol (protocol.c) and IMA ADPCM
- * codec (adpcm.c).
+ * ../companion. Floor control/configuration use the compact PTT1 UDP protocol;
+ * media uses standards-compatible RTP/G.722 over a separate UDP port.
  *
  * Tasks (FreeRTOS), decoupled by queues / a shared mutex so Wi-Fi, capture,
  * playback and button handling never block each other:
  *
  *   capture_task   ADC continuous @16kHz -> conditioned 320-sample frames -> mic_q
- *   tx_task        PTT + floor control; drains mic_q, encodes, sends AUDIO
- *   net_rx_task    receives UDP, runs receive-side floor logic, fills jitter buf
+ *   tx_task        PTT + floor control; drains mic_q, encodes, sends RTP
+ *   net_rx_task    receives PTT1 control and runs receive-side floor logic
+ *   rtp_rx_task    receives RTP/G.722 and fills the jitter buffer
  *   playback_task  every 20 ms pops jitter buffer -> I2S (muted while we talk)
  *
  * Pin map (see README / config.h):
@@ -43,7 +44,8 @@
 #include "config.h"
 #include "device_config.h"
 #include "protocol.h"
-#include "adpcm.h"
+#include "esp_g722_enc.h"
+#include "esp_g722_dec.h"
 #include "ring_controller.h"
 #include "usb_control.h"
 
@@ -87,7 +89,8 @@ static struct {
     uint32_t tx_last_heartbeat_ms;
     int      tx_buffer_index;
     int      tx_buffer_count;
-    adpcm_state_t enc;
+    uint16_t tx_rtp_sequence;
+    uint32_t tx_rtp_timestamp;
     uint32_t claim_start_ms;
     int claims_sent;
     uint32_t last_claim_ms;
@@ -115,8 +118,8 @@ static struct {
     struct sockaddr_in last_talker_address;
     uint32_t error_until_ms;
 
-    /* Learned from HELLO/control/audio source addresses. Broadcast AUDIO is
-     * mirrored to these endpoints because Wi-Fi multicast delivery is often
+    /* Learned from HELLO/control source addresses. Broadcast RTP is mirrored
+     * to these endpoints because Wi-Fi multicast delivery is often
      * lossy, while multicast remains the peerless discovery/floor channel. */
     peer_t peers[PEER_CAP];
 
@@ -133,11 +136,14 @@ static SemaphoreHandle_t g_lock;
 static QueueHandle_t     mic_q;
 
 static int                 g_sock = -1;
+static int                 g_rtp_sock = -1;
 static struct sockaddr_in  g_group;
 static uint32_t            g_wifi_ip_addr;
 
 static i2s_chan_handle_t          i2s_tx;
 static adc_continuous_handle_t    adc_handle;
+static void                      *g_g722_encoder;
+static void                      *g_g722_decoder;
 
 /* ======================================================================== */
 /* helpers                                                                   */
@@ -177,17 +183,54 @@ static void send_to_active_peers(uint8_t type, uint8_t flags, uint32_t session,
     }
 }
 
+static void send_rtp_to(const struct sockaddr_in *control_destination,
+                        uint32_t session, uint16_t sequence, uint32_t timestamp,
+                        const uint8_t *payload, uint16_t payload_len)
+{
+    if (g_rtp_sock < 0 || payload_len > G722_PAYLOAD_LEN) return;
+    uint8_t packet[12 + G722_PAYLOAD_LEN];
+    packet[0] = 0x80;                       /* RTP v2, no extensions/CSRC */
+    packet[1] = RTP_PAYLOAD_TYPE_G722;      /* static G.722 payload type */
+    packet[2] = (uint8_t)(sequence >> 8);
+    packet[3] = (uint8_t)sequence;
+    packet[4] = (uint8_t)(timestamp >> 24);
+    packet[5] = (uint8_t)(timestamp >> 16);
+    packet[6] = (uint8_t)(timestamp >> 8);
+    packet[7] = (uint8_t)timestamp;
+    packet[8] = (uint8_t)(session >> 24);   /* SSRC = PTT session */
+    packet[9] = (uint8_t)(session >> 16);
+    packet[10] = (uint8_t)(session >> 8);
+    packet[11] = (uint8_t)session;
+    memcpy(packet + 12, payload, payload_len);
+
+    struct sockaddr_in destination = *control_destination;
+    destination.sin_port = htons(RTP_PORT);
+    sendto(g_rtp_sock, packet, 12 + payload_len, 0,
+           (const struct sockaddr *)&destination, sizeof(destination));
+}
+
+static void send_rtp_to_active_peers(uint32_t session, uint16_t sequence,
+                                     uint32_t timestamp, const uint8_t *payload,
+                                     uint16_t payload_len)
+{
+    peer_t peers[PEER_CAP];
+    uint32_t t = now_ms();
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    memcpy(peers, g.peers, sizeof(peers));
+    xSemaphoreGive(g_lock);
+    for (int i = 0; i < PEER_CAP; ++i) {
+        if (peers[i].id != 0 && t - peers[i].last_seen_ms <= PEER_EXPIRE_MS)
+            send_rtp_to(&peers[i].address, session, sequence, timestamp,
+                        payload, payload_len);
+    }
+}
+
 static void send_packet(uint8_t type, uint32_t session, uint32_t sequence,
                         const uint8_t *payload, uint16_t payload_len)
 {
     uint8_t flags = (g.tx_directed &&
-        (type == PKT_CLAIM || type == PKT_HEARTBEAT || type == PKT_END ||
-         type == PKT_AUDIO)) ? PROTO_FLAG_DIRECTED : 0;
-    if (type == PKT_AUDIO && g.tx_directed) {
-        send_packet_to(&g.tx_audio_destination, type, flags, session, sequence,
-                       payload, payload_len);
-        return;
-    }
+        (type == PKT_CLAIM || type == PKT_HEARTBEAT || type == PKT_END))
+        ? PROTO_FLAG_DIRECTED : 0;
     /* All message traffic is learned-peer unicast. HELLO is deliberately the
      * sole multicast packet type, sent directly by hello_task below. */
     send_to_active_peers(type, flags, session, sequence, payload, payload_len);
@@ -321,6 +364,7 @@ static void begin_receiving(const intercom_pkt_t *p)
     g.rx_ending = false;
     g.rx_drain = 0;
     jb_reset();
+    esp_g722_dec_reset(g_g722_decoder);
     g.state = ST_RECEIVING;
     ESP_LOGI(TAG, "RX start: sender=%08x session=%08x",
              (unsigned)p->sender_id, (unsigned)p->session_id);
@@ -360,19 +404,23 @@ static void handle_claim(const intercom_pkt_t *p, const struct sockaddr_in *sour
     }
 }
 
-static void handle_audio(const intercom_pkt_t *p)
+static void handle_rtp(uint32_t session, uint16_t sequence,
+                       const uint8_t *payload, uint16_t payload_len)
 {
-    if (g.state == ST_CLAIMING || g.state == ST_TALKING) {
-        if (remote_wins(p)) begin_receiving(p);
-        else return;
-    }
-    if (g.state == ST_IDLE) begin_receiving(p);
-    if (g.state != ST_RECEIVING || p->session_id != g.rx_session) return;
-
+    if (g.state != ST_RECEIVING || session != g.rx_session) return;
     g.rx_last_ms = now_ms();
     static int16_t pcm[FRAME_SAMPLES];
-    if (adpcm_decode_frame(p->payload, p->payload_len, pcm) == 0)
-        jb_push(p->sequence, pcm);
+    esp_audio_dec_in_raw_t raw = {
+        .buffer = (uint8_t *)payload, .len = payload_len,
+        .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
+    };
+    esp_audio_dec_out_frame_t frame = {
+        .buffer = (uint8_t *)pcm, .len = sizeof(pcm),
+    };
+    esp_audio_dec_info_t info = {0};
+    if (esp_g722_dec_decode(g_g722_decoder, &raw, &frame, &info) == ESP_AUDIO_ERR_OK &&
+        frame.decoded_size == sizeof(pcm))
+        jb_push(sequence, pcm);
 }
 
 static void handle_end(const intercom_pkt_t *p)
@@ -431,7 +479,6 @@ static void net_rx_task(void *arg)
         peer_seen(&pkt, &src);
         switch (pkt.type) {
             case PKT_CLAIM: handle_claim(&pkt, &src); break;
-            case PKT_AUDIO: handle_audio(&pkt); break;
             case PKT_END:   handle_end(&pkt);   break;
             case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;
             case PKT_CONFIG_GET:
@@ -441,12 +488,32 @@ static void net_rx_task(void *arg)
                 break;
             default: break;
         }
-        if (pkt.type == PKT_AUDIO && g.state == ST_RECEIVING &&
+        if (pkt.type == PKT_CLAIM && g.state == ST_RECEIVING &&
             pkt.session_id == g.rx_session) {
             g.last_talker_id = pkt.sender_id;
             g.last_talker_address = src;
             g.have_last_talker = true;
         }
+        xSemaphoreGive(g_lock);
+    }
+}
+
+static void rtp_rx_task(void *arg)
+{
+    uint8_t buf[12 + G722_PAYLOAD_LEN];
+    while (1) {
+        struct sockaddr_in source;
+        socklen_t source_len = sizeof(source);
+        int n = recvfrom(g_rtp_sock, buf, sizeof(buf), 0,
+                         (struct sockaddr *)&source, &source_len);
+        if (n != 12 + G722_PAYLOAD_LEN || (buf[0] >> 6) != 2 ||
+            (buf[1] & 0x7f) != RTP_PAYLOAD_TYPE_G722)
+            continue;
+        uint16_t sequence = ((uint16_t)buf[2] << 8) | buf[3];
+        uint32_t session = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
+                           ((uint32_t)buf[10] << 8) | buf[11];
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        handle_rtp(session, sequence, buf + 12, (uint16_t)(n - 12));
         xSemaphoreGive(g_lock);
     }
 }
@@ -466,9 +533,11 @@ static void start_tx_locked(uint32_t t, bool directed,
     g.tx_sequence = 0;
     g.tx_last_audio_ms = 0;
     g.tx_last_heartbeat_ms = 0;
+    g.tx_rtp_sequence = (uint16_t)esp_random();
+    g.tx_rtp_timestamp = esp_random();
     g.tx_directed = directed;
     if (destination) g.tx_audio_destination = *destination;
-    adpcm_state_reset(&g.enc);
+    esp_g722_enc_reset(g_g722_encoder);
     g.claim_start_ms = t;
     g.last_claim_ms = 0;
     g.claims_sent = 0;
@@ -578,7 +647,6 @@ static void tx_task(void *arg)
             }
             if (t - g.claim_start_ms >= PRE_AUDIO_DELAY_MS && g.state == ST_CLAIMING) {
                 g.state = ST_TALKING;
-                adpcm_state_reset(&g.enc);
                 g.tx_sequence = 0;
                 ESP_LOGI(TAG, "TX talking");
             }
@@ -617,12 +685,31 @@ static void tx_task(void *arg)
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
         if (g.state == ST_TALKING) {
-            static uint8_t payload[ADPCM_PAYLOAD_LEN];
-            adpcm_encode_frame(&g.enc, frame.pcm, payload);
-            uint32_t session = g.tx_session, sequence = g.tx_sequence++;
+            static uint8_t payload[G722_PAYLOAD_LEN];
+            esp_audio_enc_in_frame_t input = {
+                .buffer = (uint8_t *)frame.pcm, .len = sizeof(frame.pcm),
+            };
+            esp_audio_enc_out_frame_t output = {
+                .buffer = payload, .len = sizeof(payload),
+            };
+            uint32_t session = g.tx_session;
+            uint16_t rtp_sequence = g.tx_rtp_sequence++;
+            uint32_t rtp_timestamp = g.tx_rtp_timestamp;
             g.tx_last_audio_ms = t;
+            g.tx_rtp_timestamp += RTP_TIMESTAMP_STEP;
+            g.tx_sequence++;
+            bool directed = g.tx_directed;
+            struct sockaddr_in destination = g.tx_audio_destination;
             xSemaphoreGive(g_lock);
-            send_packet(PKT_AUDIO, session, sequence, payload, ADPCM_PAYLOAD_LEN);
+            if (esp_g722_enc_process(g_g722_encoder, &input, &output) == ESP_AUDIO_ERR_OK &&
+                output.encoded_bytes == G722_PAYLOAD_LEN) {
+                if (directed)
+                    send_rtp_to(&destination, session, rtp_sequence, rtp_timestamp,
+                                payload, output.encoded_bytes);
+                else
+                    send_rtp_to_active_peers(session, rtp_sequence, rtp_timestamp,
+                                             payload, output.encoded_bytes);
+            }
         } else if (g.waiting_for_floor && g.waiting_count < BUSY_BUFFER_FRAMES) {
             g.waiting_frames[g.waiting_count++] = frame;
             xSemaphoreGive(g_lock);
@@ -970,6 +1057,8 @@ static void udp_init(void)
     g_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     int reuse = 1;
     setsockopt(g_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    int tos = INTERCOM_IP_TOS_VIDEO;
+    setsockopt(g_sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
     struct sockaddr_in local = {
         .sin_family = AF_INET,
         .sin_port = htons(UDP_PORT),
@@ -986,6 +1075,33 @@ static void udp_init(void)
                                &ttl, sizeof(ttl)) == 0 ? ESP_OK : ESP_FAIL);
     ESP_LOGI(TAG, "UDP ready on port %d; waiting for multicast join", UDP_PORT);
     udp_join_multicast(g_wifi_ip_addr);  /* covers an exceptionally fast DHCP lease */
+
+    g_rtp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ESP_ERROR_CHECK(g_rtp_sock >= 0 ? ESP_OK : ESP_FAIL);
+    setsockopt(g_rtp_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(g_rtp_sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+    struct sockaddr_in rtp_local = {
+        .sin_family = AF_INET,
+        .sin_port = htons(RTP_PORT),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+    ESP_ERROR_CHECK(bind(g_rtp_sock, (struct sockaddr *)&rtp_local,
+                         sizeof(rtp_local)) == 0 ? ESP_OK : ESP_FAIL);
+    ESP_LOGI(TAG, "RTP/G.722 ready on port %d (WMM video priority)", RTP_PORT);
+}
+
+static void g722_init(void)
+{
+    esp_g722_enc_config_t enc_cfg = ESP_G722_ENC_CONFIG_DEFAULT();
+    esp_g722_dec_cfg_t dec_cfg = {
+        .sample_rate = SAMPLE_RATE,
+        .bitrate = 64000,
+        .packed = true,
+    };
+    ESP_ERROR_CHECK(esp_g722_enc_open(&enc_cfg, sizeof(enc_cfg), &g_g722_encoder) ==
+                    ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
+    ESP_ERROR_CHECK(esp_g722_dec_open(&dec_cfg, sizeof(dec_cfg), &g_g722_decoder) ==
+                    ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
 }
 
 /* ======================================================================== */
@@ -1015,11 +1131,13 @@ void app_main(void)
     ring_controller_init(LED_RING_GPIO, LED_RING_COUNT, g_config.led_brightness,
                          (g_config.hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
     adc_init();
+    g722_init();
 
     wifi_init();
     udp_init();
 
     xTaskCreate(net_rx_task,   "net_rx",   4096, NULL, 6, NULL);
+    xTaskCreate(rtp_rx_task,   "rtp_rx",   4096, NULL, 6, NULL);
     xTaskCreate(capture_task,  "capture",  4096, NULL, 6, NULL);
     xTaskCreate(tx_task,       "tx",       4096, NULL, 5, NULL);
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);

@@ -136,7 +136,6 @@ static struct {
     /* transmit */
     uint32_t tx_session;
     uint32_t tx_sequence;
-    uint32_t tx_last_audio_ms;
     uint32_t tx_last_heartbeat_ms;
     int      tx_buffer_index;
     int      tx_buffer_count;
@@ -571,7 +570,6 @@ static void start_tx_locked(uint32_t t, bool directed,
 {
     g.tx_session = esp_random();
     g.tx_sequence = 0;
-    g.tx_last_audio_ms = 0;
     g.tx_last_heartbeat_ms = 0;
     g.tx_rtp_sequence = (uint16_t)esp_random();
     g.tx_rtp_timestamp = esp_random();
@@ -691,7 +689,11 @@ static void tx_task(void *arg)
                 ESP_LOGI(TAG, "TX talking");
             }
         }
-        bool can_send = g.state == ST_TALKING && t - g.tx_last_audio_ms >= 20;
+        /* The ADC is the media clock: it delivers one fully formed frame per
+         * 20 ms. Do not rate-limit here. The previous timer gate drained and
+         * discarded frames between send slots, which produced a time-compressed
+         * stream even after replacing Opus with cheap IMA ADPCM. */
+        bool can_send = g.state == ST_TALKING;
         bool send_heartbeat = g.state == ST_TALKING && g.tx_directed &&
                               t - g.tx_last_heartbeat_ms >= 100;
         uint32_t heartbeat_session = g.tx_session;
@@ -729,7 +731,6 @@ static void tx_task(void *arg)
             uint32_t session = g.tx_session;
             uint16_t rtp_sequence = g.tx_rtp_sequence++;
             uint32_t rtp_timestamp = g.tx_rtp_timestamp;
-            g.tx_last_audio_ms = t;
             g.tx_rtp_timestamp += RTP_TIMESTAMP_STEP;
             g.tx_sequence++;
             bool directed = g.tx_directed;

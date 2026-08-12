@@ -51,7 +51,6 @@ internal sealed class MainForm : Form
     private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
     private bool spaceHeld;
-    private uint? pendingConfigurationNodeId;
     private uint? selectedDeviceId;
     private bool refreshingDeviceList;
 
@@ -166,7 +165,6 @@ internal sealed class MainForm : Form
             settings.Save();
             node = new IntercomNode(settings);
             node.PeersChanged += (_, _) => PostToUi(RefreshPeers);
-            node.ConfigurationReceived += (_, eventArgs) => PostToUi(() => ShowConfiguration(eventArgs));
             node.Diagnostic += message => PostToUi(() => networkLabel.Text = $"Discovery: {message}");
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
@@ -233,9 +231,17 @@ internal sealed class MainForm : Form
     {
         var peer = SelectedPeer;
         if (node is null || peer is null) return;
-        pendingConfigurationNodeId = peer.NodeId;
-        try { await node.RequestConfigurationAsync(peer); }
-        catch (SocketException exception) { networkLabel.Text = $"Configuration request failed: {exception.SocketErrorCode}"; }
+        getConfig.Enabled = false;
+        try
+        {
+            var response = await node.RequestConfigurationAsync(peer);
+            if (selectedDeviceId == response.NodeId) ShowConfiguration(response);
+        }
+        catch (Exception exception) when (exception is SocketException or TimeoutException)
+        {
+            networkLabel.Text = $"Configuration read failed: {exception.Message}";
+        }
+        finally { UpdateSelectedDeviceActions(); }
     }
 
     private async Task ApplySelectedConfigAsync()
@@ -244,17 +250,23 @@ internal sealed class MainForm : Form
         if (node is null || peer is null) return;
         var configuration = new DeviceConfiguration(alias.Text.Trim(), (int)volume.Value,
             (int)brightness.Value, buttonsSwapped.Checked, int.Parse(orientation.Text));
-        try { await node.SetConfigurationAsync(peer, configuration); }
-        catch (SocketException exception) { networkLabel.Text = $"Configuration update failed: {exception.SocketErrorCode}"; }
+        applyConfig.Enabled = false;
+        try
+        {
+            var response = await node.SetConfigurationAsync(peer, configuration);
+            if (selectedDeviceId == response.NodeId) ShowConfiguration(response);
+            networkLabel.Text = $"Configuration applied to {peer.Alias}.";
+        }
+        catch (Exception exception) when (exception is SocketException or TimeoutException)
+        {
+            networkLabel.Text = $"Configuration update failed: {exception.Message}";
+        }
+        finally { UpdateSelectedDeviceActions(); }
     }
 
     private void ShowConfiguration(DeviceConfigurationReceivedEventArgs eventArgs)
     {
-        // A device can reply to another app's request or to an older selected
-        // row. Never overwrite in-progress edits unless this exact UI asked
-        // for the configuration of the still-selected peer.
-        if (pendingConfigurationNodeId != eventArgs.NodeId || selectedDeviceId != eventArgs.NodeId) return;
-        pendingConfigurationNodeId = null;
+        if (selectedDeviceId != eventArgs.NodeId) return;
         alias.Text = eventArgs.Configuration.Alias;
         volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, (int)volume.Minimum, (int)volume.Maximum);
         brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, (int)brightness.Minimum, (int)brightness.Maximum);
@@ -267,7 +279,6 @@ internal sealed class MainForm : Form
         selectedDeviceId = devices.SelectedItems.Count == 1
             ? (devices.SelectedItems[0].Tag as Peer)?.NodeId
             : null;
-        pendingConfigurationNodeId = null;
         UpdateSelectedDeviceActions();
         // Selecting a row intentionally does not perform network I/O. The user
         // explicitly chooses Get configuration when they want to populate it.

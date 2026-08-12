@@ -18,6 +18,8 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     private readonly CompanionSettings settings;
     private readonly ConcurrentDictionary<uint, Peer> peers = new();
+    private readonly ConcurrentDictionary<uint, TaskCompletionSource<DeviceConfigurationReceivedEventArgs>>
+        configurationRequests = new();
     private readonly SemaphoreSlim sendGate = new(1, 1);
     private readonly CancellationTokenSource stopping = new();
     private readonly UdpClient client;
@@ -47,7 +49,6 @@ internal sealed class IntercomNode : IAsyncDisposable
     }
 
     public event EventHandler? PeersChanged;
-    public event EventHandler<DeviceConfigurationReceivedEventArgs>? ConfigurationReceived;
     public event Action<string>? Diagnostic;
     public event EventHandler<IntercomPacketReceivedEventArgs>? PacketReceived;
 
@@ -66,14 +67,15 @@ internal sealed class IntercomNode : IAsyncDisposable
         _ = SendHelloAsync(stopping.Token);
     }
 
-    public async Task RequestConfigurationAsync(Peer peer, CancellationToken cancellationToken = default)
+    public Task<DeviceConfigurationReceivedEventArgs> RequestConfigurationAsync(Peer peer,
+                                                                                 CancellationToken cancellationToken = default)
     {
-        await SendToEndpointAsync(PacketType.ConfigGet, NewSessionId(), 0,
-            Encoding.UTF8.GetBytes("{\"cmd\":\"get\"}"), peer.Endpoint, cancellationToken: cancellationToken);
+        return SendConfigurationRequestAsync(PacketType.ConfigGet,
+            Encoding.UTF8.GetBytes("{\"cmd\":\"get\"}"), peer, cancellationToken);
     }
 
-    public async Task SetConfigurationAsync(Peer peer, DeviceConfiguration configuration,
-                                            CancellationToken cancellationToken = default)
+    public Task<DeviceConfigurationReceivedEventArgs> SetConfigurationAsync(Peer peer, DeviceConfiguration configuration,
+                                                                              CancellationToken cancellationToken = default)
     {
         var request = JsonSerializer.Serialize(new
         {
@@ -84,8 +86,42 @@ internal sealed class IntercomNode : IAsyncDisposable
             buttons_swapped = configuration.ButtonsSwapped,
             ring_orientation = configuration.RingOrientation,
         });
-        await SendToEndpointAsync(PacketType.ConfigSet, NewSessionId(), 0,
-            Encoding.UTF8.GetBytes(request), peer.Endpoint, cancellationToken: cancellationToken);
+        return SendConfigurationRequestAsync(PacketType.ConfigSet, Encoding.UTF8.GetBytes(request), peer,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Configuration changes are idempotent. Retrying their small unicast
+    /// datagrams is therefore safe and makes the UI reliable on Wi-Fi without
+    /// having to use multicast or retain a configured list of IP addresses.
+    /// </summary>
+    private async Task<DeviceConfigurationReceivedEventArgs> SendConfigurationRequestAsync(
+        PacketType type, byte[] payload, Peer peer, CancellationToken cancellationToken)
+    {
+        var session = NewSessionId();
+        var completion = new TaskCompletionSource<DeviceConfigurationReceivedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!configurationRequests.TryAdd(session, completion))
+            throw new InvalidOperationException("Could not allocate configuration request.");
+        try
+        {
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                Diagnostic?.Invoke($"Configuration {type} → {peer.Alias} (attempt {attempt}/3)");
+                DiagnosticLog.Write($"config send type={type} target={peer.NodeId:x8} session={session:x8} attempt={attempt}");
+                await SendToEndpointAsync(type, session, 0, payload, peer.Endpoint,
+                    cancellationToken: cancellationToken);
+                var elapsed = await Task.WhenAny(completion.Task,
+                    Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken));
+                if (elapsed == completion.Task) return await completion.Task;
+            }
+            DiagnosticLog.Write($"config timeout type={type} target={peer.NodeId:x8} session={session:x8}");
+            throw new TimeoutException($"{peer.Alias} did not acknowledge the configuration request.");
+        }
+        finally
+        {
+            configurationRequests.TryRemove(session, out _);
+        }
     }
 
     public Task SendToEndpointAsync(PacketType type, uint session, uint sequence, byte[] payload,
@@ -177,8 +213,16 @@ internal sealed class IntercomNode : IAsyncDisposable
                 root.TryGetProperty("led_brightness", out var brightness) ? brightness.GetInt32() : 48,
                 root.TryGetProperty("buttons_swapped", out var swapped) && swapped.GetBoolean(),
                 root.TryGetProperty("ring_orientation", out var orientation) ? orientation.GetInt32() : 0);
-            ConfigurationReceived?.Invoke(this,
-                new DeviceConfigurationReceivedEventArgs(packet.SenderId, source, config));
+            var reply = new DeviceConfigurationReceivedEventArgs(packet.SenderId, packet.SessionId, source, config);
+            if (configurationRequests.TryGetValue(packet.SessionId, out var completion))
+            {
+                DiagnosticLog.Write($"config reply sender={packet.SenderId:x8} session={packet.SessionId:x8}");
+                completion.TrySetResult(reply);
+            }
+            else
+            {
+                DiagnosticLog.Write($"config unsolicited sender={packet.SenderId:x8} session={packet.SessionId:x8}");
+            }
         }
         catch (JsonException)
         {
@@ -224,10 +268,11 @@ internal sealed class IntercomNode : IAsyncDisposable
     }
 }
 
-internal sealed class DeviceConfigurationReceivedEventArgs(uint nodeId, IPEndPoint endpoint,
+internal sealed class DeviceConfigurationReceivedEventArgs(uint nodeId, uint sessionId, IPEndPoint endpoint,
                                                             DeviceConfiguration configuration) : EventArgs
 {
     public uint NodeId { get; } = nodeId;
+    public uint SessionId { get; } = sessionId;
     public IPEndPoint Endpoint { get; } = endpoint;
     public DeviceConfiguration Configuration { get; } = configuration;
 }

@@ -10,8 +10,9 @@ internal static class Rtp
     public const int Port = 45679;
     public const byte OpusPayloadType = 111;
     public const int HeaderLength = 12;
-    // RFC 6716 maximum; normal 48 kb/s / 20 ms CBR packets are 120 bytes.
-    public const int OpusMaxPayloadLength = 1275;
+    // Espressif's 16 kHz / 20 ms encoder requests 220 bytes; 256 keeps all
+    // device and PC RTP buffers compatible. Normal CBR packets are 120 bytes.
+    public const int OpusMaxPayloadLength = 256;
     public const uint TimestampStep = 960; // Opus RTP always uses a 48 kHz clock
 
     public static byte[] Pack(uint ssrc, ushort sequence, uint timestamp, ReadOnlySpan<byte> payload)

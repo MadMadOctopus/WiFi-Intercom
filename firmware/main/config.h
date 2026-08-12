@@ -26,10 +26,10 @@
 /* ---- Audio format (must match the companion RTP/G.722 implementation) -- */
 #define SAMPLE_RATE     16000
 #define FRAME_SAMPLES   320             /* 20 ms at 16 kHz                   */
-/* RFC 6716 permits up to 1275 bytes per Opus packet. At our 48 kb/s CBR
- * setting a normal 20 ms packet is 120 bytes, but the codec must be given its
- * full legal output capacity. */
-#define OPUS_MAX_PAYLOAD_LEN 1275
+/* The Espressif 16 kHz / 20 ms Opus encoder reports 220 bytes as its required
+ * output capacity. 256 bytes gives a small safety margin while keeping every
+ * node's RTP receive buffer identical. Normal 48 kb/s CBR packets are 120 B. */
+#define OPUS_MAX_PAYLOAD_LEN 256
 
 /* Dynamic RTP payload type 111 is agreed by this intercom protocol for
  * 16 kHz mono Opus. Opus RTP timestamps always advance at 48 kHz. */

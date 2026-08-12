@@ -1160,7 +1160,9 @@ void app_main(void)
     xTaskCreate(net_rx_task,   "net_rx",   4096, NULL, 6, NULL);
     xTaskCreate(rtp_rx_task,   "rtp_rx",  12288, NULL, 6, NULL);
     xTaskCreate(capture_task,  "capture",  4096, NULL, 6, NULL);
-    xTaskCreate(tx_task,       "tx",       8192, NULL, 5, NULL);
+    /* The Espressif Opus encoder uses a large temporary call stack on C3.
+     * 8 KiB causes a deterministic stack-protection reset on first PTT. */
+    xTaskCreate(tx_task,       "tx",      24576, NULL, 5, NULL);
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);
     xTaskCreate(ring_task,     "ring",     4096, NULL, 4, NULL);
     xTaskCreate(hello_task,    "hello",    3072, NULL, 3, NULL);

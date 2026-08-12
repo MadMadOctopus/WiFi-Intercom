@@ -9,6 +9,10 @@
 #include "cJSON.h"
 #include "esp_system.h"
 
+#ifndef INTERCOM_USB_RAW_MIC_CAPTURE
+#define INTERCOM_USB_RAW_MIC_CAPTURE 0
+#endif
+
 static device_config_t *s_config;
 static SemaphoreHandle_t s_lock;
 
@@ -70,6 +74,12 @@ void usb_control_start(device_config_t *config, SemaphoreHandle_t config_lock)
     s_config = config;
     s_lock = config_lock;
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+#if INTERCOM_USB_RAW_MIC_CAPTURE
+    /* Raw capture frames are 652 bytes. The driver's default 256-byte ring
+     * rejects each frame atomically, so use enough room for several complete
+     * diagnostic packets. This is compiled out of the production image. */
+    cfg.tx_buffer_size = 2048;
+#endif
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
     xTaskCreate(usb_task, "usb_control", 4096, NULL, 4, NULL);
 }

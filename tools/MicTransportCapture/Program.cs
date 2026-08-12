@@ -36,8 +36,12 @@ var helloTask = HelloLoopAsync(control, multicast, cancellation.Token);
 try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token); }
 catch (OperationCanceledException) { }
 
+source.Stop();
 try { serial.Close(); } catch { }
-try { await Task.WhenAll(controlTask, mediaTask, rawTask, helloTask); } catch (OperationCanceledException) { }
+// SerialPort.BaseStream.ReadAsync is not reliably cancelled by Close on
+// Windows. It is only a diagnostic reader, so do not let that pending read
+// hold the completed capture open; process exit disposes the port.
+try { await Task.WhenAll(controlTask, mediaTask, helloTask); } catch (OperationCanceledException) { }
 source.Finish();
 transport.Finish();
 Console.WriteLine();
@@ -239,6 +243,7 @@ sealed class RawSourceRecorder(string path) : IDisposable
     private uint? previous;
     private long frames, gaps, corrupt;
     public void Start() { active = true; stopAt = DateTimeOffset.MaxValue; previous = null; }
+    public void Stop() => active = false;
     public void StopAfter(TimeSpan delay) => stopAt = DateTimeOffset.UtcNow + delay;
     public void Accept(uint sequence, ReadOnlySpan<byte> pcm)
     {

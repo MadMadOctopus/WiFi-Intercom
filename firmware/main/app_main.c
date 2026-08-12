@@ -701,14 +701,18 @@ static void tx_task(void *arg)
             bool directed = g.tx_directed;
             struct sockaddr_in destination = g.tx_audio_destination;
             xSemaphoreGive(g_lock);
-            if (esp_opus_enc_process(g_opus_encoder, &input, &output) == ESP_AUDIO_ERR_OK &&
-                output.encoded_bytes > 0 && output.encoded_bytes <= OPUS_MAX_PAYLOAD_LEN) {
+            esp_audio_err_t encode_result = esp_opus_enc_process(g_opus_encoder, &input, &output);
+            if (encode_result == ESP_AUDIO_ERR_OK && output.encoded_bytes > 0 &&
+                output.encoded_bytes <= OPUS_MAX_PAYLOAD_LEN) {
                 if (directed)
                     send_rtp_to(&destination, session, rtp_sequence, rtp_timestamp,
                                 payload, output.encoded_bytes);
                 else
                     send_rtp_to_active_peers(session, rtp_sequence, rtp_timestamp,
                                              payload, output.encoded_bytes);
+            } else {
+                ESP_LOGW(TAG, "Opus encode rejected: result=%d bytes=%u", encode_result,
+                         (unsigned)output.encoded_bytes);
             }
         } else if (g.waiting_for_floor && g.waiting_count < BUSY_BUFFER_FRAMES) {
             g.waiting_frames[g.waiting_count++] = frame;
@@ -1113,6 +1117,12 @@ static void opus_init(void)
                     ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
     ESP_ERROR_CHECK(esp_opus_dec_open(&dec_cfg, sizeof(dec_cfg), &g_opus_decoder) ==
                     ESP_AUDIO_ERR_OK ? ESP_OK : ESP_FAIL);
+    int input_size = 0, output_size = 0;
+    ESP_ERROR_CHECK(esp_opus_enc_get_frame_size(g_opus_encoder, &input_size,
+                                                 &output_size) == ESP_AUDIO_ERR_OK ?
+                    ESP_OK : ESP_FAIL);
+    ESP_LOGI(TAG, "Opus encoder: input=%d bytes, recommended output=%d bytes",
+             input_size, output_size);
 }
 
 /* ======================================================================== */

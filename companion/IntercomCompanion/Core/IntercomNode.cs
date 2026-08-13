@@ -25,6 +25,8 @@ internal sealed class IntercomNode : IAsyncDisposable
     private readonly CancellationTokenSource stopping = new();
     private readonly UdpClient client;
     private readonly UdpClient mediaClient;
+    private readonly IPAddress discoveryInterface;
+    private DateTimeOffset nextSubnetProbeAt = DateTimeOffset.MinValue;
     private Task? receiveTask;
     private Task? mediaReceiveTask;
     private Task? helloTask;
@@ -41,7 +43,7 @@ internal sealed class IntercomNode : IAsyncDisposable
         // the loopback adapter, which makes the companion invisible to LAN peers.
         // Instead, resolve the local IPv4 address used by Windows' default route
         // and join discovery on that Wi-Fi/Ethernet interface.
-        var discoveryInterface = GetDefaultRouteAddress();
+        discoveryInterface = GetDefaultRouteAddress();
         // Binding to Any lets Windows select a virtual or loopback source even
         // when membership is correct. Binding the control socket to the chosen
         // interface makes both HELLO egress and unicast replies use the LAN NIC.
@@ -314,6 +316,29 @@ internal sealed class IntercomNode : IAsyncDisposable
             // HELLO only as discovery fallback; media remains unicast.
             await SendAsync(PacketType.Hello, 0, 0, payload,
                 new IPEndPoint(IPAddress.Broadcast, Protocol.Port), 0, cancellationToken);
+            // Once a peer has answered either discovery beacon, its unicast
+            // endpoint is authoritative. Refresh it directly as well: a few
+            // consumer APs intermittently suppress Wi-Fi multicast/broadcast
+            // between clients, but normal unicast (used by media/config) is
+            // reliable. A peer still expires after PeerLifetime if it stops
+            // answering these probes.
+            var peersToRefresh = SnapshotActivePeers();
+            foreach (var peer in peersToRefresh)
+                await SendAsync(PacketType.Hello, 0, 0, payload, peer.Endpoint, 0, cancellationToken);
+
+            // Last-resort peerless discovery for APs which forward neither
+            // multicast nor subnet broadcasts between Wi-Fi clients. The
+            // local /24 is derived at runtime from the active default route;
+            // no device addresses are stored or configured. At 254 compact
+            // HELLO datagrams every 12 seconds it is negligible on this LAN.
+            var now = DateTimeOffset.UtcNow;
+            if (now >= nextSubnetProbeAt)
+            {
+                nextSubnetProbeAt = now.AddSeconds(12);
+                foreach (var endpoint in LocalSubnetProbeEndpoints())
+                    await SendAsync(PacketType.Hello, 0, 0, payload, endpoint, 0, cancellationToken);
+                DiagnosticLog.Write("discovery unicast subnet probe sent");
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (SocketException exception)
@@ -325,6 +350,19 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     private static string OwnFirmwareVersion() =>
         typeof(IntercomNode).Assembly.GetName().Version?.ToString(3) ?? "unknown";
+
+    private IEnumerable<IPEndPoint> LocalSubnetProbeEndpoints()
+    {
+        var bytes = discoveryInterface.GetAddressBytes();
+        // Wi-Fi intercom deployment uses the standard consumer-router /24.
+        // Restricting the sweep to it prevents excessive probing on an office
+        // /16 while still covering all DHCP leases on the active LAN.
+        for (var host = 1; host < 255; host++)
+        {
+            if (host == bytes[3]) continue;
+            yield return new IPEndPoint(new IPAddress([bytes[0], bytes[1], bytes[2], (byte)host]), Protocol.Port);
+        }
+    }
 
     private async Task SendAsync(PacketType type, uint session, uint sequence, byte[] payload,
                                  IPEndPoint destination, byte flags,

@@ -23,6 +23,10 @@
 #define MULTICAST_GROUP       "239.255.42.99"
 #define MULTICAST_TTL         1
 
+/* HELLO discovery payload revision. The PTT1 wire header remains stable;
+ * this declares the media/control contract used by a discovered peer. */
+#define INTERCOM_PROTOCOL_VERSION 1
+
 /* ---- Audio format (must match the companion RTP/IMA ADPCM implementation) */
 #define SAMPLE_RATE     16000
 #define FRAME_SAMPLES   320             /* 20 ms at 16 kHz                   */

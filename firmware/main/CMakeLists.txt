@@ -17,6 +17,7 @@ idf_component_register(
         esp_netif
         esp_event
         esp_timer
+        esp_app_format
         nvs_flash
         lwip
 )

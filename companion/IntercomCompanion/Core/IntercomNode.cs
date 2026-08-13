@@ -250,14 +250,17 @@ internal sealed class IntercomNode : IAsyncDisposable
     private void LearnPeer(IntercomPacket packet, IPEndPoint source)
     {
         peers.TryGetValue(packet.SenderId, out var known);
-        var alias = packet.Type == PacketType.Hello
-            ? CompanionSettings.SanitizeAlias(Encoding.UTF8.GetString(packet.Payload))
-            : known?.Alias ?? $"Device {packet.SenderId:x8}";
-        var peer = new Peer(packet.SenderId, source, alias, DateTimeOffset.UtcNow);
+        var announcement = packet.Type == PacketType.Hello
+            ? Protocol.ParseHello(packet.Payload)
+            : new HelloAnnouncement(known?.Alias ?? $"Device {packet.SenderId:x8}",
+                known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown");
+        var peer = new Peer(packet.SenderId, source, announcement.Alias,
+            announcement.ProtocolVersion, announcement.FirmwareVersion, DateTimeOffset.UtcNow);
         peers[packet.SenderId] = peer;
         if (known is null)
-            DiagnosticLog.Write($"peer discovered sender={packet.SenderId:x8} endpoint={source} alias={alias}");
-        if (known is null || known.Alias != peer.Alias || !known.Endpoint.Equals(peer.Endpoint))
+            DiagnosticLog.Write($"peer discovered sender={packet.SenderId:x8} endpoint={source} alias={peer.Alias} firmware={peer.FirmwareVersion} protocol={peer.ProtocolVersion?.ToString() ?? "legacy"}");
+        if (known is null || known.Alias != peer.Alias || !known.Endpoint.Equals(peer.Endpoint) ||
+            known.ProtocolVersion != peer.ProtocolVersion || known.FirmwareVersion != peer.FirmwareVersion)
             PeersChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -303,7 +306,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     {
         try
         {
-            var payload = Encoding.UTF8.GetBytes(Alias);
+            var payload = Protocol.BuildHelloPayload(Alias, OwnFirmwareVersion());
             await SendAsync(PacketType.Hello, 0, 0, payload,
                 new IPEndPoint(MulticastGroup, Protocol.Port), 0, cancellationToken);
             // Some consumer access points suppress multicast traffic between
@@ -319,6 +322,9 @@ internal sealed class IntercomNode : IAsyncDisposable
             Diagnostic?.Invoke($"Discovery send failed: {exception.SocketErrorCode}");
         }
     }
+
+    private static string OwnFirmwareVersion() =>
+        typeof(IntercomNode).Assembly.GetName().Version?.ToString(3) ?? "unknown";
 
     private async Task SendAsync(PacketType type, uint session, uint sequence, byte[] payload,
                                  IPEndPoint destination, byte flags,

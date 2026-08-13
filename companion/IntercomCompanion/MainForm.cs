@@ -90,6 +90,7 @@ internal sealed class MainForm : Form
         devices.Columns.Add("Alias", 150);
         devices.Columns.Add("Device ID", 110);
         devices.Columns.Add("Address", 135);
+        devices.Columns.Add("Firmware / protocol", 145);
         devices.Columns.Add("Last seen", 90);
         devices.SelectedIndexChanged += (_, _) =>
         {
@@ -202,7 +203,10 @@ internal sealed class MainForm : Form
             foreach (var peer in peers)
             {
                 var age = DateTimeOffset.UtcNow - peer.LastSeen;
-                var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(), $"{Math.Max(0, age.TotalSeconds):0}s"])
+                var protocol = peer.ProtocolVersion is null ? "legacy" : $"p{peer.ProtocolVersion}";
+                var compatibility = peer.IsProtocolCompatible ? protocol : $"{protocol} incompatible";
+                var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(),
+                    $"{peer.FirmwareVersion} / {compatibility}", $"{Math.Max(0, age.TotalSeconds):0}s"])
                 {
                     Tag = peer
                 };

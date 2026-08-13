@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Text;
 
 namespace IntercomCompanion.Core;
 
@@ -27,6 +28,7 @@ internal sealed record IntercomPacket(
 /// <summary>Exact big-endian PTT1 datagram codec shared with firmware.</summary>
 internal static class Protocol
 {
+    public const byte Version = 1;
     public const uint MeshId = 0x4D455348; // "MESH"
     public const int Port = 45678;
     public const int HeaderLength = 32;
@@ -34,6 +36,38 @@ internal static class Protocol
     public const byte DirectedFlag = 0x01;
 
     private static ReadOnlySpan<byte> Magic => "PTT1"u8;
+    private static ReadOnlySpan<byte> HelloMagic => "IH1"u8;
+
+    /// <summary>Discovery is self-describing while retaining a compact payload.
+    /// IH1 | protocol revision | firmware-version byte count | firmware | alias.</summary>
+    public static byte[] BuildHelloPayload(string alias, string firmwareVersion)
+    {
+        var firmware = Encoding.UTF8.GetBytes(firmwareVersion[..Math.Min(31, firmwareVersion.Length)]);
+        var aliasBytes = Encoding.UTF8.GetBytes(CompanionSettings.SanitizeAlias(alias));
+        var payload = new byte[5 + firmware.Length + aliasBytes.Length];
+        HelloMagic.CopyTo(payload);
+        payload[3] = Version;
+        payload[4] = checked((byte)firmware.Length);
+        firmware.CopyTo(payload, 5);
+        aliasBytes.CopyTo(payload, 5 + firmware.Length);
+        return payload;
+    }
+
+    public static HelloAnnouncement ParseHello(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length >= 5 && payload[..3].SequenceEqual(HelloMagic))
+        {
+            var firmwareLength = payload[4];
+            if (payload.Length >= 5 + firmwareLength)
+            {
+                var firmware = Encoding.UTF8.GetString(payload.Slice(5, firmwareLength));
+                var alias = Encoding.UTF8.GetString(payload[(5 + firmwareLength)..]);
+                return new HelloAnnouncement(CompanionSettings.SanitizeAlias(alias), payload[3], firmware);
+            }
+        }
+        // A pre-0.6.2 node advertised only its UTF-8 alias.
+        return new HelloAnnouncement(CompanionSettings.SanitizeAlias(Encoding.UTF8.GetString(payload)), null, "legacy");
+    }
 
     public static byte[] Pack(uint senderId, PacketType type, uint sessionId,
                               uint sequence, uint timestampMs,
@@ -78,3 +112,5 @@ internal static class Protocol
         return true;
     }
 }
+
+internal sealed record HelloAnnouncement(string Alias, byte? ProtocolVersion, string FirmwareVersion);

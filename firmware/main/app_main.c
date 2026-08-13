@@ -31,6 +31,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_event.h"
+#include "esp_app_desc.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -501,11 +502,27 @@ static void handle_config_packet(const intercom_pkt_t *p,
 /* A direct HELLO acknowledgement makes discovery work on access points that
  * forward an app's outbound multicast to devices but do not forward device
  * multicast back to a Windows Wi-Fi client (IGMP/multicast isolation). */
+static uint16_t build_hello_payload(uint8_t *out, size_t capacity)
+{
+    /* IH1 + protocol byte + firmware-version length + firmware version + alias */
+    const char *firmware = esp_app_get_description()->version;
+    const uint8_t *alias = (const uint8_t *)g_config.alias;
+    size_t firmware_length = strnlen(firmware, 31);
+    size_t alias_length = strnlen(g_config.alias, DEVICE_ALIAS_MAX);
+    if (capacity < 5 || firmware_length + alias_length > capacity - 5) return 0;
+    out[0] = 'I'; out[1] = 'H'; out[2] = '1';
+    out[3] = INTERCOM_PROTOCOL_VERSION;
+    out[4] = (uint8_t)firmware_length;
+    memcpy(out + 5, firmware, firmware_length);
+    memcpy(out + 5 + firmware_length, alias, alias_length);
+    return (uint16_t)(5 + firmware_length + alias_length);
+}
+
 static void reply_hello(const struct sockaddr_in *destination)
 {
-    const uint8_t *alias = (const uint8_t *)g_config.alias;
-    uint16_t length = (uint16_t)strnlen(g_config.alias, DEVICE_ALIAS_MAX);
-    send_packet_to(destination, PKT_HELLO, 0, 0, 0, alias, length);
+    uint8_t payload[5 + 31 + DEVICE_ALIAS_MAX];
+    uint16_t length = build_hello_payload(payload, sizeof(payload));
+    send_packet_to(destination, PKT_HELLO, 0, 0, 0, payload, length);
 }
 
 /* ======================================================================== */
@@ -1030,11 +1047,9 @@ static void ring_task(void *arg)
 static void hello_task(void *arg)
 {
     while (1) {
-        /* Alias is deliberately a small, plain UTF-8 payload; apps can show
-         * it immediately and query full configuration when selected. */
-        const uint8_t *alias = (const uint8_t *)g_config.alias;
-        uint16_t length = (uint16_t)strnlen(g_config.alias, DEVICE_ALIAS_MAX);
-        send_packet_to(&g_group, PKT_HELLO, 0, 0, 0, alias, length);
+        uint8_t payload[5 + 31 + DEVICE_ALIAS_MAX];
+        uint16_t length = build_hello_payload(payload, sizeof(payload));
+        send_packet_to(&g_group, PKT_HELLO, 0, 0, 0, payload, length);
         vTaskDelay(pdMS_TO_TICKS(PEER_HELLO_MS));
     }
 }

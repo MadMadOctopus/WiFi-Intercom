@@ -3,4 +3,4 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(wifi_intercom VERSION 0.6.1)
+project(wifi_intercom VERSION 0.6.2)

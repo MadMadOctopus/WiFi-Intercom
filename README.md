@@ -36,7 +36,7 @@ All peers independently implement the same explicit big-endian, fixed 32-byte `P
 - CLAIM ×3, 100 ms pre-audio delay, deterministic `(session_id, sender_id)` tie-break, 750 ms expiry, END drain
 - 4-frame / 80 ms jitter prebuffer with small reorder window and attenuated replay PLC
 
-`HELLO` discovery beacons go to `239.255.42.99:45678`, with a TTL of 1. They advertise aliases every three seconds and expire after ten seconds. All floor control and audio packets are then sent by UDP unicast to the learned active-peer snapshot; this avoids Wi-Fi multicast loss while retaining zero static IP configuration. Directed audio is unicast to its one target.
+`HELLO` discovery beacons go to `239.255.42.99:45678`, with a TTL of 1. Each beacon carries the alias, firmware version, and an explicit intercom-protocol revision (`IH1` discovery payload); the companion shows these values and flags incompatible revisions. A subnet broadcast copy is used only as a fallback for access points that suppress Wi-Fi multicast. Beacons repeat every three seconds and expire after ten seconds. All floor control and audio packets are then sent by UDP unicast to the learned active-peer snapshot; this avoids Wi-Fi multicast loss while retaining zero static IP configuration. Directed audio is unicast to its one target.
 
 ## Firmware
 

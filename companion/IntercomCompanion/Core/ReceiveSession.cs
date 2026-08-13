@@ -161,9 +161,13 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     private void StartTransmitLocked(PttKind kind, Peer? target)
     {
-        transmitPeers = node.SnapshotActivePeers();
-        if (target is not null && transmitPeers.All(peer => peer.NodeId != target.NodeId))
-            transmitPeers = transmitPeers.Append(target).ToArray();
+        // A directed transmission must reserve the floor only at its selected
+        // recipient. Previously CLAIM/HEARTBEAT/END went to every peer while
+        // RTP went to one peer, leaving unrelated devices in a silent receive
+        // state and making direct PTT behaviour depend on the device chosen.
+        transmitPeers = target is null
+            ? node.SnapshotActivePeers()
+            : [target];
         transmitDirected = kind is not PttKind.Broadcast;
         transmitTarget = target;
         transmitSession = IntercomNode.NewSessionId();
@@ -175,7 +179,12 @@ internal sealed class ReceiveSession : IAsyncDisposable
         transmitStopping?.Dispose();
         transmitStopping = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
         SetStateLocked(IntercomState.Claiming);
-        Diagnostic?.Invoke($"Claiming floor for {(transmitDirected ? "direct" : "broadcast")} message.");
+        Diagnostic?.Invoke(transmitDirected
+            ? $"Claiming floor for direct message to {target!.Alias}."
+            : "Claiming floor for broadcast message.");
+        DiagnosticLog.Write(transmitDirected
+            ? $"tx direct target={target!.NodeId:x8} endpoint={target.Endpoint}"
+            : $"tx broadcast peers={transmitPeers.Count}");
         _ = Task.Run(() => ClaimSequenceAsync(transmitSession, transmitStopping.Token));
     }
 
@@ -417,9 +426,16 @@ internal sealed class ReceiveSession : IAsyncDisposable
         var name = $"{DateTime.Now:yyyyMMdd-HHmmss}-{senderId:x8}-{sessionId:x8}.wav";
         recording?.Dispose();
         recording = new WaveFileWriter(Path.Combine(CompanionSettings.RecordingsDirectory, name), new WaveFormat(AudioEngine.SampleRate, 16, 1));
+        // A CLAIM is the authoritative start of a PTT session, and its source
+        // endpoint is exactly where a directed reply must go. Keep this after
+        // playout ends, just as the hardware does for its reply button.
+        var discovered = node.Peers.FirstOrDefault(peer => peer.NodeId == packet.SenderId);
+        LastTalker = discovered is null
+            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", DateTimeOffset.UtcNow)
+            : discovered with { Endpoint = endpoint, LastSeen = DateTimeOffset.UtcNow };
         SetStateLocked(IntercomState.Receiving);
         DiagnosticLog.Write($"rx begin sender={senderId:x8} session={sessionId:x8}");
-        Diagnostic?.Invoke($"Receiving {senderId:x8}.");
+        Diagnostic?.Invoke($"Receiving {LastTalker.Alias}; Reply is ready.");
     }
 
     private void FinishReceivingLocked()

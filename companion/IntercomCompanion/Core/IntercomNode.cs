@@ -35,9 +35,21 @@ internal sealed class IntercomNode : IAsyncDisposable
         this.settings = settings;
         client = new UdpClient(AddressFamily.InterNetwork);
         client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        SetVideoPriority(client.Client);
-        client.Client.Bind(new IPEndPoint(IPAddress.Any, Protocol.Port));
-        client.JoinMulticastGroup(MulticastGroup, 1);
+        client.EnableBroadcast = true;
+        // Do not pin discovery to a Windows interface index. Interface indexes
+        // change whenever adapters are added/reconfigured; index 1 is commonly
+        // the loopback adapter, which makes the companion invisible to LAN peers.
+        // Instead, resolve the local IPv4 address used by Windows' default route
+        // and join discovery on that Wi-Fi/Ethernet interface.
+        var discoveryInterface = GetDefaultRouteAddress();
+        // Binding to Any lets Windows select a virtual or loopback source even
+        // when membership is correct. Binding the control socket to the chosen
+        // interface makes both HELLO egress and unicast replies use the LAN NIC.
+        client.Client.Bind(new IPEndPoint(discoveryInterface, Protocol.Port));
+        client.JoinMulticastGroup(MulticastGroup, discoveryInterface);
+        client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface,
+            discoveryInterface.GetAddressBytes());
+        DiagnosticLog.Write($"discovery multicast interface={discoveryInterface}");
         client.Ttl = 1;
 
         mediaClient = new UdpClient(AddressFamily.InterNetwork);
@@ -243,8 +255,19 @@ internal sealed class IntercomNode : IAsyncDisposable
             : known?.Alias ?? $"Device {packet.SenderId:x8}";
         var peer = new Peer(packet.SenderId, source, alias, DateTimeOffset.UtcNow);
         peers[packet.SenderId] = peer;
+        if (known is null)
+            DiagnosticLog.Write($"peer discovered sender={packet.SenderId:x8} endpoint={source} alias={alias}");
         if (known is null || known.Alias != peer.Alias || !known.Endpoint.Equals(peer.Endpoint))
             PeersChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static IPAddress GetDefaultRouteAddress()
+    {
+        // UDP Connect only asks the IP stack to select a route; it sends no data.
+        // A public address is used solely as a stable route-selection target.
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        probe.Connect(new IPEndPoint(IPAddress.Parse("8.8.8.8"), 53));
+        return ((IPEndPoint)probe.LocalEndPoint!).Address;
     }
 
     private void ParseConfigurationReply(IntercomPacket packet, IPEndPoint source)
@@ -276,9 +299,26 @@ internal sealed class IntercomNode : IAsyncDisposable
         }
     }
 
-    private Task SendHelloAsync(CancellationToken cancellationToken) => SendAsync(
-        PacketType.Hello, 0, 0, Encoding.UTF8.GetBytes(Alias),
-        new IPEndPoint(MulticastGroup, Protocol.Port), 0, cancellationToken);
+    private async Task SendHelloAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = Encoding.UTF8.GetBytes(Alias);
+            await SendAsync(PacketType.Hello, 0, 0, payload,
+                new IPEndPoint(MulticastGroup, Protocol.Port), 0, cancellationToken);
+            // Some consumer access points suppress multicast traffic between
+            // Wi-Fi clients. The link-local broadcast carries the same small
+            // HELLO only as discovery fallback; media remains unicast.
+            await SendAsync(PacketType.Hello, 0, 0, payload,
+                new IPEndPoint(IPAddress.Broadcast, Protocol.Port), 0, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (SocketException exception)
+        {
+            DiagnosticLog.Write($"discovery hello failed: {exception.SocketErrorCode}");
+            Diagnostic?.Invoke($"Discovery send failed: {exception.SocketErrorCode}");
+        }
+    }
 
     private async Task SendAsync(PacketType type, uint session, uint sequence, byte[] payload,
                                  IPEndPoint destination, byte flags,

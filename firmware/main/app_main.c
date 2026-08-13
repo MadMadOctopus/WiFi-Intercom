@@ -498,6 +498,16 @@ static void handle_config_packet(const intercom_pkt_t *p,
     }
 }
 
+/* A direct HELLO acknowledgement makes discovery work on access points that
+ * forward an app's outbound multicast to devices but do not forward device
+ * multicast back to a Windows Wi-Fi client (IGMP/multicast isolation). */
+static void reply_hello(const struct sockaddr_in *destination)
+{
+    const uint8_t *alias = (const uint8_t *)g_config.alias;
+    uint16_t length = (uint16_t)strnlen(g_config.alias, DEVICE_ALIAS_MAX);
+    send_packet_to(destination, PKT_HELLO, 0, 0, 0, alias, length);
+}
+
 /* ======================================================================== */
 /* network receive task                                                      */
 /* ======================================================================== */
@@ -517,6 +527,7 @@ static void net_rx_task(void *arg)
         xSemaphoreTake(g_lock, portMAX_DELAY);
         peer_seen(&pkt, &src);
         switch (pkt.type) {
+            case PKT_HELLO: reply_hello(&src); break;
             case PKT_CLAIM: handle_claim(&pkt, &src); break;
             case PKT_END:   handle_end(&pkt);   break;
             case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;

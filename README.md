@@ -1,6 +1,20 @@
-# Wi‑Fi Intercom
+# Wi-Fi Intercom
 
-Production firmware and desktop companion for USB-powered Seeed XIAO ESP32-C3 voice intercoms. Devices use UDP multicast discovery on one Wi‑Fi LAN; there is no server and no configured peer-IP list.
+Wi-Fi Intercom is a USB-powered push-to-talk system for Seeed XIAO ESP32-C3
+devices and a Windows companion application. It is designed for a small,
+trusted Wi-Fi LAN: devices discover each other automatically, with no server
+and no configured peer-IP list.
+
+Start with the [user manual](docs/User-Manual.md) to configure and operate a
+device. The sections below are the technical reference for builders and
+maintainers.
+
+## Repository layout
+
+- `firmware/` — ESP-IDF firmware for the XIAO ESP32-C3.
+- `companion/IntercomCompanion/` — .NET Windows Forms companion app.
+- `tools/ota/` — local packaging and diagnostic helpers for signed OTA
+  releases.
 
 ## Production hardware
 
@@ -15,32 +29,53 @@ Production firmware and desktop companion for USB-powered Seeed XIAO ESP32-C3 vo
 | Mute slider | D8 / GPIO8, active low |
 | WS2812B ring DI | D7 / GPIO20 |
 
-The default logical mapping is D10 = broadcast and D9 = reply. Set `buttons_swapped: true` for assemblies with the two physical buttons soldered in the opposite order.
+The default logical mapping is D10 = broadcast and D9 = reply. Set
+`buttons_swapped: true` for assemblies with the two physical buttons wired in
+the opposite order. `ring_orientation: 180` rotates the logical ring centre by
+12 LEDs.
 
-## Behaviour
+## Device behaviour
 
-- Hold the broadcast button to send to every companion and device in the configured mesh group. Its ring animation is green.
-- Hold reply to send to the most recent device/app that sent this device audio. Its animation is blue.
-- Direct messages play only at the addressed destination; broadcasts play at every group member.
-- A competing PTT press buffers up to 500 ms. If the floor is not released by then, the device leaves the active message playing and shows two quick red pulses.
-- The mute slider silences received playback. It does not stop discovery or transmission.
-- Received audio shows the speaking animation. A 24-pixel ring defaults to restrained brightness 48 to reduce shared-rail noise.
+- Hold **broadcast** to send to all active companions and devices in the same
+  network group. The ring uses the green talking animation.
+- Hold **reply** to send to the most recent sender. The ring uses the blue
+  talking animation.
+- The mute slider silences received playback only; discovery and transmission
+  continue.
+- Received broadcast and correctly addressed directed messages play
+  immediately and show the speaking animation.
+- When another sender owns the floor, a pressed PTT button retains up to
+  500 ms of microphone audio. If the floor becomes free in time, transmission
+  begins; otherwise the active message continues and the device gives two red
+  error pulses.
 
-## Wire protocol
+## Network and audio design
 
-All peers independently implement the same explicit big-endian, fixed 32-byte `PTT1` UDP header and packet-independent IMA ADPCM codec:
+This is a LAN group, not a Wi-Fi mesh-routing protocol. Every node must join
+the same reachable 2.4 GHz Wi-Fi network and use the same `mesh_id` (the
+default is `MESH`). There is no authentication or encryption for intercom
+control/configuration, so use a trusted private LAN.
 
-- 16 kHz, mono, 16-bit PCM
-- 20 ms / 320-sample frames
-- 164-byte ADPCM payloads
-- CLAIM ×3, 100 ms pre-audio delay, deterministic `(session_id, sender_id)` tie-break, 750 ms expiry, END drain
-- 4-frame / 80 ms jitter prebuffer with small reorder window and attenuated replay PLC
+Discovery sends compact `PTT1` `HELLO` beacons to `239.255.42.99:45678` (TTL
+1), with subnet broadcast and low-rate unicast probing as fallbacks for access
+points that suppress client multicast. Discovery beacons use the `IH2` payload
+format and announce the alias, firmware version, protocol revision and OTA
+capability. After discovery, control and media are sent directly to each
+active peer; no static IP address is retained.
 
-`HELLO` discovery beacons go to `239.255.42.99:45678`, with a TTL of 1. Each beacon carries the alias, firmware version, and an explicit intercom-protocol revision (`IH1` discovery payload); the companion shows these values and flags incompatible revisions. A subnet broadcast copy is used only as a fallback for access points that suppress Wi-Fi multicast. Beacons repeat every three seconds and expire after ten seconds. All floor control and audio packets are then sent by UDP unicast to the learned active-peer snapshot; this avoids Wi-Fi multicast loss while retaining zero static IP configuration. Directed audio is unicast to its one target.
+PTT floor control uses an explicit, big-endian 32-byte `PTT1` UDP control
+header. It uses CLAIM ×3, a 100 ms pre-audio delay, deterministic
+`(session_id, sender_id)` tie-break, a 750 ms release timeout, and END drain.
+Audio travels as RTP on UDP port 45679 with payload type 96: 16 kHz mono
+packet-independent IMA ADPCM, 320 samples / 20 ms per frame and a 164-byte
+payload. The receiver starts audio after a 20-frame / 400 ms prebuffer and has
+reorder plus attenuated replay packet-loss concealment. Voice packets are
+marked Wi-Fi WMM video priority where the platform supports it.
 
-## Firmware
+## Build and flash firmware
 
-The firmware is ESP-IDF 5.4 compatible. The local production build used Windows ESP-IDF at `C:\Espressif\frameworks\esp-idf-v5.4.4` and COM9.
+The firmware targets ESP-IDF 5.4. The production setup uses the Windows
+installation at `C:\Espressif\frameworks\esp-idf-v5.4.4`.
 
 ```bat
 cd firmware
@@ -50,9 +85,17 @@ idf.py build
 idf.py -p COM9 flash
 ```
 
-### USB configuration
+The production partition table is for a 4 MB flash and has two application
+slots. A USB flash writes the bootloader, partition table, OTA metadata and
+application, but leaves NVS configuration (including Wi-Fi credentials) in
+place. A first USB flash of an OTA-capable build is required before wireless
+updates can be used.
 
-The native USB serial/JTAG device accepts one JSON request per line and replies with a JSON configuration object. Wi‑Fi credentials are accepted when writing but deliberately never returned. A Wi‑Fi, ring brightness, or ring orientation change reboots after its acknowledgement.
+## USB configuration protocol
+
+The native USB Serial/JTAG connection accepts one JSON request per line and
+returns one JSON configuration object per line. Wi-Fi passwords are accepted
+when writing but intentionally never returned.
 
 ```json
 {"cmd":"get"}
@@ -61,47 +104,51 @@ The native USB serial/JTAG device accepts one JSON request per line and replies 
 {"cmd":"set","led_brightness":48,"speaker_volume":512}
 ```
 
-`ring_orientation` is `0` (normal) or `180`, which shifts the logical animation centre by 12 LEDs. Device configuration is also exposed through unencrypted in-group UDP control messages as requested; use it only on a trusted local network.
+Valid ranges: `speaker_volume` is 64–1024 and `led_brightness` is 0–255.
+Changing Wi-Fi credentials, ring brightness, button mapping or ring
+orientation acknowledges first and then restarts the device. Alias and volume
+take effect without a restart.
 
-### Firmware OTA
+## Companion application
 
-The initial OTA-capable build must be flashed over USB once. It installs a 4 MB
-dual-slot layout (`ota_0`, `ota_1`, and `otadata`) and preserves NVS device
-configuration. Future application firmware updates are wireless; bootloader,
-partition table, and NVS are never updated over the air.
-
-Build a signed package with the ignored release private key, then choose its
-`.ota.json` manifest in the companion. The companion starts a temporary,
-tokenised HTTP endpoint bound to the active LAN adapter; the device is only an
-HTTP client. It accepts a download only when the URL host matches the UDP offer
-sender, the image SHA-256 matches, and the signed manifest verifies against the
-built-in public key. It writes the inactive slot, reboots, and commits only
-after a healthy startup; otherwise ESP-IDF rolls back automatically.
-
-```powershell
-.\tools\ota\Create-OtaPackage.ps1 `
-  -Image .\firmware\build\wifi_intercom.bin `
-  -Version 0.7.1 `
-  -PrivateKey .\.ota-keys\dev-release-key.pem
-```
-
-Keep the companion open during the update and allow its one-time Windows
-Firewall prompt on the **private** LAN when asked. The device’s discovery row
-shows `p1 / OTA` only after it has this bootstrap firmware.
-
-## Companion app
-
-The production companion is a .NET 10 Windows Forms application. It provides
-discovery, aliases, broadcast/reply/selected-device PTT, selected audio devices,
-USB Wi-Fi provisioning, remote configuration, and signed sequential OTA for
-one selected or all OTA-capable active devices.
+The companion is a .NET 10 Windows Forms app. It discovers devices, provides
+Windows recording/playback device selection, PTT broadcast/reply/targeted
+calls, USB Wi-Fi provisioning, remote device configuration, and signed OTA.
 
 ```powershell
 dotnet run --project .\companion\IntercomCompanion\IntercomCompanion.csproj
 ```
 
-The active-device list is populated automatically. Select a device to query its configuration, hold the purple control to direct-message it, or update its alias, volume, LED brightness, button swap and ring orientation. Space is a broadcast PTT shortcut. Broadcast messages fan out only while a peer holds the floor; idle traffic is discovery-only.
+See the [user manual](docs/User-Manual.md) for operating instructions.
+
+## Signed firmware OTA
+
+OTA updates only the inactive application slot; it never updates the
+bootloader, partition table or NVS. The companion checks the SHA-256 and
+ECDSA signature before serving the image from a temporary, tokenised local HTTP
+endpoint. The device accepts the offer only from its UDP sender's IP address,
+verifies the same signature and streamed hash while writing, then reboots into
+the inactive slot. It marks the new firmware healthy after startup; ESP-IDF
+rolls back if that does not happen.
+
+Create a package after building the image:
+
+```powershell
+.\tools\ota\Create-OtaPackage.ps1 `
+  -Image .\firmware\build\wifi_intercom.bin `
+  -Version 0.7.8 `
+  -PrivateKey .\.ota-keys\dev-release-key.pem
+```
+
+The private release key is deliberately ignored by Git. Before manufacturing,
+replace the public key in both `firmware/main/ota_public_key.h` and
+`companion/IntercomCompanion/Core/OtaPackage.cs`; see
+[tools/ota/README.md](tools/ota/README.md).
 
 ## Hardware note: shared amp/ring rail
 
-The current prototype powers the MAX98357A and WS2812B ring from the same rail. The lower firmware brightness reduces the audible coupling, but a future board should use a bulk capacitor at the ring, a separate/star 5 V and ground return for the amplifier, and a short data path with a series resistor. This is a power-integrity concern, not an ADPCM/I²S defect.
+The current prototype powers the MAX98357A and WS2812B ring from the same
+rail. The default restrained ring brightness reduces audible coupling, but a
+future board should use a bulk capacitor at the ring, a separate/star 5 V and
+ground return for the amplifier, and a short ring data path with a series
+resistor. This is a power-integrity concern rather than an ADPCM or I2S defect.

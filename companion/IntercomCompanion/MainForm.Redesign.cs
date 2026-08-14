@@ -1,4 +1,5 @@
 using IntercomCompanion.Core;
+using IntercomCompanion.Audio;
 using System.Security.Cryptography;
 using System.Net.Sockets;
 
@@ -27,6 +28,8 @@ internal sealed partial class MainForm
     private readonly Button applyGroup = new() { Text = "Change group ID", BackColor = Color.FromArgb(178, 34, 34), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Enabled = false, AutoSize = true };
     private readonly Label diagnosticsCounters = new() { AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
     private readonly CheckBox localMute = new() { Text = "Mute my speaker", AutoSize = true };
+    private readonly Label identityMicrophone = new() { AutoEllipsis = true };
+    private readonly Label identitySpeaker = new() { AutoEllipsis = true };
     private IReadOnlyList<Peer> displayPeers = [];
     private string activeFilter = "All";
     private float pulsePhase;
@@ -41,21 +44,54 @@ internal sealed partial class MainForm
         Size = new Size(1280, 820);
         BackColor = Color.FromArgb(245, 246, 247);
 
-        var identityStrip = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 56, WrapContents = false, BackColor = Color.White, Padding = new Padding(18, 11, 18, 6) };
-        var appName = new Label { Text = "▦  Wi-Fi Intercom Companion", AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Regular), Padding = new Padding(0, 5, 18, 0) };
-        identityLabel.Font = new Font("Segoe UI", 8);
-        identityLabel.Padding = new Padding(0, 5, 14, 0);
-        var micSpeaker = new Label { Text = "MIC / SPEAKER", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Padding = new Padding(0, 5, 14, 0) };
+        var appBar = new Panel { Dock = DockStyle.Top, Height = 36, BackColor = Color.White, Padding = new Padding(14, 0, 14, 0) };
+        appBar.Controls.Add(new Label { Text = "▦  Wi-Fi Intercom Companion", AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Regular), Location = new Point(14, 10) });
+        var identityStrip = new TableLayoutPanel { Dock = DockStyle.Top, Height = 56, BackColor = Color.White, Padding = new Padding(20, 4, 14, 4), ColumnCount = 6 };
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 278));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        identityLabel.AutoSize = false;
+        identityLabel.Dock = DockStyle.Fill;
+        identityLabel.Font = new Font("Segoe UI", 8.5f);
+        identityLabel.TextAlign = ContentAlignment.MiddleLeft;
+        foreach (var label in new[] { identityMicrophone, identitySpeaker })
+        {
+            label.AutoSize = false;
+            label.Dock = DockStyle.Fill;
+            label.Font = new Font("Segoe UI", 8.5f);
+            label.ForeColor = Color.FromArgb(99, 103, 109);
+            label.TextAlign = ContentAlignment.MiddleLeft;
+        }
+        localMute.Appearance = Appearance.Button;
+        localMute.AutoSize = false;
+        localMute.Width = 118;
+        localMute.Height = 32;
+        localMute.TextAlign = ContentAlignment.MiddleCenter;
+        localMute.FlatStyle = FlatStyle.Flat;
+        localMute.FlatAppearance.BorderColor = Color.FromArgb(173, 178, 184);
         localMute.CheckedChanged += (_, _) => audio?.SetLocalPlaybackMuted(localMute.Checked);
         var settingsButton = PlainButton("Settings…");
+        settingsButton.Height = 32;
+        settingsButton.Margin = new Padding(8, 0, 0, 0);
         settingsButton.Click += (_, _) => ShowSettings("USB");
-        identityStrip.Controls.AddRange([appName, identityLabel, micSpeaker, localMute, settingsButton]);
+        identityStrip.Controls.Add(identityLabel, 0, 0);
+        identityStrip.Controls.Add(identityMicrophone, 1, 0);
+        identityStrip.Controls.Add(identitySpeaker, 2, 0);
+        identityStrip.Controls.Add(localMute, 4, 0);
+        identityStrip.Controls.Add(settingsButton, 5, 0);
 
         var nowBar = new Panel { Dock = DockStyle.Top, Height = 76, BackColor = Color.FromArgb(232, 243, 251), Padding = new Padding(20, 11, 16, 7) };
         statusLabel.Location = new Point(20, 9);
         statusLabel.AutoSize = true;
+        statusLabel.Visible = true;
         nowDetail.Location = new Point(22, 45);
+        nowDetail.Visible = true;
         nowBar.Controls.AddRange([statusLabel, nowDetail]);
+        statusLabel.BringToFront();
+        nowDetail.BringToFront();
 
         BuildTalkPage();
         BuildSettingsPage();
@@ -64,10 +100,12 @@ internal sealed partial class MainForm
         Controls.Add(pageHost);
         Controls.Add(nowBar);
         Controls.Add(identityStrip);
+        Controls.Add(appBar);
 
         deviceFilter.TextChanged += (_, _) => RefreshRedesignPeers();
         cardPulse.Tick += (_, _) => PulseCards();
         cardPulse.Start();
+        UpdateIdentityPresentation();
     }
 
     private void BuildTalkPage()
@@ -95,11 +133,15 @@ internal sealed partial class MainForm
         devicesPanel.Controls.Add(header);
 
         var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 12, 14, 12), BackColor = Color.White };
-        broadcast.Dock = DockStyle.Top;
-        broadcast.Height = 40;
-        reply.Dock = DockStyle.Top;
-        reply.Height = 40;
-        reply.Margin = new Padding(0, 7, 0, 0);
+        var pttPanel = new Panel { Dock = DockStyle.Top, Height = 142 };
+        broadcast.SetBounds(8, 0, 0, 68);
+        broadcast.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+        reply.SetBounds(8, 88, 0, 56);
+        reply.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+        pttPanel.Resize += (_, _) => { broadcast.Width = pttPanel.ClientSize.Width - 8; reply.Width = pttPanel.ClientSize.Width - 8; };
+        pttPanel.Controls.AddRange([broadcast, reply]);
+        var activityTitle = new Panel { Dock = DockStyle.Top, Height = 44, BackColor = Color.White, Padding = new Padding(8, 12, 8, 4) };
+        activityTitle.Controls.Add(new Label { Text = "Activity", AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold), Location = new Point(0, 4) });
         var diagnostics = new LinkLabel { Text = "Diagnostics…", AutoSize = true, Dock = DockStyle.Bottom, Padding = new Padding(0, 8, 0, 4) };
         diagnostics.Click += (_, _) => ShowSettings("Diagnostics");
         var recordings = new LinkLabel { Text = "Open recordings folder", AutoSize = true, Dock = DockStyle.Bottom, Padding = new Padding(0, 4, 0, 8) };
@@ -107,8 +149,8 @@ internal sealed partial class MainForm
         right.Controls.Add(activity);
         right.Controls.Add(diagnostics);
         right.Controls.Add(recordings);
-        right.Controls.Add(reply);
-        right.Controls.Add(broadcast);
+        right.Controls.Add(activityTitle);
+        right.Controls.Add(pttPanel);
         split.Controls.Add(devicesPanel, 0, 0);
         split.Controls.Add(right, 1, 0);
         talkPage.Controls.Add(split);
@@ -250,6 +292,7 @@ internal sealed partial class MainForm
         var search = deviceFilter.Text.Trim();
         var active = displayPeers.Where(peer => (string.IsNullOrEmpty(search) || peer.Alias.Contains(search, StringComparison.OrdinalIgnoreCase) || peer.NodeId.ToString("x8").Contains(search, StringComparison.OrdinalIgnoreCase)) && MatchesActiveFilter(peer)).OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
         deviceCount.Text = $"{displayPeers.Count} of 16 in group {settings.MeshId}";
+        UpdateIdentityPresentation();
         var activeIds = displayPeers.Select(peer => peer.NodeId).ToHashSet();
         foreach (var peer in displayPeers)
         {
@@ -406,6 +449,15 @@ internal sealed partial class MainForm
         if (label is not null) label.Text = $"Current group: {settings.MeshId} · {displayPeers.Count} active device(s) · companion ID {settings.NodeId:x8}";
         UpdateGroupButton();
     }
+
+    private void UpdateIdentityPresentation()
+    {
+        identityLabel.Text = $"{settings.Alias.ToUpperInvariant()}\nID {settings.NodeId:x8} · group {settings.MeshId} · {displayPeers.Count} of 16 devices";
+        identityMicrophone.Text = $"MIC\n{TrimDeviceName((recordingDevice.SelectedItem as RecordingDevice)?.Name ?? "Not selected")}";
+        identitySpeaker.Text = $"SPEAKER\n{TrimDeviceName((playbackDevice.SelectedItem as PlaybackDevice)?.Name ?? "Not selected")}";
+    }
+
+    private static string TrimDeviceName(string value) => value.Length <= 23 ? value : $"{value[..20]}…";
 
     private void UpdateGroupButton() => applyGroup.Enabled = Protocol.IsValidMeshId(groupId.Text) && groupConfirmation.Text == settings.MeshId && (applyCompanionGroup.Checked || applyActiveGroup.Checked);
 

@@ -8,7 +8,7 @@ internal sealed class DeviceCard : Panel
     private static readonly Color Purple = Color.FromArgb(106, 27, 154);
     private readonly Label alias = new() { AutoEllipsis = true, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
     private readonly Label badge = new() { AutoSize = true, ForeColor = Color.White, Font = new Font("Segoe UI", 7, FontStyle.Bold), Padding = new Padding(4, 2, 4, 2) };
-    private readonly Label details = new() { AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Consolas", 7) };
+    private readonly Label details = new() { AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f) };
     private readonly Label mute = new() { AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 8) };
     private readonly Button talk = FlatButton("Hold to talk", Purple);
     private readonly Button silence = FlatButton("Silence", Color.White, Color.FromArgb(23, 25, 28));
@@ -21,21 +21,21 @@ internal sealed class DeviceCard : Panel
 
     public DeviceCard()
     {
-        Size = new Size(238, 126);
-        Margin = new Padding(0, 0, 8, 8);
+        Size = new Size(296, 151);
+        Margin = new Padding(0, 0, 9, 10);
         BackColor = Color.White;
-        Padding = new Padding(9, 8, 9, 7);
+        Padding = new Padding(14, 10, 14, 9);
         DoubleBuffered = true;
 
-        alias.SetBounds(9, 8, 125, 18);
-        badge.Location = new Point(137, 7);
-        details.SetBounds(9, 29, 220, 14);
-        mute.SetBounds(9, 46, 220, 16);
-        talk.SetBounds(9, 66, 118, 27);
-        silence.SetBounds(130, 66, 67, 27);
-        more.SetBounds(200, 66, 29, 27);
-        volume.SetBounds(7, 96, 170, 24);
-        volumeValue.SetBounds(182, 102, 45, 16);
+        alias.SetBounds(14, 11, 182, 18);
+        badge.Location = new Point(205, 10);
+        details.SetBounds(14, 34, 267, 15);
+        mute.SetBounds(14, 55, 267, 16);
+        talk.SetBounds(14, 76, 180, 32);
+        silence.SetBounds(198, 76, 54, 32);
+        more.SetBounds(256, 76, 26, 32);
+        volume.SetBounds(28, 118, 202, 25);
+        volumeValue.SetBounds(242, 124, 40, 16);
         Controls.AddRange([alias, badge, details, mute, talk, silence, more, volume, volumeValue]);
 
         talk.MouseDown += (_, eventArgs) => { if (eventArgs.Button == MouseButtons.Left && peer is not null) TalkPressed?.Invoke(peer); };
@@ -72,9 +72,10 @@ internal sealed class DeviceCard : Panel
         talk.Enabled = !pttDisabled;
         silence.Enabled = !pttDisabled && value.SupportsMuteReporting && !value.HardwareMuted;
         silence.Text = value.SoftMuted ? "Silenced" : "Silence";
-        silence.ForeColor = value.SoftMuted ? Color.White : Color.FromArgb(23, 25, 28);
-        silence.BackColor = value.SoftMuted ? Color.FromArgb(99, 103, 109) : Color.White;
-        silence.FlatAppearance.BorderColor = Color.FromArgb(173, 178, 184);
+        var silenceUnavailable = !silence.Enabled;
+        silence.ForeColor = silenceUnavailable ? Color.FromArgb(154, 160, 166) : value.SoftMuted ? Color.White : Color.FromArgb(23, 25, 28);
+        silence.BackColor = silenceUnavailable ? Color.FromArgb(245, 246, 247) : value.SoftMuted ? Color.FromArgb(99, 103, 109) : Color.White;
+        silence.FlatAppearance.BorderColor = silenceUnavailable ? Color.FromArgb(220, 223, 227) : Color.FromArgb(173, 178, 184);
         silence.AccessibleDescription = value.HardwareMuted ? "Unavailable while the physical mute slider is on" : null;
         var correctedVolume = Math.Clamp(knownVolume, volume.Minimum, volume.Maximum);
         if (!volume.Capture) volume.Value = correctedVolume;
@@ -106,6 +107,6 @@ internal sealed class DeviceCard : Panel
     private static Button FlatButton(string text, Color background, Color? foreground = null) => new()
     {
         Text = text, BackColor = background, ForeColor = foreground ?? Color.White, FlatStyle = FlatStyle.Flat,
-        Font = new Font("Segoe UI", 8, FontStyle.Bold), UseVisualStyleBackColor = false,
+        Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), UseVisualStyleBackColor = false,
     };
 }

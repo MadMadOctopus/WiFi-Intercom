@@ -58,6 +58,8 @@ static device_config_t g_config;
 #define MESH_ID (g_config.mesh_id)
 #define NODE_ID (g_config.device_id)
 
+static bool button_pressed(gpio_num_t pin);
+
 static const char *TAG = "intercom";
 
 /* ---- audio frame passed capture -> tx ---------------------------------- */
@@ -498,9 +500,9 @@ static void handle_heartbeat(const intercom_pkt_t *p)
 static void handle_config_packet(const intercom_pkt_t *p,
                                  const struct sockaddr_in *source)
 {
-    if (p->payload_len == 0 || p->payload_len >= 256) return;
-    char request[256] = {0};
-    char response[256] = {0};
+    if (p->payload_len == 0 || p->payload_len >= 320) return;
+    char request[320] = {0};
+    char response[320] = {0};
     memcpy(request, p->payload, p->payload_len);
     bool restart_required = false;
     usb_control_process(&g_config, request, response, sizeof(response), &restart_required);
@@ -518,26 +520,31 @@ static void handle_config_packet(const intercom_pkt_t *p,
  * multicast back to a Windows Wi-Fi client (IGMP/multicast isolation). */
 static uint16_t build_hello_payload(uint8_t *out, size_t capacity)
 {
-    /* IH2 + protocol byte + capabilities + firmware-version length + firmware
-     * version + alias. Old recipients simply ignore the richer payload; the
-     * companion retains IH1 parsing for pre-OTA devices. */
+    /* IH3 + protocol byte + capabilities + live flags + firmware-version
+     * length + firmware version + alias. IH1/IH2 recipients retain audio and
+     * discovery interoperability even though they do not display p2 flags. */
     const char *firmware = esp_app_get_description()->version;
     const uint8_t *alias = (const uint8_t *)g_config.alias;
     size_t firmware_length = strnlen(firmware, 31);
     size_t alias_length = strnlen(g_config.alias, DEVICE_ALIAS_MAX);
-    if (capacity < 6 || firmware_length + alias_length > capacity - 6) return 0;
-    out[0] = 'I'; out[1] = 'H'; out[2] = '2';
+    if (capacity < 7 || firmware_length + alias_length > capacity - 7) return 0;
+    out[0] = 'I'; out[1] = 'H'; out[2] = '3';
     out[3] = INTERCOM_PROTOCOL_VERSION;
     out[4] = INTERCOM_CAPABILITY_OTA;
-    out[5] = (uint8_t)firmware_length;
-    memcpy(out + 6, firmware, firmware_length);
-    memcpy(out + 6 + firmware_length, alias, alias_length);
-    return (uint16_t)(6 + firmware_length + alias_length);
+    uint8_t flags = 0;
+    if (button_pressed(MUTE_SWITCH_GPIO)) flags |= 0x01u;
+    if (g_config.soft_mute) flags |= 0x02u;
+    if (g.state == ST_CLAIMING || g.state == ST_TALKING) flags |= 0x04u;
+    out[5] = flags;
+    out[6] = (uint8_t)firmware_length;
+    memcpy(out + 7, firmware, firmware_length);
+    memcpy(out + 7 + firmware_length, alias, alias_length);
+    return (uint16_t)(7 + firmware_length + alias_length);
 }
 
 static void reply_hello(const struct sockaddr_in *destination)
 {
-    uint8_t payload[6 + 31 + DEVICE_ALIAS_MAX];
+    uint8_t payload[7 + 31 + DEVICE_ALIAS_MAX];
     uint16_t length = build_hello_payload(payload, sizeof(payload));
     send_packet_to(destination, PKT_HELLO, 0, 0, 0, payload, length);
 }
@@ -884,7 +891,7 @@ static void playback_task(void *arg)
 
         /* Keep the amplifier in standby outside actual received playback.
          * MAX98357A enters high-impedance standby when BCLK is stopped. */
-        bool output_allowed = !local_floor && !button_pressed(MUTE_SWITCH_GPIO) &&
+        bool output_allowed = !local_floor && !button_pressed(MUTE_SWITCH_GPIO) && !g_config.soft_mute &&
                               st == ST_RECEIVING;
         if (!output_allowed)
             memset(mono, 0, sizeof(mono));
@@ -1103,7 +1110,7 @@ static void ring_task(void *arg)
 static void hello_task(void *arg)
 {
     while (1) {
-        uint8_t payload[6 + 31 + DEVICE_ALIAS_MAX];
+        uint8_t payload[7 + 31 + DEVICE_ALIAS_MAX];
         uint16_t length = build_hello_payload(payload, sizeof(payload));
         send_packet_to(&g_group, PKT_HELLO, 0, 0, 0, payload, length);
         vTaskDelay(pdMS_TO_TICKS(PEER_HELLO_MS));

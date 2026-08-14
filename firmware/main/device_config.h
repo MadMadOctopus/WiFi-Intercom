@@ -22,6 +22,8 @@ typedef struct {
     /* Bit 0: D9 broadcasts/D10 replies. Bit 1: LED zero is rotated 180 deg.
      * This intentionally occupies the old bool byte, preserving v1 NVS data. */
     uint8_t hardware_flags;
+    /* p2 soft mute is independent of the physical slider. */
+    uint8_t soft_mute;
 } device_config_t;
 
 void device_config_load(device_config_t *out);
@@ -29,5 +31,5 @@ bool device_config_save(const device_config_t *config);
 bool device_config_has_wifi(const device_config_t *config);
 bool device_config_apply_json(device_config_t *config, const char *json,
                               bool *restart_required);
-size_t device_config_to_json(const device_config_t *config, char *out,
-                             size_t out_size);
+size_t device_config_to_json(const device_config_t *config, bool hw_muted,
+                             char *out, size_t out_size);

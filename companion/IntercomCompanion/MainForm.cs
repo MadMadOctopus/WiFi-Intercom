@@ -6,7 +6,7 @@ using IntercomCompanion.Audio;
 namespace IntercomCompanion;
 
 /// <summary>UI-only WinForms surface; all intercom work lives in Core.</summary>
-internal sealed class MainForm : Form
+internal sealed partial class MainForm : Form
 {
     private readonly CompanionSettings settings = CompanionSettings.Load();
     private IntercomNode? node;
@@ -172,6 +172,7 @@ internal sealed class MainForm : Form
         KeyPreview = true;
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
+        BuildRedesign();
     }
 
     private void OnShown(object? sender, EventArgs e)
@@ -185,25 +186,32 @@ internal sealed class MainForm : Form
             node.OtaStatusReceived += (_, eventArgs) => PostToUi(() => ShowOtaStatus(eventArgs));
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
-            PopulateAudioDevices();
-            RefreshUsbPorts();
-            StartAudioEngine();
-            statusLabel.Text = "Idle — ready to receive";
-            broadcast.Enabled = reply.Enabled = true;
-            selected.Enabled = SelectedPeer is not null;
-            refreshTimer.Start();
         }
         catch (SocketException exception)
         {
             networkLabel.Text = $"Discovery unavailable: {exception.SocketErrorCode}";
             statusLabel.Text = "Network unavailable";
             statusLabel.ForeColor = Color.Firebrick;
+            return;
+        }
+        try
+        {
+            PopulateAudioDevices();
+            StartAudioEngine();
+            statusLabel.Text = "Idle";
+            statusLabel.ForeColor = Color.FromArgb(46, 125, 50);
+            broadcast.Enabled = reply.Enabled = true;
+            selected.Enabled = SelectedPeer is not null;
         }
         catch (Exception exception)
         {
-            statusLabel.Text = $"Audio unavailable: {exception.Message}";
+            statusLabel.Text = "Audio unavailable";
+            nowDetail.Text = exception.Message;
             statusLabel.ForeColor = Color.Firebrick;
         }
+        RefreshUsbPorts();
+        refreshTimer.Start();
+        EnableTray();
     }
 
     private void RefreshPeers()
@@ -237,6 +245,7 @@ internal sealed class MainForm : Form
         {
             refreshingDeviceList = false;
         }
+        RefreshRedesignPeers(peers);
         UpdateSelectedDeviceActions();
         if (receiveSession?.State == IntercomState.Receiving && audio is not null)
         {
@@ -271,7 +280,8 @@ internal sealed class MainForm : Form
         var peer = SelectedPeer;
         if (node is null || peer is null) return;
         var configuration = new DeviceConfiguration(alias.Text.Trim(), (int)volume.Value,
-            (int)brightness.Value, buttonsSwapped.Checked, int.Parse(orientation.Text));
+            (int)brightness.Value, buttonsSwapped.Checked, int.Parse(orientation.Text), false, false,
+            node.MeshId, peer.NodeId);
         applyConfig.Enabled = false;
         try
         {
@@ -288,6 +298,10 @@ internal sealed class MainForm : Form
 
     private void ShowConfiguration(DeviceConfigurationReceivedEventArgs eventArgs)
     {
+        configurations[eventArgs.NodeId] = eventArgs.Configuration;
+        knownDevices.Remember(new Peer(eventArgs.NodeId, eventArgs.Endpoint, eventArgs.Configuration.Alias,
+            Protocol.Version, "unknown", 0, 0, DateTimeOffset.UtcNow), eventArgs.Configuration);
+        RefreshRedesignPeers();
         if (selectedDeviceId != eventArgs.NodeId) return;
         alias.Text = eventArgs.Configuration.Alias;
         volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, (int)volume.Minimum, (int)volume.Maximum);
@@ -371,12 +385,7 @@ internal sealed class MainForm : Form
             otaStatus.Text = "Choose an active device first.";
             return;
         }
-        var confirmation = MessageBox.Show(this,
-            $"Update {targets.Length} device(s) sequentially to {package.Version}?\n\n" +
-            $"{string.Join(", ", targets.Select(peer => peer.Alias))}\n\n" +
-            "The companion must stay open and awake. Windows may ask once to allow the temporary local firmware server on this private network.",
-            "Confirm firmware update", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
-        if (confirmation != DialogResult.OK) return;
+        if (!ConfirmOtaUpdate(package, targets)) return;
 
         otaUpdating = true;
         broadcast.Enabled = reply.Enabled = selected.Enabled = false;
@@ -451,6 +460,9 @@ internal sealed class MainForm : Form
             IntercomState.WaitingForFloor => ("Floor occupied — buffering up to 500 ms", Color.FromArgb(249, 168, 37)),
             _ => ("Idle — ready to receive", Color.DimGray),
         };
+        nowDetail.Text = sessionState == IntercomState.Receiving && receiveSession?.LastTalker is { } talker
+            ? $"{talker.Alias} is speaking" : statusLabel.Text;
+        RecordActivity(statusLabel.Text);
     }
 
     private void BindPtt(Button button, Action press)
@@ -620,6 +632,7 @@ internal sealed class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        if (KeepRunningInTray(e)) return;
         refreshTimer.Stop();
         otaStopping.Cancel();
         // Never wait for a timer/socket/audio worker from the UI close path.

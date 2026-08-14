@@ -16,9 +16,25 @@ static const char *NVS_NAMESPACE = "intercom";
 static const char *NVS_KEY = "config_v1";
 
 typedef struct {
+    uint32_t device_id;
+    uint32_t mesh_id;
+    char alias[DEVICE_ALIAS_MAX + 1];
+    char wifi_ssid[WIFI_SSID_MAX + 1];
+    char wifi_password[WIFI_PASSWORD_MAX + 1];
+    uint16_t speaker_volume;
+    uint8_t led_brightness;
+    uint8_t hardware_flags;
+} device_config_v1_t;
+
+typedef struct {
+    uint32_t version;
+    device_config_v1_t value;
+} stored_config_v1_t;
+
+typedef struct {
     uint32_t version;
     device_config_t value;
-} stored_config_t;
+} stored_config_v2_t;
 
 static uint32_t default_device_id(void)
 {
@@ -41,6 +57,7 @@ static void make_defaults(device_config_t *out)
      * bleed into the nearby class-D amplifier on USB-powered assemblies. */
     out->led_brightness = 48;
     out->hardware_flags = 0;
+    out->soft_mute = 0;
 }
 
 void device_config_load(device_config_t *out)
@@ -49,21 +66,39 @@ void device_config_load(device_config_t *out)
     nvs_handle_t handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
 
-    stored_config_t stored = {0};
-    size_t len = sizeof(stored);
-    esp_err_t err = nvs_get_blob(handle, NVS_KEY, &stored, &len);
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(handle, NVS_KEY, NULL, &len);
+    bool migrated = false;
+    if (err == ESP_OK && len == sizeof(stored_config_v2_t)) {
+        stored_config_v2_t stored = {0};
+        err = nvs_get_blob(handle, NVS_KEY, &stored, &len);
+        if (err == ESP_OK && stored.version == 2 && stored.value.device_id != 0)
+            *out = stored.value;
+        else
+            err = ESP_ERR_NVS_INVALID_STATE;
+    } else if (err == ESP_OK && len == sizeof(stored_config_v1_t)) {
+        stored_config_v1_t stored = {0};
+        err = nvs_get_blob(handle, NVS_KEY, &stored, &len);
+        if (err == ESP_OK && stored.version == 1 && stored.value.device_id != 0) {
+            memcpy(out, &stored.value, sizeof(stored.value));
+            out->soft_mute = 0;
+            migrated = true;
+        } else {
+            err = ESP_ERR_NVS_INVALID_STATE;
+        }
+    }
     nvs_close(handle);
-    if (err == ESP_OK && len == sizeof(stored) && stored.version == 1 &&
-        stored.value.device_id != 0) {
-        *out = stored.value;
-    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+    if (migrated) {
+        ESP_LOGI(TAG, "Migrating p1 configuration to p2");
+        (void)device_config_save(out);
+    } else if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW(TAG, "Ignoring invalid saved configuration: %s", esp_err_to_name(err));
     }
 }
 
 bool device_config_save(const device_config_t *config)
 {
-    stored_config_t stored = {.version = 1, .value = *config};
+    stored_config_v2_t stored = {.version = 2, .value = *config};
     nvs_handle_t handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
     esp_err_t err = nvs_set_blob(handle, NVS_KEY, &stored, sizeof(stored));
@@ -91,6 +126,29 @@ static bool assign_string(cJSON *root, const char *key, char *out, size_t size)
     return true;
 }
 
+static bool mesh_id_from_text(const char *value, uint32_t *out)
+{
+    if (!value || strlen(value) != 4) return false;
+    uint32_t encoded = 0;
+    for (size_t index = 0; index < 4; ++index) {
+        char character = value[index];
+        if (!((character >= 'A' && character <= 'Z') ||
+              (character >= '0' && character <= '9'))) return false;
+        encoded = (encoded << 8) | (uint8_t)character;
+    }
+    *out = encoded;
+    return true;
+}
+
+static void mesh_id_to_text(uint32_t mesh_id, char out[5])
+{
+    out[0] = (char)(mesh_id >> 24);
+    out[1] = (char)(mesh_id >> 16);
+    out[2] = (char)(mesh_id >> 8);
+    out[3] = (char)mesh_id;
+    out[4] = '\0';
+}
+
 bool device_config_apply_json(device_config_t *config, const char *json,
                               bool *restart_required)
 {
@@ -107,12 +165,22 @@ bool device_config_apply_json(device_config_t *config, const char *json,
     assign_string(root, "ssid", updated.wifi_ssid, sizeof(updated.wifi_ssid));
     assign_string(root, "password", updated.wifi_password, sizeof(updated.wifi_password));
     cJSON *mesh = cJSON_GetObjectItemCaseSensitive(root, "mesh_id");
+    cJSON *device_id = cJSON_GetObjectItemCaseSensitive(root, "device_id");
     cJSON *volume = cJSON_GetObjectItemCaseSensitive(root, "speaker_volume");
     cJSON *brightness = cJSON_GetObjectItemCaseSensitive(root, "led_brightness");
     cJSON *buttons_swapped = cJSON_GetObjectItemCaseSensitive(root, "buttons_swapped");
     cJSON *ring_orientation = cJSON_GetObjectItemCaseSensitive(root, "ring_orientation");
-    if (cJSON_IsNumber(mesh) && mesh->valuedouble >= 1 && mesh->valuedouble <= UINT32_MAX)
-        updated.mesh_id = (uint32_t)mesh->valuedouble;
+    cJSON *soft_mute = cJSON_GetObjectItemCaseSensitive(root, "soft_mute");
+    if (mesh && (!cJSON_IsString(mesh) || !mesh_id_from_text(mesh->valuestring, &updated.mesh_id))) {
+        cJSON_Delete(root);
+        return false;
+    }
+    if (device_id && (!cJSON_IsNumber(device_id) || device_id->valuedouble < 1 ||
+                      device_id->valuedouble > UINT32_MAX)) {
+        cJSON_Delete(root);
+        return false;
+    }
+    if (cJSON_IsNumber(device_id)) updated.device_id = (uint32_t)device_id->valuedouble;
     if (cJSON_IsNumber(volume) && volume->valuedouble >= 64 && volume->valuedouble <= 1024)
         updated.speaker_volume = (uint16_t)volume->valuedouble;
     if (cJSON_IsNumber(brightness) && brightness->valuedouble >= 0 && brightness->valuedouble <= 255)
@@ -127,24 +195,33 @@ bool device_config_apply_json(device_config_t *config, const char *json,
             ? (updated.hardware_flags | DEVICE_FLAG_RING_180)
             : (updated.hardware_flags & ~DEVICE_FLAG_RING_180);
     }
+    if (soft_mute && !cJSON_IsBool(soft_mute)) {
+        cJSON_Delete(root);
+        return false;
+    }
+    if (cJSON_IsBool(soft_mute)) updated.soft_mute = cJSON_IsTrue(soft_mute) ? 1 : 0;
     cJSON_Delete(root);
     if (!device_config_save(&updated)) return false;
     if (restart_required)
         *restart_required = strcmp(old_ssid, updated.wifi_ssid) != 0 ||
                             strcmp(old_password, updated.wifi_password) != 0 ||
                             old_hardware_flags != updated.hardware_flags ||
-                            old_brightness != updated.led_brightness;
+                            old_brightness != updated.led_brightness ||
+                            config->mesh_id != updated.mesh_id ||
+                            config->device_id != updated.device_id;
     *config = updated;
     return true;
 }
 
-size_t device_config_to_json(const device_config_t *config, char *out,
-                             size_t out_size)
+size_t device_config_to_json(const device_config_t *config, bool hw_muted,
+                             char *out, size_t out_size)
 {
     cJSON *root = cJSON_CreateObject();
+    char mesh_id[5];
+    mesh_id_to_text(config->mesh_id, mesh_id);
     cJSON_AddStringToObject(root, "type", "config");
     cJSON_AddNumberToObject(root, "device_id", config->device_id);
-    cJSON_AddNumberToObject(root, "mesh_id", config->mesh_id);
+    cJSON_AddStringToObject(root, "mesh_id", mesh_id);
     cJSON_AddStringToObject(root, "alias", config->alias);
     cJSON_AddStringToObject(root, "ssid", config->wifi_ssid);
     cJSON_AddNumberToObject(root, "speaker_volume", config->speaker_volume);
@@ -153,6 +230,8 @@ size_t device_config_to_json(const device_config_t *config, char *out,
                           (config->hardware_flags & DEVICE_FLAG_BUTTONS_SWAPPED) != 0);
     cJSON_AddNumberToObject(root, "ring_orientation",
                             (config->hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
+    cJSON_AddBoolToObject(root, "soft_mute", config->soft_mute != 0);
+    cJSON_AddBoolToObject(root, "hw_muted", hw_muted);
     char *encoded = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!encoded) return 0;

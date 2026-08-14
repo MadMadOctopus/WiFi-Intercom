@@ -19,6 +19,7 @@ internal sealed class AudioEngine : IDisposable
     private long queuedPlaybackFrames;
     private bool captureStarted;
     private bool disposed;
+    private volatile bool localPlaybackMuted;
 
     public AudioEngine(string? recordingDeviceName = null, string? playbackDeviceId = null)
     {
@@ -63,6 +64,7 @@ internal sealed class AudioEngine : IDisposable
 
     public int BufferedMilliseconds => output.BufferedBytes * 1000 / format.AverageBytesPerSecond;
     public long QueuedPlaybackFrames => Interlocked.Read(ref queuedPlaybackFrames);
+    public bool LocalPlaybackMuted => localPlaybackMuted;
 
     public static IReadOnlyList<RecordingDevice> RecordingDevices()
     {
@@ -109,6 +111,7 @@ internal sealed class AudioEngine : IDisposable
     public void EnqueuePlayback(short[] pcm)
     {
         if (pcm.Length != ImaAdpcm.SamplesPerFrame) return;
+        if (localPlaybackMuted) return;
         var bytes = new byte[pcm.Length * sizeof(short)];
         Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
         output.AddSamples(bytes, 0, bytes.Length);
@@ -116,6 +119,13 @@ internal sealed class AudioEngine : IDisposable
     }
 
     public void ClearPlayback() => output.ClearBuffer();
+
+    /// <summary>Local output only: never sends a protocol message to a device.</summary>
+    public void SetLocalPlaybackMuted(bool muted)
+    {
+        localPlaybackMuted = muted;
+        if (muted) output.ClearBuffer();
+    }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs eventArgs)
     {

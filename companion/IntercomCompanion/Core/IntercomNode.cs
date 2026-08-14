@@ -62,6 +62,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     }
 
     public uint NodeId => settings.NodeId;
+    public string MeshId => settings.MeshId;
     public string Alias => settings.Alias;
     public IPAddress DiscoveryInterface => discoveryInterface;
     public IReadOnlyCollection<Peer> Peers => peers.Values.ToArray();
@@ -95,6 +96,17 @@ internal sealed class IntercomNode : IAsyncDisposable
         _ = SendHelloAsync(stopping.Token);
     }
 
+    public void SetMeshId(string meshId)
+    {
+        if (!Protocol.IsValidMeshId(meshId))
+            throw new ArgumentException("Group ID must be exactly four A–Z or 0–9 characters.", nameof(meshId));
+        settings.MeshId = meshId;
+        settings.Save();
+        peers.Clear();
+        PeersChanged?.Invoke(this, EventArgs.Empty);
+        _ = SendHelloAsync(stopping.Token);
+    }
+
     public Task<DeviceConfigurationReceivedEventArgs> RequestConfigurationAsync(Peer peer,
                                                                                  CancellationToken cancellationToken = default)
     {
@@ -113,6 +125,9 @@ internal sealed class IntercomNode : IAsyncDisposable
             led_brightness = configuration.LedBrightness,
             buttons_swapped = configuration.ButtonsSwapped,
             ring_orientation = configuration.RingOrientation,
+            soft_mute = configuration.SoftMute,
+            mesh_id = configuration.MeshId,
+            device_id = configuration.DeviceId,
         });
         return SendConfigurationRequestAsync(PacketType.ConfigSet, Encoding.UTF8.GetBytes(request), peer,
             cancellationToken);
@@ -240,7 +255,7 @@ internal sealed class IntercomNode : IAsyncDisposable
             while (!stopping.IsCancellationRequested)
             {
                 var received = await client.ReceiveAsync(stopping.Token);
-                if (!Protocol.TryParse(received.Buffer, NodeId, out var packet) || packet is null)
+                if (!Protocol.TryParse(received.Buffer, Protocol.MeshIdFromText(settings.MeshId), NodeId, out var packet) || packet is null)
                     continue;
 
                 LearnPeer(packet, received.RemoteEndPoint);
@@ -313,15 +328,17 @@ internal sealed class IntercomNode : IAsyncDisposable
         var announcement = packet.Type == PacketType.Hello
             ? Protocol.ParseHello(packet.Payload)
             : new HelloAnnouncement(known?.Alias ?? $"Device {packet.SenderId:x8}",
-                known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown", known?.Capabilities ?? 0);
+                known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown", known?.Capabilities ?? 0,
+                known?.HelloFlags ?? 0);
         var peer = new Peer(packet.SenderId, source, announcement.Alias,
-            announcement.ProtocolVersion, announcement.FirmwareVersion, announcement.Capabilities, DateTimeOffset.UtcNow);
+            announcement.ProtocolVersion, announcement.FirmwareVersion, announcement.Capabilities,
+            announcement.Flags, DateTimeOffset.UtcNow);
         peers[packet.SenderId] = peer;
         if (known is null)
             DiagnosticLog.Write($"peer discovered sender={packet.SenderId:x8} endpoint={source} alias={peer.Alias} firmware={peer.FirmwareVersion} protocol={peer.ProtocolVersion?.ToString() ?? "legacy"}");
         if (known is null || known.Alias != peer.Alias || !known.Endpoint.Equals(peer.Endpoint) ||
             known.ProtocolVersion != peer.ProtocolVersion || known.FirmwareVersion != peer.FirmwareVersion ||
-            known.Capabilities != peer.Capabilities)
+            known.Capabilities != peer.Capabilities || known.HelloFlags != peer.HelloFlags)
             PeersChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -345,7 +362,11 @@ internal sealed class IntercomNode : IAsyncDisposable
                 root.TryGetProperty("speaker_volume", out var volume) ? volume.GetInt32() : 512,
                 root.TryGetProperty("led_brightness", out var brightness) ? brightness.GetInt32() : 48,
                 root.TryGetProperty("buttons_swapped", out var swapped) && swapped.GetBoolean(),
-                root.TryGetProperty("ring_orientation", out var orientation) ? orientation.GetInt32() : 0);
+                root.TryGetProperty("ring_orientation", out var orientation) ? orientation.GetInt32() : 0,
+                root.TryGetProperty("soft_mute", out var softMute) && softMute.GetBoolean(),
+                root.TryGetProperty("hw_muted", out var hardwareMute) && hardwareMute.GetBoolean(),
+                ReadMeshId(root),
+                root.TryGetProperty("device_id", out var deviceId) ? deviceId.GetUInt32() : packet.SenderId);
             var reply = new DeviceConfigurationReceivedEventArgs(packet.SenderId, packet.SessionId, source, config);
             if (configurationRequests.TryGetValue(packet.SessionId, out var completion))
             {
@@ -361,6 +382,16 @@ internal sealed class IntercomNode : IAsyncDisposable
         {
             Diagnostic?.Invoke($"Ignored invalid configuration reply from {source.Address}.");
         }
+    }
+
+    private static string ReadMeshId(JsonElement root)
+    {
+        if (!root.TryGetProperty("mesh_id", out var meshId)) return "MESH";
+        if (meshId.ValueKind == JsonValueKind.String)
+            return Protocol.IsValidMeshId(meshId.GetString()) ? meshId.GetString()! : "MESH";
+        if (meshId.ValueKind == JsonValueKind.Number && meshId.TryGetUInt32(out var numeric))
+            return Protocol.MeshIdToText(numeric);
+        return "MESH";
     }
 
     private void ParseOtaStatus(IntercomPacket packet, IPEndPoint source)
@@ -463,7 +494,7 @@ internal sealed class IntercomNode : IAsyncDisposable
                                  IPEndPoint destination, byte flags,
                                  CancellationToken cancellationToken)
     {
-        var datagram = Protocol.Pack(NodeId, type, session, sequence, TimestampMs(), payload, flags);
+        var datagram = Protocol.Pack(Protocol.MeshIdFromText(settings.MeshId), NodeId, type, session, sequence, TimestampMs(), payload, flags);
         await sendGate.WaitAsync(cancellationToken);
         try { await client.SendAsync(datagram, destination, cancellationToken); }
         finally { sendGate.Release(); }

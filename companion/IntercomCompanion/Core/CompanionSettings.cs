@@ -6,9 +6,12 @@ namespace IntercomCompanion.Core;
 internal sealed class CompanionSettings
 {
     public uint NodeId { get; set; }
+    public string MeshId { get; set; } = "MESH";
     public string Alias { get; set; } = Environment.MachineName[..Math.Min(32, Environment.MachineName.Length)];
     public string? RecordingDeviceName { get; set; }
     public string? PlaybackDeviceId { get; set; }
+    public bool RunInNotificationArea { get; set; } = true;
+    public bool StartWithWindows { get; set; }
 
     public static string AppDataDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WiFi-Intercom");
@@ -25,6 +28,7 @@ internal sealed class CompanionSettings
             if (saved is { NodeId: not 0 })
             {
                 saved.Alias = SanitizeAlias(saved.Alias);
+                saved.MeshId = Protocol.IsValidMeshId(saved.MeshId) ? saved.MeshId : "MESH";
                 return saved;
             }
         }
@@ -40,6 +44,7 @@ internal sealed class CompanionSettings
     public void Save()
     {
         Alias = SanitizeAlias(Alias);
+        MeshId = Protocol.IsValidMeshId(MeshId) ? MeshId : "MESH";
         Directory.CreateDirectory(AppDataDirectory);
         Directory.CreateDirectory(RecordingsDirectory);
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));

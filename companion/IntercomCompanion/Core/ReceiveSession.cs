@@ -360,7 +360,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
             await foreach (var eventArgs in audioPackets.Reader.ReadAllAsync(stopping.Token))
             {
                 var packet = eventArgs.Packet;
-                short[] pcm;
+                short[]? pcm;
                 if (!ImaAdpcm.TryDecode(packet.Payload, out pcm) || pcm is null) continue;
                 Interlocked.Increment(ref decodedFrameCount);
                 lock (gate)
@@ -431,7 +431,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         // playout ends, just as the hardware does for its reply button.
         var discovered = node.Peers.FirstOrDefault(peer => peer.NodeId == packet.SenderId);
         LastTalker = discovered is null
-            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, DateTimeOffset.UtcNow)
+            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, 0, DateTimeOffset.UtcNow)
             : discovered with { Endpoint = endpoint, LastSeen = DateTimeOffset.UtcNow };
         SetStateLocked(IntercomState.Receiving);
         DiagnosticLog.Write($"rx begin sender={senderId:x8} session={sessionId:x8}");

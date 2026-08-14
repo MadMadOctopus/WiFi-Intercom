@@ -27,6 +27,9 @@
 #define PKT_CONFIG_GET   7
 #define PKT_CONFIG_SET   8
 #define PKT_CONFIG_REPLY 9
+#define PKT_OTA_OFFER    10
+#define PKT_OTA_STATUS   11
+#define PKT_OTA_CANCEL   12
 
 #define PROTO_FLAG_DIRECTED 0x01u
 

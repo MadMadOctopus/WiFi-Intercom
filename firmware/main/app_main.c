@@ -20,6 +20,7 @@
  */
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -47,6 +48,7 @@
 #include "adpcm.h"
 #include "device_config.h"
 #include "protocol.h"
+#include "ota_manager.h"
 #include "ring_controller.h"
 #include "usb_control.h"
 
@@ -214,6 +216,18 @@ static void send_packet_to(const struct sockaddr_in *destination, uint8_t type,
     if (g_sock >= 0)
         sendto(g_sock, buf, n, 0, (const struct sockaddr *)destination,
                sizeof(*destination));
+}
+
+static void ota_status_send(const struct sockaddr_in *destination, uint32_t session,
+                            const char *state, int progress, const char *message)
+{
+    char json[196];
+    int length = snprintf(json, sizeof(json),
+                          "{\"state\":\"%s\",\"progress\":%d,\"message\":\"%s\",\"version\":\"%s\"}",
+                          state, progress, message, esp_app_get_description()->version);
+    if (length > 0 && (size_t)length < sizeof(json))
+        send_packet_to(destination, PKT_OTA_STATUS, 0, session, 0,
+                       (const uint8_t *)json, (uint16_t)length);
 }
 
 static void send_to_active_peers(uint8_t type, uint8_t flags, uint32_t session,
@@ -504,23 +518,26 @@ static void handle_config_packet(const intercom_pkt_t *p,
  * multicast back to a Windows Wi-Fi client (IGMP/multicast isolation). */
 static uint16_t build_hello_payload(uint8_t *out, size_t capacity)
 {
-    /* IH1 + protocol byte + firmware-version length + firmware version + alias */
+    /* IH2 + protocol byte + capabilities + firmware-version length + firmware
+     * version + alias. Old recipients simply ignore the richer payload; the
+     * companion retains IH1 parsing for pre-OTA devices. */
     const char *firmware = esp_app_get_description()->version;
     const uint8_t *alias = (const uint8_t *)g_config.alias;
     size_t firmware_length = strnlen(firmware, 31);
     size_t alias_length = strnlen(g_config.alias, DEVICE_ALIAS_MAX);
-    if (capacity < 5 || firmware_length + alias_length > capacity - 5) return 0;
-    out[0] = 'I'; out[1] = 'H'; out[2] = '1';
+    if (capacity < 6 || firmware_length + alias_length > capacity - 6) return 0;
+    out[0] = 'I'; out[1] = 'H'; out[2] = '2';
     out[3] = INTERCOM_PROTOCOL_VERSION;
-    out[4] = (uint8_t)firmware_length;
-    memcpy(out + 5, firmware, firmware_length);
-    memcpy(out + 5 + firmware_length, alias, alias_length);
-    return (uint16_t)(5 + firmware_length + alias_length);
+    out[4] = INTERCOM_CAPABILITY_OTA;
+    out[5] = (uint8_t)firmware_length;
+    memcpy(out + 6, firmware, firmware_length);
+    memcpy(out + 6 + firmware_length, alias, alias_length);
+    return (uint16_t)(6 + firmware_length + alias_length);
 }
 
 static void reply_hello(const struct sockaddr_in *destination)
 {
-    uint8_t payload[5 + 31 + DEVICE_ALIAS_MAX];
+    uint8_t payload[6 + 31 + DEVICE_ALIAS_MAX];
     uint16_t length = build_hello_payload(payload, sizeof(payload));
     send_packet_to(destination, PKT_HELLO, 0, 0, 0, payload, length);
 }
@@ -543,6 +560,11 @@ static void net_rx_task(void *arg)
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
         peer_seen(&pkt, &src);
+        if (ota_manager_is_active() && pkt.type == PKT_CLAIM) {
+            send_packet_to(&src, PKT_BUSY, 0, 0, 0, NULL, 0);
+            xSemaphoreGive(g_lock);
+            continue;
+        }
         switch (pkt.type) {
             case PKT_HELLO: reply_hello(&src); break;
             case PKT_CLAIM: handle_claim(&pkt, &src); break;
@@ -550,6 +572,27 @@ static void net_rx_task(void *arg)
             case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;
             case PKT_CONFIG_GET:
             case PKT_CONFIG_SET: handle_config_packet(&pkt, &src); break;
+            case PKT_OTA_OFFER: {
+                /* Do not interrupt speech. The companion can queue and retry
+                 * its small, idempotent offer when the floor becomes idle. */
+                bool idle = g.state == ST_IDLE;
+                xSemaphoreGive(g_lock);
+                const char *reason = NULL;
+                bool accepted = idle && ota_manager_offer(pkt.payload, pkt.payload_len,
+                                                          &src, pkt.session_id, &reason);
+                if (!accepted)
+                    ota_status_send(&src, pkt.session_id, "rejected", 0,
+                                    idle ? (reason ? reason : "OTA rejected") : "Floor is active");
+                xSemaphoreTake(g_lock, portMAX_DELAY);
+                if (!accepted) g.error_until_ms = now_ms() + 1500;
+                break;
+            }
+            case PKT_OTA_CANCEL:
+                /* Cancellation is deliberately unsupported after acceptance:
+                 * stopping a flash write is less safe than letting it finish
+                 * or using automatic rollback on the next boot. */
+                ota_status_send(&src, pkt.session_id, "rejected", 0, "Cancellation unavailable");
+                break;
             case PKT_BUSY:
                 if (g.state == ST_CLAIMING) g.state = ST_IDLE;
                 break;
@@ -628,6 +671,14 @@ static void tx_task(void *arg)
     audio_frame_t frame;
 
     while (1) {
+        if (ota_manager_is_active()) {
+            /* OTA accepts only while idle. Suppress fresh PTT attempts and
+             * keep draining the capture queue so no stale speech starts once
+             * the update finishes or fails. */
+            xQueueReceive(mic_q, &frame, 0);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
         uint32_t t = now_ms();
         bool d10_pressed = button_pressed(BUTTON_BROADCAST_GPIO);
         bool d9_pressed = button_pressed(BUTTON_REPLY_GPIO);
@@ -889,10 +940,13 @@ static void capture_task(void *arg)
                                                  pdMS_TO_TICKS(500));
         if (read_err == ESP_ERR_TIMEOUT) {
             if (++consecutive_timeouts >= 3) {
-                ESP_LOGW(TAG, "MIC diag: ADC stream stalled; restarting capture");
-                adc_continuous_stop(adc_handle);
-                vTaskDelay(pdMS_TO_TICKS(20));
-                adc_continuous_start(adc_handle);
+                /* Flash writes temporarily pause the ADC DMA path on the C3.
+                 * Calling adc_continuous_stop/start from this recovery path
+                 * races the driver's DMA mutex and can assert inside
+                 * xTaskPriorityDisinherit. There is no useful microphone data
+                 * while an OTA writes flash anyway, so leave the driver armed
+                 * and let it resume as soon as the flash operation ends. */
+                ESP_LOGW(TAG, "MIC diag: ADC stream paused; leaving capture armed");
                 consecutive_timeouts = 0;
             }
             continue;
@@ -1030,7 +1084,9 @@ static void ring_task(void *arg)
         bool error = (int32_t)(g.error_until_ms - t) > 0;
         xSemaphoreGive(g_lock);
 
-        if (error) ring_controller_set(RING_ERROR);
+        if (ota_manager_is_active()) ring_controller_set(RING_OTA);
+        else if (ota_manager_has_recent_error()) ring_controller_set(RING_ERROR);
+        else if (error) ring_controller_set(RING_ERROR);
         else if (button_pressed(MUTE_SWITCH_GPIO)) ring_controller_set(RING_MUTE);
         else if (state == ST_TALKING || state == ST_CLAIMING)
             ring_controller_set(directed ? RING_TALK_REPLY : RING_TALK_BROADCAST);
@@ -1047,11 +1103,21 @@ static void ring_task(void *arg)
 static void hello_task(void *arg)
 {
     while (1) {
-        uint8_t payload[5 + 31 + DEVICE_ALIAS_MAX];
+        uint8_t payload[6 + 31 + DEVICE_ALIAS_MAX];
         uint16_t length = build_hello_payload(payload, sizeof(payload));
         send_packet_to(&g_group, PKT_HELLO, 0, 0, 0, payload, length);
         vTaskDelay(pdMS_TO_TICKS(PEER_HELLO_MS));
     }
+}
+
+static void ota_health_task(void *arg)
+{
+    /* A pending image gets a full control/audio/network startup window before
+     * it is committed. A reset before this point is handled by bootloader
+     * rollback, preserving the previous application slot. */
+    vTaskDelay(pdMS_TO_TICKS(12000));
+    ota_manager_mark_running_valid();
+    vTaskDelete(NULL);
 }
 
 /* ======================================================================== */
@@ -1183,6 +1249,7 @@ void app_main(void)
 
     wifi_init();
     udp_init();
+    ota_manager_init(ota_status_send);
 
 #if INTERCOM_USB_RAW_MIC_CAPTURE
     raw_mic_q = xQueueCreate(16, sizeof(audio_frame_t));
@@ -1198,6 +1265,7 @@ void app_main(void)
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);
     xTaskCreate(ring_task,     "ring",     4096, NULL, 4, NULL);
     xTaskCreate(hello_task,    "hello",    3072, NULL, 3, NULL);
+    xTaskCreate(ota_health_task, "ota_health", 3072, NULL, 2, NULL);
 
     ESP_LOGI(TAG, "RX jitter: %d-frame capacity / %d-frame prebuffer; free heap=%u bytes",
              JB_CAP, JITTER_PREBUFFER, (unsigned)esp_get_free_heap_size());

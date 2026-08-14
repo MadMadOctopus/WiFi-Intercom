@@ -20,6 +20,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     private readonly ConcurrentDictionary<uint, Peer> peers = new();
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<DeviceConfigurationReceivedEventArgs>>
         configurationRequests = new();
+    private readonly ConcurrentDictionary<uint, OtaOperation> otaOperations = new();
     private readonly SemaphoreSlim sendGate = new(1, 1);
     private readonly SemaphoreSlim mediaSendGate = new(1, 1);
     private readonly CancellationTokenSource stopping = new();
@@ -62,6 +63,7 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     public uint NodeId => settings.NodeId;
     public string Alias => settings.Alias;
+    public IPAddress DiscoveryInterface => discoveryInterface;
     public IReadOnlyCollection<Peer> Peers => peers.Values.ToArray();
 
     /// <summary>Stable destination set for a single PTT session.</summary>
@@ -75,6 +77,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     public event Action<string>? Diagnostic;
     public event EventHandler<IntercomPacketReceivedEventArgs>? PacketReceived;
     public event EventHandler<RtpPacketReceivedEventArgs>? RtpPacketReceived;
+    public event EventHandler<OtaStatusReceivedEventArgs>? OtaStatusReceived;
 
     public void Start()
     {
@@ -113,6 +116,59 @@ internal sealed class IntercomNode : IAsyncDisposable
         });
         return SendConfigurationRequestAsync(PacketType.ConfigSet, Encoding.UTF8.GetBytes(request), peer,
             cancellationToken);
+    }
+
+    /// <summary>Offer a cryptographically verified application image to one
+    /// idle device. The file host is scoped to that device's current LAN IP.
+    /// This returns only after the device verifies the image and announces its
+    /// reboot, or when it reports a failure. This keeps the temporary artifact
+    /// host alive for the complete transaction.</summary>
+    public async Task RequestOtaUpdateAsync(Peer peer, OtaPackage package, OtaArtifactServer server,
+                                            CancellationToken cancellationToken = default)
+    {
+        if (!peer.IsProtocolCompatible || peer.ProtocolVersion != Protocol.Version || !peer.SupportsOta)
+            throw new InvalidOperationException($"{peer.Alias} does not support OTA protocol p{Protocol.Version}.");
+        if (package.Protocol != Protocol.Version)
+            throw new InvalidOperationException($"Package protocol p{package.Protocol} is incompatible with this companion.");
+        package.Verify();
+        var session = NewSessionId();
+        var operation = new OtaOperation();
+        if (!otaOperations.TryAdd(session, operation))
+            throw new InvalidOperationException("Could not allocate OTA session.");
+        try
+        {
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                url = server.UrlFor(peer).AbsoluteUri,
+                version = package.Version,
+                protocol = package.Protocol,
+                size = package.Size,
+                sha256 = package.Sha256,
+                signature = package.Signature,
+            });
+            if (payload.Length > 320) throw new InvalidDataException("OTA offer exceeds the PTT1 control payload limit.");
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                Diagnostic?.Invoke($"OTA {package.Version} → {peer.Alias} (offer {attempt}/3)");
+                await SendToEndpointAsync(PacketType.OtaOffer, session, 0, payload, peer.Endpoint,
+                    cancellationToken: cancellationToken);
+                var completed = await Task.WhenAny(operation.Admitted.Task,
+                    Task.Delay(TimeSpan.FromSeconds(2), cancellationToken));
+                if (completed == operation.Admitted.Task)
+                {
+                    await operation.Admitted.Task;
+                    break;
+                }
+                if (operation.Completed.Task.IsCompleted) await operation.Completed.Task;
+                if (attempt == 3)
+                    throw new TimeoutException($"{peer.Alias} did not acknowledge the OTA offer.");
+            }
+            await operation.Completed.Task.WaitAsync(TimeSpan.FromSeconds(60), cancellationToken);
+        }
+        finally
+        {
+            otaOperations.TryRemove(session, out _);
+        }
     }
 
     /// <summary>
@@ -191,6 +247,8 @@ internal sealed class IntercomNode : IAsyncDisposable
                 PacketReceived?.Invoke(this, new IntercomPacketReceivedEventArgs(packet, received.RemoteEndPoint));
                 if (packet.Type == PacketType.ConfigReply)
                     ParseConfigurationReply(packet, received.RemoteEndPoint);
+                else if (packet.Type == PacketType.OtaStatus)
+                    ParseOtaStatus(packet, received.RemoteEndPoint);
             }
         }
         catch (OperationCanceledException) { }
@@ -255,14 +313,15 @@ internal sealed class IntercomNode : IAsyncDisposable
         var announcement = packet.Type == PacketType.Hello
             ? Protocol.ParseHello(packet.Payload)
             : new HelloAnnouncement(known?.Alias ?? $"Device {packet.SenderId:x8}",
-                known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown");
+                known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown", known?.Capabilities ?? 0);
         var peer = new Peer(packet.SenderId, source, announcement.Alias,
-            announcement.ProtocolVersion, announcement.FirmwareVersion, DateTimeOffset.UtcNow);
+            announcement.ProtocolVersion, announcement.FirmwareVersion, announcement.Capabilities, DateTimeOffset.UtcNow);
         peers[packet.SenderId] = peer;
         if (known is null)
             DiagnosticLog.Write($"peer discovered sender={packet.SenderId:x8} endpoint={source} alias={peer.Alias} firmware={peer.FirmwareVersion} protocol={peer.ProtocolVersion?.ToString() ?? "legacy"}");
         if (known is null || known.Alias != peer.Alias || !known.Endpoint.Equals(peer.Endpoint) ||
-            known.ProtocolVersion != peer.ProtocolVersion || known.FirmwareVersion != peer.FirmwareVersion)
+            known.ProtocolVersion != peer.ProtocolVersion || known.FirmwareVersion != peer.FirmwareVersion ||
+            known.Capabilities != peer.Capabilities)
             PeersChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -301,6 +360,42 @@ internal sealed class IntercomNode : IAsyncDisposable
         catch (JsonException)
         {
             Diagnostic?.Invoke($"Ignored invalid configuration reply from {source.Address}.");
+        }
+    }
+
+    private void ParseOtaStatus(IntercomPacket packet, IPEndPoint source)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(packet.Payload);
+            var root = json.RootElement;
+            var status = new OtaStatus(
+                root.TryGetProperty("state", out var state) ? state.GetString() ?? "unknown" : "unknown",
+                root.TryGetProperty("progress", out var progress) ? progress.GetInt32() : 0,
+                root.TryGetProperty("message", out var message) ? message.GetString() ?? "" : "",
+                root.TryGetProperty("version", out var version) ? version.GetString() ?? "unknown" : "unknown");
+            DiagnosticLog.Write($"ota status sender={packet.SenderId:x8} session={packet.SessionId:x8} state={status.State} progress={status.Progress}");
+            OtaStatusReceived?.Invoke(this, new OtaStatusReceivedEventArgs(packet.SenderId, packet.SessionId, source, status));
+            if (otaOperations.TryGetValue(packet.SessionId, out var operation))
+            {
+                if (status.State is "rejected" or "failed")
+                {
+                    var exception = new InvalidOperationException(status.Message);
+                    operation.Admitted.TrySetException(exception);
+                    operation.Completed.TrySetException(exception);
+                }
+                else if (status.State is "accepted" or "downloading")
+                    operation.Admitted.TrySetResult(status);
+                else if (status.State == "rebooting")
+                {
+                    operation.Admitted.TrySetResult(status);
+                    operation.Completed.TrySetResult(status);
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            Diagnostic?.Invoke($"Ignored invalid OTA status from {source.Address}.");
         }
     }
 
@@ -436,4 +531,21 @@ internal sealed class RtpPacketReceivedEventArgs(RtpPacket packet, IPEndPoint en
 {
     public RtpPacket Packet { get; } = packet;
     public IPEndPoint Endpoint { get; } = endpoint;
+}
+
+internal sealed record OtaStatus(string State, int Progress, string Message, string Version);
+
+internal sealed class OtaOperation
+{
+    public TaskCompletionSource<OtaStatus> Admitted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<OtaStatus> Completed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+internal sealed class OtaStatusReceivedEventArgs(uint nodeId, uint sessionId, IPEndPoint endpoint,
+                                                  OtaStatus status) : EventArgs
+{
+    public uint NodeId { get; } = nodeId;
+    public uint SessionId { get; } = sessionId;
+    public IPEndPoint Endpoint { get; } = endpoint;
+    public OtaStatus Status { get; } = status;
 }

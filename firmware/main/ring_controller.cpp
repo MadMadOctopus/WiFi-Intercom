@@ -101,9 +101,27 @@ class RmtRing final : public voicering::RingOutput {
     pixels_[physical * 3 + 2] = colour.b;
   }
   void show() override {
+    /* Flash writes can delay the RMT ISR beyond a frame interval. Never let
+     * cosmetic LED output abort the intercom (or an OTA) in that situation.
+     * Keep the in-flight payload immutable and simply drop an animation frame
+     * until the peripheral has completed it. */
+    if (in_flight_) {
+      const esp_err_t complete = rmt_tx_wait_all_done(channel_, 0);
+      if (complete == ESP_ERR_TIMEOUT) return;
+      in_flight_ = false;
+      if (complete != ESP_OK) {
+        ESP_LOGW(TAG, "RMT completion failed: %s", esp_err_to_name(complete));
+        return;
+      }
+    }
+    memcpy(tx_pixels_, pixels_, count_ * 3);
     rmt_transmit_config_t tx{};
-    ESP_ERROR_CHECK(rmt_transmit(channel_, encoder_, pixels_, count_ * 3, &tx));
-    ESP_ERROR_CHECK(rmt_tx_wait_all_done(channel_, 20));
+    const esp_err_t sent = rmt_transmit(channel_, encoder_, tx_pixels_, count_ * 3, &tx);
+    if (sent != ESP_OK) {
+      ESP_LOGW(TAG, "RMT transmit skipped: %s", esp_err_to_name(sent));
+      return;
+    }
+    in_flight_ = true;
   }
   void begin(uint8_t gpio, uint8_t count) {
     count_ = count > kMaxPixels ? kMaxPixels : count;
@@ -127,6 +145,8 @@ class RmtRing final : public voicering::RingOutput {
   uint8_t count_ = kMaxPixels;
   uint8_t offset_ = 0;
   uint8_t pixels_[kMaxPixels * 3]{};
+  uint8_t tx_pixels_[kMaxPixels * 3]{};
+  bool in_flight_ = false;
 };
 
 RmtRing ring;
@@ -153,6 +173,9 @@ extern "C" void ring_controller_set(ring_mode_t mode) {
     case RING_SPEAKING: animation->startSpeaking(0, now); break;
     case RING_MUTE: animation->startMute(0, now); break;
     case RING_ERROR: animation->startError(now); break;
+    /* OTA is deliberately a restrained static amber state. It must not look
+     * like live speech, and static output minimises shared-rail switching. */
+    case RING_OTA: animation->startTalk({255, 128, 0}, 0, now); break;
     default: animation->startIdle(now); break;
   }
 }

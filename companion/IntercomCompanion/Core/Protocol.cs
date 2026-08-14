@@ -14,6 +14,9 @@ internal enum PacketType : byte
     ConfigGet = 7,
     ConfigSet = 8,
     ConfigReply = 9,
+    OtaOffer = 10,
+    OtaStatus = 11,
+    OtaCancel = 12,
 }
 
 internal sealed record IntercomPacket(
@@ -34,27 +37,40 @@ internal static class Protocol
     public const int HeaderLength = 32;
     public const int AdpcmPayloadLength = 164;
     public const byte DirectedFlag = 0x01;
+    public const byte OtaCapability = 0x01;
 
     private static ReadOnlySpan<byte> Magic => "PTT1"u8;
     private static ReadOnlySpan<byte> HelloMagic => "IH1"u8;
+    private static ReadOnlySpan<byte> HelloMagic2 => "IH2"u8;
 
     /// <summary>Discovery is self-describing while retaining a compact payload.
-    /// IH1 | protocol revision | firmware-version byte count | firmware | alias.</summary>
+    /// IH2 | protocol revision | capabilities | firmware byte count | firmware | alias.</summary>
     public static byte[] BuildHelloPayload(string alias, string firmwareVersion)
     {
         var firmware = Encoding.UTF8.GetBytes(firmwareVersion[..Math.Min(31, firmwareVersion.Length)]);
         var aliasBytes = Encoding.UTF8.GetBytes(CompanionSettings.SanitizeAlias(alias));
-        var payload = new byte[5 + firmware.Length + aliasBytes.Length];
-        HelloMagic.CopyTo(payload);
+        var payload = new byte[6 + firmware.Length + aliasBytes.Length];
+        HelloMagic2.CopyTo(payload);
         payload[3] = Version;
-        payload[4] = checked((byte)firmware.Length);
-        firmware.CopyTo(payload, 5);
-        aliasBytes.CopyTo(payload, 5 + firmware.Length);
+        payload[4] = 0; // the desktop companion is an OTA host, not an OTA target
+        payload[5] = checked((byte)firmware.Length);
+        firmware.CopyTo(payload, 6);
+        aliasBytes.CopyTo(payload, 6 + firmware.Length);
         return payload;
     }
 
     public static HelloAnnouncement ParseHello(ReadOnlySpan<byte> payload)
     {
+        if (payload.Length >= 6 && payload[..3].SequenceEqual(HelloMagic2))
+        {
+            var firmwareLength = payload[5];
+            if (payload.Length >= 6 + firmwareLength)
+            {
+                var firmware = Encoding.UTF8.GetString(payload.Slice(6, firmwareLength));
+                var alias = Encoding.UTF8.GetString(payload[(6 + firmwareLength)..]);
+                return new HelloAnnouncement(CompanionSettings.SanitizeAlias(alias), payload[3], firmware, payload[4]);
+            }
+        }
         if (payload.Length >= 5 && payload[..3].SequenceEqual(HelloMagic))
         {
             var firmwareLength = payload[4];
@@ -62,11 +78,11 @@ internal static class Protocol
             {
                 var firmware = Encoding.UTF8.GetString(payload.Slice(5, firmwareLength));
                 var alias = Encoding.UTF8.GetString(payload[(5 + firmwareLength)..]);
-                return new HelloAnnouncement(CompanionSettings.SanitizeAlias(alias), payload[3], firmware);
+                return new HelloAnnouncement(CompanionSettings.SanitizeAlias(alias), payload[3], firmware, 0);
             }
         }
         // A pre-0.6.2 node advertised only its UTF-8 alias.
-        return new HelloAnnouncement(CompanionSettings.SanitizeAlias(Encoding.UTF8.GetString(payload)), null, "legacy");
+        return new HelloAnnouncement(CompanionSettings.SanitizeAlias(Encoding.UTF8.GetString(payload)), null, "legacy", 0);
     }
 
     public static byte[] Pack(uint senderId, PacketType type, uint sessionId,
@@ -113,4 +129,4 @@ internal static class Protocol
     }
 }
 
-internal sealed record HelloAnnouncement(string Alias, byte? ProtocolVersion, string FirmwareVersion);
+internal sealed record HelloAnnouncement(string Alias, byte? ProtocolVersion, string FirmwareVersion, byte Capabilities);

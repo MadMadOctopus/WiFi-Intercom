@@ -63,17 +63,41 @@ The native USB serial/JTAG device accepts one JSON request per line and replies 
 
 `ring_orientation` is `0` (normal) or `180`, which shifts the logical animation centre by 12 LEDs. Device configuration is also exposed through unencrypted in-group UDP control messages as requested; use it only on a trusted local network.
 
+### Firmware OTA
+
+The initial OTA-capable build must be flashed over USB once. It installs a 4 MB
+dual-slot layout (`ota_0`, `ota_1`, and `otadata`) and preserves NVS device
+configuration. Future application firmware updates are wireless; bootloader,
+partition table, and NVS are never updated over the air.
+
+Build a signed package with the ignored release private key, then choose its
+`.ota.json` manifest in the companion. The companion starts a temporary,
+tokenised HTTP endpoint bound to the active LAN adapter; the device is only an
+HTTP client. It accepts a download only when the URL host matches the UDP offer
+sender, the image SHA-256 matches, and the signed manifest verifies against the
+built-in public key. It writes the inactive slot, reboots, and commits only
+after a healthy startup; otherwise ESP-IDF rolls back automatically.
+
+```powershell
+.\tools\ota\Create-OtaPackage.ps1 `
+  -Image .\firmware\build\wifi_intercom.bin `
+  -Version 0.7.1 `
+  -PrivateKey .\.ota-keys\dev-release-key.pem
+```
+
+Keep the companion open during the update and allow its one-time Windows
+Firewall prompt on the **private** LAN when asked. The device’s discovery row
+shows `p1 / OTA` only after it has this bootstrap firmware.
+
 ## Companion app
 
-`pc_app/app.py` is a Python/Tkinter desktop companion. It retains WAV recording for each received message and adds multicast discovery, aliases, broadcast/reply/selected-device PTT, and remote configuration for any discovered device.
+The production companion is a .NET 10 Windows Forms application. It provides
+discovery, aliases, broadcast/reply/selected-device PTT, selected audio devices,
+USB Wi-Fi provisioning, remote configuration, and signed sequential OTA for
+one selected or all OTA-capable active devices.
 
-```bash
-cd pc_app
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-python app.py
+```powershell
+dotnet run --project .\companion\IntercomCompanion\IntercomCompanion.csproj
 ```
 
 The active-device list is populated automatically. Select a device to query its configuration, hold the purple control to direct-message it, or update its alias, volume, LED brightness, button swap and ring orientation. Space is a broadcast PTT shortcut. Broadcast messages fan out only while a peer holds the floor; idle traffic is discovery-only.

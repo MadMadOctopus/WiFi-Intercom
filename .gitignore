@@ -18,6 +18,7 @@ pc_app/__pycache__/
 bin/
 obj/
 tools/MicTransportCapture/capture/
+.ota-keys/
 *.user
 *.suo
 .DS_Store

@@ -4,6 +4,7 @@ idf_component_register(
         "adpcm.c"
         "device_config.c"
         "protocol.c"
+        "ota_manager.c"
         "ring_controller.cpp"
         "usb_control.c"
     INCLUDE_DIRS "."
@@ -20,6 +21,9 @@ idf_component_register(
         esp_app_format
         nvs_flash
         lwip
+        app_update
+        esp_http_client
+        mbedtls
 )
 
 # Enabled only for the hardware diagnostic image built with

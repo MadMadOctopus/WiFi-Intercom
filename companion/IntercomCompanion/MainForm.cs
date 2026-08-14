@@ -1,5 +1,6 @@
 using IntercomCompanion.Core;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using IntercomCompanion.Audio;
 
 namespace IntercomCompanion;
@@ -24,6 +25,11 @@ internal sealed class MainForm : Form
     private readonly Button getUsbConfig = new() { Text = "Read USB config", AutoSize = true };
     private readonly Button applyUsbWifi = new() { Text = "Apply Wi-Fi over USB", AutoSize = true };
     private readonly Label usbStatus = new() { AutoSize = true, ForeColor = Color.DimGray };
+    private readonly TextBox otaManifest = new() { Width = 260, ReadOnly = true };
+    private readonly Button browseOtaManifest = new() { Text = "Choose signed OTA package", AutoSize = true };
+    private readonly Button updateSelectedDevice = new() { Text = "Update selected device", Enabled = false, AutoSize = true };
+    private readonly Button updateAllDevices = new() { Text = "Update all active devices", Enabled = false, AutoSize = true };
+    private readonly Label otaStatus = new() { AutoSize = true, ForeColor = Color.DimGray, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
     private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Label statusLabel = new()
     {
@@ -51,8 +57,10 @@ internal sealed class MainForm : Form
     private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
     private bool spaceHeld;
+    private bool otaUpdating;
     private uint? selectedDeviceId;
     private bool refreshingDeviceList;
+    private readonly CancellationTokenSource otaStopping = new();
 
     public MainForm()
     {
@@ -147,7 +155,14 @@ internal sealed class MainForm : Form
         refreshUsbPorts.Click += (_, _) => RefreshUsbPorts();
         getUsbConfig.Click += async (_, _) => await ReadUsbConfigurationAsync();
         applyUsbWifi.Click += async (_, _) => await ApplyUsbWifiAsync();
-        top.Controls.AddRange([title, identityLabel, aliasRow, audioRow, usbRow, usbStatus, networkLabel, statusLabel, pttPanel]);
+        var otaRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        otaRow.Controls.AddRange([
+            new Label { Text = "Firmware OTA", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, otaManifest,
+            browseOtaManifest, updateSelectedDevice, updateAllDevices]);
+        browseOtaManifest.Click += (_, _) => ChooseOtaManifest();
+        updateSelectedDevice.Click += async (_, _) => await StartOtaUpdateAsync(updateAll: false);
+        updateAllDevices.Click += async (_, _) => await StartOtaUpdateAsync(updateAll: true);
+        top.Controls.AddRange([title, identityLabel, aliasRow, audioRow, usbRow, usbStatus, otaRow, otaStatus, networkLabel, statusLabel, pttPanel]);
         Controls.Add(body);
         Controls.Add(top);
 
@@ -167,6 +182,7 @@ internal sealed class MainForm : Form
             node = new IntercomNode(settings);
             node.PeersChanged += (_, _) => PostToUi(RefreshPeers);
             node.Diagnostic += message => PostToUi(() => networkLabel.Text = $"Discovery: {message}");
+            node.OtaStatusReceived += (_, eventArgs) => PostToUi(() => ShowOtaStatus(eventArgs));
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
             PopulateAudioDevices();
@@ -204,7 +220,9 @@ internal sealed class MainForm : Form
             {
                 var age = DateTimeOffset.UtcNow - peer.LastSeen;
                 var protocol = peer.ProtocolVersion is null ? "legacy" : $"p{peer.ProtocolVersion}";
-                var compatibility = peer.IsProtocolCompatible ? protocol : $"{protocol} incompatible";
+                var compatibility = peer.IsProtocolCompatible
+                    ? peer.SupportsOta ? $"{protocol} / OTA" : protocol
+                    : $"{protocol} incompatible";
                 var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(),
                     $"{peer.FirmwareVersion} / {compatibility}", $"{Math.Max(0, age.TotalSeconds):0}s"])
                 {
@@ -294,6 +312,127 @@ internal sealed class MainForm : Form
         selected.Enabled = receiveSession is not null && hasSelectedPeer;
         getConfig.Enabled = hasSelectedPeer;
         applyConfig.Enabled = hasSelectedPeer;
+        updateSelectedDevice.Enabled = hasSelectedPeer && SelectedPeer!.SupportsOta && !otaUpdating && !string.IsNullOrWhiteSpace(otaManifest.Text);
+        updateAllDevices.Enabled = !otaUpdating && !string.IsNullOrWhiteSpace(otaManifest.Text) && node?.SnapshotActivePeers().Any(peer => peer.SupportsOta) == true;
+    }
+
+    private void ChooseOtaManifest()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Choose signed Wi-Fi Intercom OTA manifest",
+            Filter = "OTA manifests (*.ota.json;*.json)|*.ota.json;*.json|All files (*.*)|*.*",
+            CheckFileExists = true,
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var package = OtaPackage.Load(dialog.FileName);
+            otaManifest.Text = package.ManifestPath;
+            otaStatus.Text = $"Verified {package.Version}: {Path.GetFileName(package.ImagePath)} ({package.Size / 1024.0:0.0} KiB).";
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
+        {
+            otaManifest.Clear();
+            otaStatus.Text = $"OTA package rejected: {exception.Message}";
+        }
+        UpdateSelectedDeviceActions();
+    }
+
+    private void ShowOtaStatus(OtaStatusReceivedEventArgs eventArgs)
+    {
+        var status = eventArgs.Status;
+        otaStatus.Text = $"OTA {eventArgs.NodeId:x8}: {status.State} {status.Progress}% — {status.Message}";
+        var failed = status.State is "failed" or "rejected";
+        otaStatus.ForeColor = failed ? Color.Firebrick : status.State == "rebooting" ? Color.FromArgb(46, 125, 50) : Color.DarkGoldenrod;
+        if (failed)
+            MessageBox.Show(this, $"Firmware update for {eventArgs.NodeId:x8} was not started or did not complete.\n\n{status.Message}",
+                "Firmware update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private async Task StartOtaUpdateAsync(bool updateAll)
+    {
+        if (node is null || string.IsNullOrWhiteSpace(otaManifest.Text)) return;
+        if (receiveSession?.State != IntercomState.Idle)
+        {
+            otaStatus.Text = "Release the local PTT floor before starting an update.";
+            return;
+        }
+        OtaPackage package;
+        try { package = OtaPackage.Load(otaManifest.Text); }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
+        {
+            otaStatus.Text = $"OTA package rejected: {exception.Message}";
+            return;
+        }
+        var targets = updateAll ? node.SnapshotActivePeers().Where(peer => peer.SupportsOta).ToArray() : new[] { SelectedPeer }.OfType<Peer>().ToArray();
+        if (targets.Length == 0)
+        {
+            otaStatus.Text = "Choose an active device first.";
+            return;
+        }
+        var confirmation = MessageBox.Show(this,
+            $"Update {targets.Length} device(s) sequentially to {package.Version}?\n\n" +
+            $"{string.Join(", ", targets.Select(peer => peer.Alias))}\n\n" +
+            "The companion must stay open and awake. Windows may ask once to allow the temporary local firmware server on this private network.",
+            "Confirm firmware update", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+        if (confirmation != DialogResult.OK) return;
+
+        otaUpdating = true;
+        broadcast.Enabled = reply.Enabled = selected.Enabled = false;
+        UpdateSelectedDeviceActions();
+        try
+        {
+            await using var server = new OtaArtifactServer(node.DiscoveryInterface, package);
+            foreach (var peer in targets)
+            {
+                otaStatus.Text = $"Offering {package.Version} to {peer.Alias} ({peer.Endpoint.Address})…";
+                var update = node.RequestOtaUpdateAsync(peer, package, server, otaStopping.Token);
+                var request = server.WaitForFirstRequestAsync(otaStopping.Token)
+                    .WaitAsync(TimeSpan.FromSeconds(15), otaStopping.Token);
+                try
+                {
+                    if (await Task.WhenAny(update, request) == update)
+                        await update; // Preserve a device-reported rejection/failure.
+                    var requester = await request;
+                    otaStatus.Text = $"{peer.Alias} connected from {requester}; writing firmware…";
+                }
+                catch (TimeoutException)
+                {
+                    throw new TimeoutException($"{peer.Alias} accepted the update but could not reach the companion's temporary firmware server. Check the Private-network firewall prompt and retry.");
+                }
+                await update;
+                otaStatus.Text = $"{peer.Alias} is rebooting; waiting for its {package.Version} discovery announcement…";
+                if (!await WaitForUpdatedPeerAsync(peer.NodeId, package.Version, otaStopping.Token))
+                    throw new TimeoutException($"{peer.Alias} did not report {package.Version} after reboot.");
+                otaStatus.Text = $"{peer.Alias} confirmed {package.Version}.";
+            }
+            otaStatus.Text = $"OTA completed: {targets.Length} device(s) confirmed on {package.Version}.";
+        }
+        catch (OperationCanceledException) { otaStatus.Text = "OTA stopped while the companion was closing."; }
+        catch (Exception exception) when (exception is SocketException or TimeoutException or IOException or InvalidOperationException or InvalidDataException)
+        {
+            otaStatus.Text = $"OTA stopped: {exception.Message}";
+        }
+        finally
+        {
+            otaUpdating = false;
+            broadcast.Enabled = reply.Enabled = true;
+            UpdateSelectedDeviceActions();
+        }
+    }
+
+    private async Task<bool> WaitForUpdatedPeerAsync(uint nodeId, string version, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(90);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (node?.Peers.FirstOrDefault(peer => peer.NodeId == nodeId) is { } peer &&
+                peer.FirmwareVersion == version && peer.ProtocolVersion == Protocol.Version)
+                return true;
+            await Task.Delay(500, cancellationToken);
+        }
+        return false;
     }
 
     private void PostToUi(Action action)
@@ -482,6 +621,7 @@ internal sealed class MainForm : Form
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
         refreshTimer.Stop();
+        otaStopping.Cancel();
         // Never wait for a timer/socket/audio worker from the UI close path.
         // Cancellation is enough; process shutdown cleans up background tasks.
         receiveSession?.Stop();

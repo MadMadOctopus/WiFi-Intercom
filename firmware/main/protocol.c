@@ -29,8 +29,9 @@ static inline uint32_t get_u32(const uint8_t *p)
            ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
-size_t protocol_pack(uint8_t *buf, uint8_t type, uint32_t mesh_id,
-                     uint32_t sender_id, uint32_t session_id, uint32_t sequence,
+size_t protocol_pack(uint8_t *buf, uint8_t type, uint8_t flags,
+                     uint32_t mesh_id, uint32_t sender_id,
+                     uint32_t session_id, uint32_t sequence,
                      uint32_t timestamp_ms, const uint8_t *payload,
                      uint16_t payload_len)
 {
@@ -39,7 +40,7 @@ size_t protocol_pack(uint8_t *buf, uint8_t type, uint32_t mesh_id,
     buf[2] = PROTO_MAGIC2;
     buf[3] = PROTO_MAGIC3;
     buf[4] = type;
-    buf[5] = 0;                       /* flags */
+    buf[5] = flags;
     put_u16(&buf[6], PROTO_HEADER_LEN);
     put_u32(&buf[8], mesh_id);
     put_u32(&buf[12], sender_id);

@@ -13,6 +13,17 @@ CONFIG_FREERTOS_HZ=1000
 # --- Main task stack a little larger; we spawn our own tasks anyway ---
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 
+# --- OTA bootstrapping -----------------------------------------------------
+# Two independently bootable 1.5 MiB application slots on the production
+# 4 MiB XIAO. The first OTA-capable image must be flashed over USB; all later
+# application updates are written to the inactive slot.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_ota.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # --- Log level: info over USB serial ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 

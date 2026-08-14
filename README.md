@@ -1,287 +1,107 @@
-# Wi-Fi Half-Duplex Push-to-Talk Intercom
+# Wi‑Fi Intercom
 
-A compact proof-of-concept intercom with two **equivalent peer nodes** on the
-same Wi-Fi network:
+Production firmware and desktop companion for USB-powered Seeed XIAO ESP32-C3 voice intercoms. Devices use UDP multicast discovery on one Wi‑Fi LAN; there is no server and no configured peer-IP list.
 
-1. **`firmware/`** — a Seeed Studio **XIAO ESP32-C3** node (ESP-IDF, C).
-2. **`pc_app/`** — a companion **PC application** (Python + Tkinter).
+## Production hardware
 
-Hold PTT to talk; release to stop. Audio is half-duplex (only one peer holds
-the floor at a time). The PC also saves every received message as a timestamped
-`.wav`.
+| Function | XIAO pin |
+| --- | --- |
+| MAX9814 microphone OUT | D1 / GPIO3 / ADC1_CH3 |
+| MAX98357A DIN | D3 / GPIO5 |
+| MAX98357A BCLK | D4 / GPIO6 |
+| MAX98357A LRC | D5 / GPIO7 |
+| Button 1 | D10 / GPIO10, active low |
+| Button 2 | D9 / GPIO9, active low |
+| Mute slider | D8 / GPIO8, active low |
+| WS2812B ring DI | D7 / GPIO20 |
 
-Both nodes implement the **same UDP protocol and IMA ADPCM codec independently**
-(in C and in Python) — they are byte-for-byte compatible, verified by a
-cross-language parity test.
+The default logical mapping is D10 = broadcast and D9 = reply. Set `buttons_swapped: true` for assemblies with the two physical buttons soldered in the opposite order.
 
-- Internals: **16 kHz, mono, 16-bit PCM**, **20 ms frames = 320 samples**.
-- Transport: **UDP**, one port, packet-independent **IMA ADPCM** frames.
-- No server, MQTT, TCP, discovery, encryption, or mesh routing.
+## Behaviour
 
----
+- Hold the broadcast button to send to every companion and device in the configured mesh group. Its ring animation is green.
+- Hold reply to send to the most recent device/app that sent this device audio. Its animation is blue.
+- Direct messages play only at the addressed destination; broadcasts play at every group member.
+- A competing PTT press buffers up to 500 ms. If the floor is not released by then, the device leaves the active message playing and shows two quick red pulses.
+- The mute slider silences received playback. It does not stop discovery or transmission.
+- Received audio shows the speaking animation. A 24-pixel ring defaults to restrained brightness 48 to reduce shared-rail noise.
 
-## Hardware wiring (XIAO ESP32-C3)
+## Wire protocol
 
-### Adafruit MAX98357A I²S amplifier
+All peers independently implement the same explicit big-endian, fixed 32-byte `PTT1` UDP header and packet-independent IMA ADPCM codec:
 
-| MAX98357A pin | XIAO ESP32-C3 pin |
-|---|---|
-| `VIN`  | `5V` |
-| `GND`  | `GND` |
-| `BCLK` | `D4` / GPIO6 |
-| `LRC`  | `D5` / GPIO7 |
-| `DIN`  | `D3` / GPIO5 |
-| `SD`   | **`3V3`** (see note) |
-| `GAIN` | *leave unconnected* |
+- 16 kHz, mono, 16-bit PCM
+- 20 ms / 320-sample frames
+- 164-byte ADPCM payloads
+- CLAIM ×3, 100 ms pre-audio delay, deterministic `(session_id, sender_id)` tie-break, 750 ms expiry, END drain
+- 4-frame / 80 ms jitter prebuffer with small reorder window and attenuated replay PLC
 
-> **`SD` must be tied to `3V3`.** On the MAX98357A the `SD`/`SD_MODE` pin is
-> multi-function: left floating or low, the amp stays in **shutdown** (no LED,
-> no sound). Tying it to `3V3` both enables the amp and selects the **Left**
-> channel — which is correct here, because the firmware writes the same mono
-> sample to the left and right slots. (Some breakouts have an onboard pull that
-> enables `(L+R)/2` when floating, but many do not — tying to `3V3` is the
-> reliable choice.)
+`HELLO` discovery beacons go to `239.255.42.99:45678`, with a TTL of 1. Each beacon carries the alias, firmware version, and an explicit intercom-protocol revision (`IH1` discovery payload); the companion shows these values and flags incompatible revisions. A subnet broadcast copy is used only as a fallback for access points that suppress Wi-Fi multicast. Beacons repeat every three seconds and expire after ten seconds. All floor control and audio packets are then sent by UDP unicast to the learned active-peer snapshot; this avoids Wi-Fi multicast loss while retaining zero static IP configuration. Directed audio is unicast to its one target.
 
-Connect the **4 W, 8 Ω speaker directly across the amp's speaker output
-terminals**. Do **not** connect either speaker wire to ground (the MAX98357A
-output is a bridge-tied / differential load). The amp runs from **5 V**; its
-I²S logic inputs are 3.3 V-compatible.
+## Firmware
 
-### Analogue microphone module (VCC / GND / OUT)
+The firmware is ESP-IDF 5.4 compatible. The local production build used Windows ESP-IDF at `C:\Espressif\frameworks\esp-idf-v5.4.4` and COM9.
 
-| Microphone pin | XIAO ESP32-C3 pin |
-|---|---|
-| `VCC` | `3V3` |
-| `GND` | `GND` |
-| `OUT` | `A1` / `D1` / GPIO3 / ADC1_CH3 |
-
-The module runs at **3.3 V**. Its output is biased positive and must never
-exceed the ESP32 ADC range (~0–3.3 V with 12 dB attenuation). If audio clips,
-reduce `MIC_GAIN` in `config.h` or the module's onboard gain pot.
-
-### PTT button
-
-| Button leg | XIAO ESP32-C3 pin |
-|---|---|
-| One leg   | `D7` / GPIO20 |
-| Other leg | `GND` |
-
-GPIO20 is configured `INPUT_PULLUP`; **pressed = LOW**.
-
----
-
-## Firmware: build & flash (ESP-IDF)
-
-Requires **ESP-IDF v5.1+** ([install guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/get-started/)).
-
-```bash
+```bat
 cd firmware
-idf.py set-target esp32c3
+call C:\Espressif\frameworks\esp-idf-v5.4.4\export.bat
+set "CMAKE_BUILD_PARALLEL_LEVEL=1"
 idf.py build
-idf.py -p <PORT> flash monitor      # e.g. -p COM7 (Windows) or -p /dev/ttyACM0
+idf.py -p COM9 flash
 ```
 
-`monitor` shows USB-serial status logs (Wi-Fi connect, got-IP, floor changes).
-Exit the monitor with `Ctrl-]`.
+### USB configuration
 
-On boot the firmware plays a short **1 kHz tone** through the speaker so you can
-verify the amp/speaker before any network traffic.
+The native USB serial/JTAG device accepts one JSON request per line and replies with a JSON configuration object. Wi‑Fi credentials are accepted when writing but deliberately never returned. A Wi‑Fi, ring brightness, or ring orientation change reboots after its acknowledgement.
 
-### Configuring Wi-Fi, mesh ID, node IDs, UDP port, peer IP
-
-All static configuration lives in **`firmware/main/config.h`** — edit and
-re-flash:
-
-| Setting | Macro in `config.h` | Must match PC (`pc_app/app.py`) |
-|---|---|---|
-| Wi-Fi SSID / password | `WIFI_SSID`, `WIFI_PASSWORD` | your network |
-| Mesh ID  | `MESH_ID` (default `0x4D455348`) | **yes** — `MESH_ID` |
-| This node's ID | `NODE_ID` (default `0x00000001`) | must differ from PC's `NODE_ID` |
-| Peer (PC) IPv4 | `PEER_IP` | set to the PC's IP |
-| UDP port | `UDP_PORT` (default `45678`) | **yes** — `UDP_PORT` |
-| Mic gain (capture) | `MIC_GAIN` | — |
-| Speaker volume (playback) | `SPK_VOLUME` | `256`=unity, `512`=2×, `1024`=4× |
-
-> The two peers use **unicast** to each other's IP. Set the ESP's `PEER_IP` to
-> the PC's IP, and the PC's `PEER_IP` (in `app.py`) to the ESP's IP. Find each
-> device's IP from your router or the ESP's serial log (`Got IP: ...`).
-
-### Adjusting ESP speaker volume
-
-There are three independent gain stages, loudest-per-effort first:
-
-1. **`SPK_VOLUME` in `config.h` (software, easiest).** Digital gain on received
-   audio, `256` = unity. Default `512` (2×). Raise toward `1024` for more; if
-   loud speech starts to distort you've hit the digital ceiling — back off and
-   use stage 2 or 3 instead. Re-flash to apply.
-2. **MAX98357A `GAIN` pin (analog, cleanest).** Sets the amp's fixed gain.
-   Floating = 9 dB (default). For more: `GAIN`→`GND` directly = **12 dB**, or
-   `GAIN`→`GND` via a 100 kΩ resistor = **15 dB**. (`GAIN`→`VIN` = 6 dB,
-   `GAIN`→`VIN` via 100 kΩ = 3 dB for *less*.)
-3. **`MIC_GAIN` on the *sending* node.** Received loudness is ultimately limited
-   by how hot the far end captured the audio — a quiet talker plays back quiet no
-   matter what. Raise `MIC_GAIN` on the peer that's transmitting.
-
-Prefer the amp `GAIN` pin for headroom; use `SPK_VOLUME` for quick, no-solder
-tuning.
-
----
-
-## PC application: setup & run
-
-Requires **Python 3.9+**. Uses `sounddevice` + `numpy`; everything else is
-standard library (`socket`, `wave`, `threading`, `queue`, `tkinter`, `struct`).
-
-```bash
-cd pc_app
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
-
-pip install -r requirements.txt
-python app.py
+```json
+{"cmd":"get"}
+{"cmd":"set","alias":"Reception","ssid":"ExampleWiFi","password":"…"}
+{"cmd":"set","buttons_swapped":true,"ring_orientation":180}
+{"cmd":"set","led_brightness":48,"speaker_volume":512}
 ```
 
-> On Linux you may also need the system Tk package (`sudo apt install python3-tk`)
-> and PortAudio (`sudo apt install libportaudio2`).
+`ring_orientation` is `0` (normal) or `180`, which shifts the logical animation centre by 12 LEDs. Device configuration is also exposed through unencrypted in-group UDP control messages as requested; use it only on a trusted local network.
 
-### Configuring the PC node
+### Firmware OTA
 
-Edit the constants at the top of **`pc_app/app.py`**:
+The initial OTA-capable build must be flashed over USB once. It installs a 4 MB
+dual-slot layout (`ota_0`, `ota_1`, and `otadata`) and preserves NVS device
+configuration. Future application firmware updates are wireless; bootloader,
+partition table, and NVS are never updated over the air.
 
-| Setting | Constant | Notes |
-|---|---|---|
-| Mesh ID | `MESH_ID` | must match firmware |
-| This node's ID | `NODE_ID` (default `0x00000002`) | must differ from ESP's |
-| Peer (ESP) IPv4 | `PEER_IP` | set to the ESP's IP |
-| UDP port | `UDP_PORT` | must match firmware |
+Build a signed package with the ignored release private key, then choose its
+`.ota.json` manifest in the companion. The companion starts a temporary,
+tokenised HTTP endpoint bound to the active LAN adapter; the device is only an
+HTTP client. It accepts a download only when the URL host matches the UDP offer
+sender, the image SHA-256 matches, and the signed manifest verifies against the
+built-in public key. It writes the inactive slot, reboots, and commits only
+after a healthy startup; otherwise ESP-IDF rolls back automatically.
 
-The Tkinter window shows the local node ID, the peer address, the selected
-input/output device names, a live status (**Idle / Claiming / Talking /
-Receiving**), and a prominent **HOLD TO TALK** button. You can also **hold the
-Space bar** while the window is focused.
-
-Received messages are written to
-**`pc_app/recordings/YYYYMMDD-HHMMSS-<sender>-<session>.wav`** (mono, 16-bit,
-16 kHz). The directory is created automatically.
-
----
-
-## Basic test sequence
-
-1. **Verify the ESP speaker.** Power/flash the ESP. On boot you should hear the
-   short 1 kHz startup tone from the speaker. (No network needed.)
-2. **Start the PC app.** `python app.py`. The window shows *Idle* and the peer
-   address. Confirm the ESP's serial log shows `Got IP:` and the PC's `PEER_IP`
-   points at that address (and vice-versa).
-3. **PC → ESP.** Hold the PC's **HOLD TO TALK** (or Space) and speak. Status
-   goes *Claiming → Talking*. Audio should come out of the ESP speaker with low
-   latency; release to stop.
-4. **ESP → PC.** Hold the **physical button** on the ESP and speak into the mic
-   module. The PC status shows *Receiving* and you hear audio from the PC's
-   speakers/headphones.
-5. **Confirm WAV files.** After each received ESP message, a new
-   `pc_app/recordings/*.wav` appears. Open it — it should contain the received
-   audio.
-
----
-
-## Protocol summary
-
-One UDP port for all packets. Fixed **32-byte header**, network byte order,
-packed explicitly (never a raw C struct on the wire):
-
-```
-magic[4]     = "PTT1"
-type         uint8    (1=CLAIM 2=BUSY 3=AUDIO 4=END)
-flags        uint8
-header_len   uint16   (= 32)
-mesh_id      uint32
-sender_id    uint32
-session_id   uint32
-sequence     uint32
-timestamp_ms uint32   (monotonic local, no clock sync required)
-payload_len  uint16
-reserved     uint16   (= 0)
+```powershell
+.\tools\ota\Create-OtaPackage.ps1 `
+  -Image .\firmware\build\wifi_intercom.bin `
+  -Version 0.7.1 `
+  -PrivateKey .\.ota-keys\dev-release-key.pem
 ```
 
-Audio payload = one **164-byte packet-independent IMA ADPCM frame**:
-`int16 predictor · uint8 step_index · uint8 reserved · 160 bytes (320 nibbles)`.
-Each frame carries the predictor/step-index it started from, so a single lost
-packet never corrupts later frames.
+Keep the companion open during the update and allow its one-time Windows
+Firewall prompt on the **private** LAN when asked. The device’s discovery row
+shows `p1 / OTA` only after it has this bootstrap firmware.
 
-**Half-duplex floor control:** on PTT a node picks a random 32-bit `session_id`,
-enters *Claiming*, sends `CLAIM` ×3 at ~30 ms, waits ~100 ms, then streams
-`AUDIO` (sequence from 0, acting as a heartbeat). Simultaneous claims are
-resolved deterministically by the lowest `(session_id, sender_id)` tuple; the
-loser becomes a receiver. If no packet from the active remote session arrives
-for 750 ms the floor is released. On release a node sends `END` ×3; on receiving
-`END` the receiver drains its jitter buffer, finalises the WAV, and returns to
-*Idle*.
+## Companion app
 
-**Jitter buffer:** four frames (80 ms). Prebuffer 4 frames before playout,
-accept a small reorder window, ignore duplicates/late frames, and conceal a
-missing frame by replaying the previous one attenuated (or silence).
+The production companion is a .NET 10 Windows Forms application. It provides
+discovery, aliases, broadcast/reply/selected-device PTT, selected audio devices,
+USB Wi-Fi provisioning, remote configuration, and signed sequential OTA for
+one selected or all OTA-capable active devices.
 
----
-
-## Troubleshooting
-
-**No audio from the ESP speaker (no boot tone)**
-- The firmware logs `Playing startup tone ...` then `Startup tone done` over
-  serial. **If you see those logs but hear nothing, the fault is in hardware,
-  not firmware** — check the items below.
-- **`SD` must be tied to `3V3`.** Floating/low `SD` = amp in shutdown (this is
-  the most common cause of "no LED, no sound"). See the wiring note above.
-- Check `VIN`→`5V`, `GND`→`GND`, and a **common ground** between the XIAO, amp,
-  and mic. If the amp module has a power LED and it's dark, power isn't reaching
-  it.
-- I²S pins not swapped: `BCLK`→GPIO6 (D4), `LRC`→GPIO7 (D5), `DIN`→GPIO5 (D3).
-- Speaker must be across the two amp output terminals — **not** to ground.
-
-**Wrong I²S pins / distorted or no output**
-- Double-check BCLK/LRC/DIN are not swapped. `LRC` (word-select) on GPIO7 and
-  `BCLK` on GPIO6 are easy to transpose.
-
-**Microphone: only noise, or too quiet / clipping**
-- The firmware logs a once-per-second `MIC diag:` line over serial. Watch it
-  while quiet, then while speaking:
-  - `raw[... mean=M span=S]` — `mean` should sit near mid-scale (~2048 with 12 dB
-    attenuation) and be **stable when quiet**. `span`/`ac_peak` should be small
-    when quiet and **clearly rise when you speak** — that means the mic is
-    delivering real audio and you may just need more `MIC_GAIN`.
-  - If `ac_peak` is large and jumpy even in silence, you're seeing ADC/noise
-    floor or a mis-biased module (see below).
-  - If `mean` is pinned near 0 or 4095, `OUT` is out of range — check biasing
-    and that `VCC` is on `3V3` (not `5V`).
-  - A `MIC diag: no ADC results ...` warning means the ADC isn't returning the
-    expected channel — a wiring/channel problem.
-- **Signal too weak:** raise `MIC_GAIN` in `config.h` (try 12, 24, 48) until
-  speech `ac_peak` reaches a few hundred to ~1000. If more gain only makes the
-  hiss louder, the useful signal is buried in the ADC noise floor.
-- **Wrong module type:** a bare electret-preamp module (MAX4466 / MAX9814) puts
-  real biased audio on `OUT` and works here. A "sound sensor" board (KY-038 and
-  clones) outputs a threshold/envelope on `OUT`, not audio — sampled as audio it
-  sounds like noise. Confirm your module is an audio preamp, not a sound sensor.
-- Lower `MIC_GAIN` if speech clips (`ac_peak` railing at 2048+).
-
-**No audio between PC and ESP (packets not arriving)**
-- **Windows Firewall:** the first run of `app.py` may prompt — allow Python on
-  private networks. Otherwise add an inbound UDP rule for the port (default
-  `45678`). Quick test:
-  `New-NetFirewallRule -DisplayName "Intercom UDP" -Direction Inbound -Protocol UDP -LocalPort 45678 -Action Allow`
-- Verify each side's `PEER_IP` points at the other device's current IP.
-- Both devices must be on the **same subnet**; some routers block client-to-
-  client traffic ("AP isolation") — disable it.
-
-**ESP won't connect to Wi-Fi**
-- The **ESP32-C3 is 2.4 GHz only.** A 5 GHz SSID will never connect. Use the
-  2.4 GHz band (or split SSIDs). Check `WIFI_SSID`/`WIFI_PASSWORD` in
-  `config.h`; the serial monitor logs connect/reconnect attempts.
-
-**PC app: "No audio" / sounddevice errors**
-- Install PortAudio (Linux) and confirm a working default input/output device.
-- Close other apps holding the microphone exclusively.
+```powershell
+dotnet run --project .\companion\IntercomCompanion\IntercomCompanion.csproj
 ```
+
+The active-device list is populated automatically. Select a device to query its configuration, hold the purple control to direct-message it, or update its alias, volume, LED brightness, button swap and ring orientation. Space is a broadcast PTT shortcut. Broadcast messages fan out only while a peer holds the floor; idle traffic is discovery-only.
+
+## Hardware note: shared amp/ring rail
+
+The current prototype powers the MAX98357A and WS2812B ring from the same rail. The lower firmware brightness reduces the audible coupling, but a future board should use a bulk capacitor at the ring, a separate/star 5 V and ground return for the amplifier, and a short data path with a series resistor. This is a power-integrity concern, not an ADPCM/I²S defect.

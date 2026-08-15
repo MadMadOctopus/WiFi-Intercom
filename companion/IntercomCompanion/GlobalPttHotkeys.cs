@@ -35,8 +35,10 @@ internal sealed class GlobalPttHotkeys : IDisposable
         if (code < 0) return CallNextHookEx(handle, code, wParam, lParam);
         var key = Marshal.ReadInt32(lParam);
         var message = (int)wParam;
-        var modifiers = Control.ModifierKeys;
-        var ctrlAlt = modifiers.HasFlag(Keys.Control) && modifiers.HasFlag(Keys.Alt);
+        // Control.ModifierKeys is tied to a message loop and can be stale in a
+        // low-level hook. Query the physical state so Ctrl+Alt+R works even
+        // while another application owns focus.
+        var ctrlAlt = IsDown(Keys.ControlKey) && IsDown(Keys.Menu);
         if (message is WmKeyDown or WmSysKeyDown)
         {
             if (ctrlAlt && key == (int)Keys.B && !broadcastHeld) { broadcastHeld = true; BroadcastPressed?.Invoke(); }
@@ -62,5 +64,8 @@ internal sealed class GlobalPttHotkeys : IDisposable
     [DllImport("user32.dll", SetLastError = true)] private static extern nint SetWindowsHookEx(int idHook, HookProc callback, nint module, uint threadId);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UnhookWindowsHookEx(nint hook);
     [DllImport("user32.dll")] private static extern nint CallNextHookEx(nint hook, int code, nint wParam, nint lParam);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int virtualKey);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern nint GetModuleHandle(string? moduleName);
+
+    private static bool IsDown(Keys key) => (GetAsyncKeyState((int)key) & unchecked((short)0x8000)) != 0;
 }

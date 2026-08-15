@@ -21,7 +21,7 @@ internal sealed class DeviceCard : Panel
 
     public DeviceCard()
     {
-        Size = new Size(296, 151);
+        Size = new Size(304, 151);
         Margin = new Padding(0, 0, 9, 10);
         BackColor = Color.White;
         Padding = new Padding(14, 10, 14, 9);
@@ -93,16 +93,54 @@ internal sealed class DeviceCard : Panel
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
-        var border = peer?.IsTalking == true
-            ? Blend(Color.FromArgb(220, 223, 227), Color.FromArgb(21, 101, 192), (MathF.Sin(pulse) + 1) / 2)
-            : Color.FromArgb(220, 223, 227);
-        using var pen = new Pen(border, peer?.IsTalking == true ? 2 : 1);
-        eventArgs.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        var talking = peer?.IsTalking == true;
+        using var basePen = new Pen(talking ? Color.FromArgb(115, 174, 224) : Color.FromArgb(220, 223, 227), talking ? 3 : 1);
+        eventArgs.Graphics.DrawRectangle(basePen, 1, 1, Width - 3, Height - 3);
+        if (!talking) return;
+
+        // A blue head travels around a permanently lit wider border. The card
+        // therefore reads as speaking at a glance while still having motion.
+        var perimeter = 2f * ((Width - 4) + (Height - 4));
+        var head = (pulse % (MathF.PI * 2)) / (MathF.PI * 2) * perimeter;
+        using var tracer = new Pen(Color.FromArgb(21, 101, 192), 3);
+        DrawPerimeterSegment(eventArgs.Graphics, tracer, head, perimeter * 0.34f);
     }
 
     private static Color Blend(Color from, Color to, float amount) => Color.FromArgb(
         (int)(from.R + (to.R - from.R) * amount), (int)(from.G + (to.G - from.G) * amount),
         (int)(from.B + (to.B - from.B) * amount));
+
+    private void DrawPerimeterSegment(Graphics graphics, Pen pen, float start, float length)
+    {
+        var left = 2f; var top = 2f; var right = Width - 3f; var bottom = Height - 3f;
+        var edges = new[]
+        {
+            (new PointF(left, top), new PointF(right, top), right - left),
+            (new PointF(right, top), new PointF(right, bottom), bottom - top),
+            (new PointF(right, bottom), new PointF(left, bottom), right - left),
+            (new PointF(left, bottom), new PointF(left, top), bottom - top),
+        };
+        var perimeter = edges.Sum(edge => edge.Item3);
+        var cursor = start % perimeter;
+        var remaining = length;
+        while (remaining > 0.01f)
+        {
+            var offset = 0f;
+            foreach (var (from, to, edgeLength) in edges)
+            {
+                if (cursor >= offset + edgeLength) { offset += edgeLength; continue; }
+                var fromOffset = Math.Max(0, cursor - offset);
+                var draw = Math.Min(edgeLength - fromOffset, remaining);
+                graphics.DrawLine(pen, Interpolate(from, to, fromOffset / edgeLength), Interpolate(from, to, (fromOffset + draw) / edgeLength));
+                remaining -= draw;
+                cursor = (cursor + draw) % perimeter;
+                break;
+            }
+        }
+    }
+
+    private static PointF Interpolate(PointF from, PointF to, float amount) => new(
+        from.X + (to.X - from.X) * amount, from.Y + (to.Y - from.Y) * amount);
 
     private static Button FlatButton(string text, Color background, Color? foreground = null) => new()
     {

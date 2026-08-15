@@ -165,11 +165,16 @@ internal sealed partial class MainForm
         var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 0, 0), BackColor = Color.FromArgb(245, 246, 247) };
         var pttPanel = new Panel { Dock = DockStyle.Top, Height = 214, Padding = new Padding(16, 14, 16, 0), BackColor = Color.White };
         pttPanel.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, pttPanel.Width - 1, pttPanel.Height - 1);
-        broadcast.SetBounds(16, 14, 0, 72);
-        reply.SetBounds(16, 116, 0, 48);
+        broadcast.AutoSize = reply.AutoSize = false;
+        broadcast.SetBounds(16, 14, 260, 62);
+        reply.SetBounds(16, 116, 260, 44);
         broadcast.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         reply.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        pttPanel.Resize += (_, _) => { broadcast.Width = Math.Max(1, pttPanel.ClientSize.Width - 32); reply.Width = Math.Max(1, pttPanel.ClientSize.Width - 32); };
+        pttPanel.Resize += (_, _) =>
+        {
+            broadcast.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
+            reply.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
+        };
         var broadcastHint = new Label { Text = $"Everyone in group {settings.MeshId}                         Space / Ctrl+Alt+B", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f), Location = new Point(16, 90), Size = new Size(260, 14), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
         var replyHint = new Label { Text = "Last sender: none                                         Ctrl+Alt+R", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f), Location = new Point(16, 169), Size = new Size(260, 14), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
         pttPanel.Controls.AddRange([broadcast, broadcastHint, reply, replyHint]);
@@ -462,6 +467,10 @@ internal sealed partial class MainForm
         if (receiveSession?.State == IntercomState.Receiving && audio is not null)
         {
             var statistics = receiveSession.Statistics;
+            var speaker = receiveSession.LastTalker?.Alias ?? "A device";
+            nowKicker.Text = "RECEIVING";
+            statusLabel.Text = $"{speaker} is speaking";
+            statusLabel.ForeColor = Color.FromArgb(21, 101, 192);
             nowDetail.Text = $"UDP {statistics.AudioPackets:n0} · decoded {statistics.DecodedFrames:n0} · PLC {statistics.ConcealedFrames:n0} · output {audio.BufferedMilliseconds} ms";
         }
         diagnosticsCounters.Text = nowDetail.Text;

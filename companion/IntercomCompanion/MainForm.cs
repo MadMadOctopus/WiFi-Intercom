@@ -205,6 +205,7 @@ internal sealed partial class MainForm : Form
         {
             networkLabel.Text = $"Discovery unavailable: {exception.SocketErrorCode}";
             statusLabel.Text = "Network unavailable";
+            nowKicker.Text = "NETWORK";
             statusLabel.ForeColor = Color.Firebrick;
             return;
         }
@@ -212,14 +213,14 @@ internal sealed partial class MainForm : Form
         {
             PopulateAudioDevices();
             StartAudioEngine();
-            statusLabel.Text = "Idle";
-            statusLabel.ForeColor = Color.FromArgb(46, 125, 50);
+            ShowIntercomState(IntercomState.Idle);
             broadcast.Enabled = reply.Enabled = true;
             selected.Enabled = SelectedPeer is not null;
         }
         catch (Exception exception)
         {
             statusLabel.Text = "Audio unavailable";
+            nowKicker.Text = "AUDIO";
             nowDetail.Text = exception.Message;
             statusLabel.ForeColor = Color.Firebrick;
         }
@@ -264,7 +265,7 @@ internal sealed partial class MainForm : Form
         if (receiveSession?.State == IntercomState.Receiving && audio is not null)
         {
             var stats = receiveSession.Statistics;
-            statusLabel.Text = $"Receiving — UDP {stats.AudioPackets}, decoded {stats.DecodedFrames}, played {stats.PlayedFrames}, PLC {stats.ConcealedFrames}, gaps {stats.SequenceGaps}, output {audio.BufferedMilliseconds} ms";
+            nowDetail.Text = $"UDP {stats.AudioPackets:n0} · decoded {stats.DecodedFrames:n0} · PLC {stats.ConcealedFrames:n0} · output {audio.BufferedMilliseconds} ms";
         }
     }
 
@@ -468,13 +469,13 @@ internal sealed partial class MainForm : Form
 
     private void ShowIntercomState(IntercomState sessionState)
     {
-        (statusLabel.Text, statusLabel.ForeColor) = sessionState switch
+        (statusLabel.Text, statusLabel.ForeColor, nowKicker.Text) = sessionState switch
         {
-            IntercomState.Claiming => ("Claiming floor…", Color.FromArgb(249, 168, 37)),
-            IntercomState.Talking => ("Talking", Color.FromArgb(46, 125, 50)),
-            IntercomState.Receiving => ("Receiving", Color.FromArgb(21, 101, 192)),
-            IntercomState.WaitingForFloor => ("Floor occupied — buffering up to 500 ms", Color.FromArgb(249, 168, 37)),
-            _ => ("Idle — ready to receive", Color.DimGray),
+            IntercomState.Claiming => ("Claiming floor", Color.FromArgb(249, 168, 37), "REQUESTING"),
+            IntercomState.Talking => ("Talking", Color.FromArgb(46, 125, 50), "BROADCASTING"),
+            IntercomState.Receiving => ("Receiving", Color.FromArgb(21, 101, 192), "RECEIVING"),
+            IntercomState.WaitingForFloor => ("Floor occupied", Color.FromArgb(249, 168, 37), "WAITING"),
+            _ => ("Idle", Color.FromArgb(46, 125, 50), "READY"),
         };
         nowDetail.Text = sessionState == IntercomState.Receiving && receiveSession?.LastTalker is { } talker
             ? $"{talker.Alias} is speaking" : statusLabel.Text;

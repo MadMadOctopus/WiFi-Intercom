@@ -260,62 +260,65 @@ internal sealed partial class MainForm
 
     private Control BuildTalkActionsPanel()
     {
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, BackColor = UiStyles.Surface, Padding = new Padding(12, 0, 0, 0) };
-        right.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 230));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var ptt = UiStyles.BorderedPanel(new Padding(16));
-        ptt.AutoSize = false;
-        ptt.Height = 230;
+        var right = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiStyles.Surface, Padding = new Padding(12, 0, 0, 0) };
+        var ptt = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, BackColor = UiStyles.White, Padding = new Padding(16), Margin = new Padding(0, 0, 0, 12) };
+        ptt.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
+        ptt.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        ptt.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
+        ptt.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        ptt.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         ptt.Paint += (_, e) => UiStyles.DrawBorder(e, ptt);
-        var commands = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1 };
-        commands.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         broadcast = CreatePttButton("Hold to broadcast", UiStyles.Green);
         replySurface = CreatePttButton("Hold to reply", UiStyles.Blue);
         broadcast.Enabled = replySurface.Enabled = receiveSession is not null;
         BindPtt(broadcast, () => receiveSession?.PressBroadcast());
         BindPtt(replySurface, () => receiveSession?.PressReply());
         broadcast.AutoSize = false;
-        broadcast.Height = 68;
-        broadcast.Dock = DockStyle.Top;
+        broadcast.Dock = DockStyle.Fill;
         broadcast.Font = UiStyles.Broadcast;
         broadcast.Padding = new Padding(0, 12, 0, 12);
         broadcast.BackColor = UiStyles.Green;
         broadcast.FlatAppearance.BorderColor = UiStyles.Green;
         replySurface.AutoSize = false;
-        replySurface.Height = 48;
-        replySurface.Dock = DockStyle.Top;
+        replySurface.Dock = DockStyle.Fill;
         replySurface.Font = UiStyles.CardAlias;
         replySurface.Padding = new Padding(0, 7, 0, 7);
         replySurface.BackColor = UiStyles.Blue;
         replySurface.FlatAppearance.BorderColor = UiStyles.Blue;
-        commands.Controls.Add(broadcast, 0, 0);
-        commands.Controls.Add(HintRow($"Everyone in group {settings.MeshId}", "Space, or Ctrl+Alt+B anywhere"), 0, 1);
-        commands.Controls.Add(new Panel { Height = 12, Dock = DockStyle.Top, BackColor = UiStyles.White }, 0, 2);
-        commands.Controls.Add(replySurface, 0, 3);
-        commands.Controls.Add(HintRow("Last sender: none", "Ctrl+Alt+R"), 0, 4);
-        ptt.Controls.Add(commands);
+        ptt.Controls.Add(broadcast, 0, 0);
+        ptt.Controls.Add(HintRow($"Everyone in group {settings.MeshId}", "Space, or Ctrl+Alt+B anywhere"), 0, 1);
+        ptt.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = UiStyles.White }, 0, 2);
+        ptt.Controls.Add(replySurface, 0, 3);
+        ptt.Controls.Add(HintRow("Last sender: none", "Ctrl+Alt+R"), 0, 4);
 
-        var activityPanel = UiStyles.BorderedPanel(Padding.Empty);
+        var activityPanel = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, BackColor = UiStyles.White, Padding = Padding.Empty, Margin = Padding.Empty };
+        activityPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        activityPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 192));
+        activityPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         activityPanel.Paint += (_, e) => UiStyles.DrawBorder(e, activityPanel);
-        var activityHeader = new TableLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(16, 0, 16, 0), ColumnCount = 2 };
+        var activityHeader = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16, 0, 14, 0), ColumnCount = 2, Margin = Padding.Empty };
         activityHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         activityHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         activityHeader.Controls.Add(new Label { Text = "Activity", AutoSize = true, Font = UiStyles.PanelHeading, Anchor = AnchorStyles.Left }, 0, 0);
         var recordings = new LinkLabel { Text = "Open recordings folder", AutoSize = true, Font = UiStyles.SecondaryFont, LinkColor = UiStyles.Blue, Anchor = AnchorStyles.Right };
         recordings.Click += (_, _) => { try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(CompanionSettings.RecordingsDirectory) { UseShellExecute = true }); } catch { } };
         activityHeader.Controls.Add(recordings, 1, 0);
-        var diagnostics = new LinkLabel { Text = "Diagnostics…", AutoSize = true, Dock = DockStyle.Bottom, Font = UiStyles.SecondaryFont, Padding = new Padding(16, 10, 0, 10), LinkColor = UiStyles.Blue };
+        var diagnostics = new LinkLabel { Text = "Diagnostics…", AutoSize = true, Dock = DockStyle.Fill, Font = UiStyles.SecondaryFont, Padding = new Padding(16, 10, 0, 10), LinkColor = UiStyles.Blue, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
         diagnostics.Click += (_, _) => ShowSettings("Diagnostics");
         activity.Controls.Clear();
-        activityPanel.Controls.Add(activity);
-        activityPanel.Controls.Add(diagnostics);
-        activityPanel.Controls.Add(UiStyles.Rule());
-        activityPanel.Controls.Add(activityHeader);
-        right.Controls.Add(ptt, 0, 0);
-        right.Controls.Add(new Panel { BackColor = UiStyles.Surface }, 0, 1);
-        right.Controls.Add(activityPanel, 0, 2);
+        activityPanel.Controls.Add(activityHeader, 0, 0);
+        activityPanel.Controls.Add(activity, 0, 1);
+        activityPanel.Controls.Add(diagnostics, 0, 2);
+        activityPanel.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, 41, activityPanel.Width, 41); e.Graphics.DrawLine(pen, 0, activityPanel.Height - 41, activityPanel.Width, activityPanel.Height - 41); };
+        void FitPanels()
+        {
+            var width = Math.Max(0, right.ClientSize.Width - right.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth);
+            ptt.Width = width;
+            activityPanel.Width = width;
+        }
+        right.Resize += (_, _) => FitPanels();
+        right.Controls.Add(ptt);
+        right.Controls.Add(activityPanel);
         return right;
     }
 
@@ -459,8 +462,8 @@ internal sealed partial class MainForm
         dangerHeader.Controls.Add(new Label { Text = "Change the group ID", AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.DarkRed, Margin = Padding.Empty });
         dangerHeader.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(122, 32, 32), Margin = new Padding(0, 4, 0, 0) });
         dangerHeader.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(242, 214, 214)); e.Graphics.DrawLine(pen, 0, dangerHeader.Height - 1, dangerHeader.Width, dangerHeader.Height - 1); };
-        var dangerBody = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = 756, Padding = new Padding(18, 16, 18, 16), Margin = Padding.Empty };
-        var dangerStack = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 720, Margin = Padding.Empty };
+        var dangerBody = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = 756, Padding = new Padding(18, 16, 18, 16), Margin = Padding.Empty, ColumnCount = 1 };
+        var dangerStack = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 720, Margin = Padding.Empty };
         dangerStack.Controls.Add(new Label { Text = $"· Devices still on {settings.MeshId} disappear from this companion and can no longer hear it.\n· Each device must be changed separately, over USB or with a configuration write, and each one reboots.\n· A device you cannot reach right now keeps the old group until you get to it physically.\n· Two groups on the same LAN never mix, so a half-finished change leaves two isolated intercoms.", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Margin = Padding.Empty });
         var fields = FormGrid(170);
         fields.Margin = new Padding(0, 18, 0, 0);
@@ -477,7 +480,7 @@ internal sealed partial class MainForm
         action.Controls.Add(new Label { Text = "Enabled once the confirmation matches.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(12, 7, 0, 0) });
         fields.Controls.Add(action, 1, fields.RowCount); fields.RowCount++;
         dangerStack.Controls.Add(fields);
-        dangerBody.Controls.Add(dangerStack);
+        dangerBody.Controls.Add(dangerStack, 0, 0);
         danger.Controls.Add(dangerHeader, 0, 0);
         danger.Controls.Add(dangerBody, 0, 1);
 
@@ -496,8 +499,9 @@ internal sealed partial class MainForm
     private UserControl BuildFirmwarePage()
     {
         var page = Page("Firmware", "Firmware", "Signed packages only. Updates are queued one device at a time and complete only after the device re-announces the offered version.", 820, out var content);
-        var package = UiStyles.BorderedPanel(new Padding(20, 18, 20, 18)); package.Width = 820; package.AutoSize = true; package.Margin = new Padding(0, 18, 0, 0); package.Paint += (_, e) => UiStyles.DrawBorder(e, package);
-        var packageLayout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
+        var package = new TableLayoutPanel { Width = 820, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, BackColor = UiStyles.White, Padding = new Padding(20, 18, 20, 18), Margin = new Padding(0, 18, 0, 0) };
+        package.Paint += (_, e) => UiStyles.DrawBorder(e, package);
+        var packageLayout = new TableLayoutPanel { Width = 780, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, Margin = Padding.Empty };
         packageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); packageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var packageInfo = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty };
         otaPackageName.Text = "No package selected";
@@ -506,7 +510,7 @@ internal sealed partial class MainForm
         packageInfo.Controls.Add(otaPackageSummary);
         browseOtaManifest.Text = "Choose another package…"; StyleSecondary(browseOtaManifest); browseOtaManifest.Anchor = AnchorStyles.Right;
         packageLayout.Controls.Add(packageInfo, 0, 0); packageLayout.Controls.Add(browseOtaManifest, 1, 0);
-        package.Controls.Add(packageLayout);
+        package.Controls.Add(packageLayout, 0, 0);
 
         var queuePanel = UiStyles.BorderedPanel(Padding.Empty); queuePanel.Width = 820; queuePanel.AutoSize = true; queuePanel.Margin = new Padding(0, 16, 0, 0); queuePanel.Paint += (_, e) => UiStyles.DrawBorder(e, queuePanel);
         var queueLayout = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Width = 818, Margin = Padding.Empty };

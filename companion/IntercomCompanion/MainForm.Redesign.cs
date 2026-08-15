@@ -42,6 +42,7 @@ internal sealed partial class MainForm
     private readonly FlowLayoutPanel otaQueue = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly Label otaPackageSummary = new() { AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary };
     private readonly Label otaPackageName = new() { AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.Ink };
+    private Button? startOtaQueue;
     private readonly HashSet<uint> queuedOtaDevices = [];
     private string activeSettingsPage = "USB";
     private IReadOnlyList<Peer> displayPeers = [];
@@ -523,8 +524,8 @@ internal sealed partial class MainForm
         queueCaption.Controls.Add(new Label { Text = "Update queue", AutoSize = true, Font = new Font(UiStyles.BodyFont, FontStyle.Bold) });
         queueCaption.Controls.Add(new Label { Text = "sequential, one device at a time", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(10, 1, 0, 0) });
         var addAll = PlainButton("Add all compatible"); addAll.Click += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
-        var start = new Button { Text = "Start queue…" }; StylePrimary(start); start.Click += async (_, _) => await StartQueuedOtaAsync();
-        queueHeader.Controls.Add(queueCaption, 0, 0); queueHeader.Controls.Add(addAll, 1, 0); queueHeader.Controls.Add(start, 2, 0);
+        startOtaQueue = new Button { Text = "Start queue…", Enabled = !string.IsNullOrWhiteSpace(otaManifest.Text) }; StylePrimary(startOtaQueue); startOtaQueue.Click += async (_, _) => await StartQueuedOtaAsync();
+        queueHeader.Controls.Add(queueCaption, 0, 0); queueHeader.Controls.Add(addAll, 1, 0); queueHeader.Controls.Add(startOtaQueue, 2, 0);
         var queueHost = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = 818, Padding = new Padding(20, 0, 20, 0), BackColor = UiStyles.White, Margin = Padding.Empty };
         otaQueue.Width = 778; otaQueue.Margin = Padding.Empty; queueHost.Controls.Add(otaQueue);
         var queueFooter = new Label { Text = "Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.", AutoSize = true, MaximumSize = new Size(778, 0), Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(20, 14, 20, 14), Margin = Padding.Empty };

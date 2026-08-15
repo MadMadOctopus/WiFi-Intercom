@@ -365,6 +365,7 @@ internal sealed partial class MainForm : Form
             otaStatus.Text = $"Verified {package.Version}: {Path.GetFileName(package.ImagePath)} ({package.Size / 1024.0:0.0} KiB).";
             otaPackageName.Text = package.Version;
             otaPackageSummary.Text = $"{Path.GetFileName(package.ManifestPath)} · {package.Size / 1024.0:0.0} KiB · signature verified";
+            if (startOtaQueue is not null) startOtaQueue.Enabled = true;
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
         {
@@ -372,6 +373,7 @@ internal sealed partial class MainForm : Form
             otaPackageName.Text = "No package selected";
             otaPackageSummary.Text = "Package could not be verified.";
             otaStatus.Text = $"OTA package rejected: {exception.Message}";
+            if (startOtaQueue is not null) startOtaQueue.Enabled = false;
         }
         UpdateSelectedDeviceActions();
     }
@@ -414,6 +416,7 @@ internal sealed partial class MainForm : Form
 
         otaUpdating = true;
         broadcast.Enabled = reply.Enabled = replySurface.Enabled = selected.Enabled = false;
+        localMute.Enabled = false;
         UpdateSelectedDeviceActions();
         try
         {
@@ -452,6 +455,7 @@ internal sealed partial class MainForm : Form
         {
             otaUpdating = false;
             broadcast.Enabled = reply.Enabled = replySurface.Enabled = true;
+            localMute.Enabled = true;
             UpdateSelectedDeviceActions();
         }
     }

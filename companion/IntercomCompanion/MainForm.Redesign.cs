@@ -21,8 +21,8 @@ internal sealed partial class MainForm
     private readonly Label nowDetail = new() { AutoSize = false, ForeColor = UiStyles.Secondary, Font = UiStyles.SecondaryFont, TextAlign = ContentAlignment.MiddleRight };
     private readonly FlowLayoutPanel activity = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiStyles.White, Padding = Padding.Empty };
     private readonly Panel pageHost = new() { Dock = DockStyle.Fill };
-    private readonly Panel talkPage = new() { Dock = DockStyle.Fill };
-    private readonly Panel settingsPage = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly TableLayoutPanel talkPage = new() { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiStyles.Surface };
+    private readonly TableLayoutPanel settingsPage = new() { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiStyles.Surface, Visible = false };
     private readonly System.Windows.Forms.Timer cardPulse = new() { Interval = 60 };
     private readonly TextBox groupId = new() { MaxLength = 4, CharacterCasing = CharacterCasing.Upper, Width = 90 };
     private readonly TextBox groupConfirmation = new() { MaxLength = 4, CharacterCasing = CharacterCasing.Upper, Width = 90 };
@@ -36,6 +36,8 @@ internal sealed partial class MainForm
     private readonly Label usbDeviceIdentity = new() { AutoSize = true, ForeColor = Color.FromArgb(79, 91, 102) };
     private readonly FlowLayoutPanel settingsNavigation = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly Dictionary<string, Panel> settingsNavItems = [];
+    private readonly Panel settingsContentHost = new() { Dock = DockStyle.Fill, BackColor = UiStyles.Surface };
+    private readonly Dictionary<string, UserControl> settingsViews = [];
     private readonly Dictionary<string, Panel> filterChips = [];
     private readonly FlowLayoutPanel otaQueue = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly Label otaPackageSummary = new() { AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary };
@@ -207,9 +209,12 @@ internal sealed partial class MainForm
     private void BuildTalkPage()
     {
         talkPage.Controls.Clear();
-        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, BackColor = UiStyles.Surface, Padding = new Padding(20, 18, 20, 22) };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 336));
+        talkPage.ColumnStyles.Clear();
+        talkPage.RowStyles.Clear();
+        talkPage.Padding = new Padding(20, 18, 20, 18);
+        talkPage.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        talkPage.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 336));
+        talkPage.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, BackColor = UiStyles.Surface };
         left.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
@@ -249,9 +254,8 @@ internal sealed partial class MainForm
         left.Controls.Add(note, 0, 3);
 
         var right = BuildTalkActionsPanel();
-        body.Controls.Add(left, 0, 0);
-        body.Controls.Add(right, 1, 0);
-        talkPage.Controls.Add(body);
+        talkPage.Controls.Add(left, 0, 0);
+        talkPage.Controls.Add(right, 1, 0);
     }
 
     private Control BuildTalkActionsPanel()
@@ -328,10 +332,13 @@ internal sealed partial class MainForm
     private void BuildSettingsPage()
     {
         settingsPage.Controls.Clear();
-        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, SplitterDistance = 236, Panel1MinSize = 236, SplitterWidth = 1, IsSplitterFixed = true, BackColor = UiStyles.Border };
-        split.Panel1.BackColor = UiStyles.Chrome;
-        split.Panel2.BackColor = UiStyles.Surface;
+        settingsPage.ColumnStyles.Clear();
+        settingsPage.RowStyles.Clear();
+        settingsPage.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 236));
+        settingsPage.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        settingsPage.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         settingsNavigation.Controls.Clear();
+        settingsNavItems.Clear();
         settingsNavigation.Padding = new Padding(0, 16, 0, 0);
         settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = UiStyles.Muted, AutoSize = true, Padding = new Padding(18, 0, 0, 10), Font = UiStyles.Hint, Margin = Padding.Empty });
         foreach (var (title, page) in new[] { ("Set up a device (USB)", "USB"), ("Group and device IDs", "Group"), ("Firmware", "Firmware"), ("Identity, audio, shortcuts", "Identity"), ("Diagnostics", "Diagnostics") })
@@ -347,26 +354,29 @@ internal sealed partial class MainForm
             Font = UiStyles.Hint, ForeColor = UiStyles.Muted,
         };
         settingsNavigation.Controls.Add(footer);
-        split.Panel1.Controls.Add(settingsNavigation);
-        split.Panel2.Controls.Add(BuildSettingsDetail());
-        settingsPage.Controls.Add(split);
+        var navHost = new Panel { Dock = DockStyle.Fill, BackColor = UiStyles.Chrome };
+        navHost.Controls.Add(settingsNavigation);
+        settingsContentHost.Controls.Clear();
+        settingsViews.Clear();
+        foreach (var view in new (string Name, UserControl View)[]
+        {
+            ("USB", BuildUsbPage()), ("Group", BuildGroupPage()),
+            ("Firmware", BuildFirmwarePage()), ("Identity", BuildIdentityPage()),
+            ("Diagnostics", BuildDiagnosticsPage())
+        })
+        {
+            view.View.Dock = DockStyle.Fill;
+            view.View.Visible = false;
+            settingsViews.Add(view.Name, view.View);
+            settingsContentHost.Controls.Add(view.View);
+        }
+        settingsPage.Controls.Add(navHost, 0, 0);
+        settingsPage.Controls.Add(settingsContentHost, 1, 0);
     }
 
-    private Control BuildSettingsDetail()
+    private UserControl Page(string name, string title, string detail, int maxWidth, out FlowLayoutPanel content)
     {
-        var tabs = new TabControl { Dock = DockStyle.Fill, Appearance = TabAppearance.FlatButtons, ItemSize = new Size(1, 1), SizeMode = TabSizeMode.Fixed };
-        tabs.TabPages.Add(BuildUsbPage());
-        tabs.TabPages.Add(BuildGroupPage());
-        tabs.TabPages.Add(BuildFirmwarePage());
-        tabs.TabPages.Add(BuildIdentityPage());
-        tabs.TabPages.Add(BuildDiagnosticsPage());
-        tabs.Name = "SettingsTabs";
-        return tabs;
-    }
-
-    private TabPage Page(string name, string title, string detail, int maxWidth, out FlowLayoutPanel content)
-    {
-        var page = new TabPage { Name = name, BackColor = UiStyles.Surface, Padding = Padding.Empty };
+        var page = new UserControl { Name = name, BackColor = UiStyles.Surface, Padding = Padding.Empty };
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = UiStyles.Surface, Padding = new Padding(28, 24, SystemInformation.VerticalScrollBarWidth + 28, 24) };
         content = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = maxWidth, BackColor = UiStyles.Surface, Margin = Padding.Empty };
         content.Controls.Add(new Label { Text = title, AutoSize = true, Font = UiStyles.PageHeading, ForeColor = UiStyles.Ink, Margin = Padding.Empty });
@@ -377,7 +387,7 @@ internal sealed partial class MainForm
         return page;
     }
 
-    private TabPage BuildUsbPage()
+    private UserControl BuildUsbPage()
     {
         var page = Page("USB", "Set up a device over USB", "Connect the device by USB, give it your Wi-Fi credentials, and it reboots onto the network. The password stays on this PC and is never saved by the companion.", 720, out var content);
         var steps = new TableLayoutPanel { Width = 720, Height = 68, ColumnCount = 3, BackColor = UiStyles.White, Margin = new Padding(0, 22, 0, 0) };
@@ -432,7 +442,7 @@ internal sealed partial class MainForm
         return page;
     }
 
-    private TabPage BuildGroupPage()
+    private UserControl BuildGroupPage()
     {
         var page = Page("Group", "Group and device IDs", "A group is an intercom channel, not a radio network. A group holds up to 16 devices on the same trusted LAN.", 760, out var content);
         var summary = UiStyles.BorderedPanel(new Padding(20, 14, 20, 14)); summary.Width = 760; summary.AutoSize = true; summary.Margin = new Padding(0, 18, 0, 0); summary.Paint += (_, e) => UiStyles.DrawBorder(e, summary);
@@ -484,7 +494,7 @@ internal sealed partial class MainForm
         return page;
     }
 
-    private TabPage BuildFirmwarePage()
+    private UserControl BuildFirmwarePage()
     {
         var page = Page("Firmware", "Firmware", "Signed packages only. Updates are queued one device at a time and complete only after the device re-announces the offered version.", 820, out var content);
         var package = UiStyles.BorderedPanel(new Padding(20, 18, 20, 18)); package.Width = 820; package.AutoSize = true; package.Margin = new Padding(0, 18, 0, 0); package.Paint += (_, e) => UiStyles.DrawBorder(e, package);
@@ -525,7 +535,7 @@ internal sealed partial class MainForm
         return page;
     }
 
-    private TabPage BuildIdentityPage()
+    private UserControl BuildIdentityPage()
     {
         var page = Page("Identity", "Identity, audio and shortcuts", "Choose the local name, audio devices and global push-to-talk shortcuts for this companion.", 720, out var content);
         var card = UiStyles.BorderedPanel(new Padding(20)); card.Width = 720; card.AutoSize = true; card.Margin = new Padding(0, 18, 0, 0); card.Paint += (_, e) => UiStyles.DrawBorder(e, card);
@@ -558,7 +568,7 @@ internal sealed partial class MainForm
         return page;
     }
 
-    private TabPage BuildDiagnosticsPage()
+    private UserControl BuildDiagnosticsPage()
     {
         var page = Page("Diagnostics", "Diagnostics", "Live receive counters and the discovery/session log. Audio availability never controls discovery.", 860, out var content);
         var cards = new TableLayoutPanel { Width = 820, Height = 72, ColumnCount = 4, Margin = new Padding(0, 18, 0, 0) };
@@ -595,8 +605,8 @@ internal sealed partial class MainForm
         nowBar.Visible = false;
         shell.RowStyles[1].Height = 0;
         activeSettingsPage = page;
-        var tabs = settingsPage.Controls.Find("SettingsTabs", true).OfType<TabControl>().FirstOrDefault();
-        if (tabs is not null) tabs.SelectedIndex = page switch { "USB" => 0, "Group" => 1, "Firmware" => 2, "Identity" => 3, _ => 4 };
+        foreach (var (name, view) in settingsViews) view.Visible = name == page;
+        System.Diagnostics.Debug.Assert(settingsContentHost.Controls.Count == 5 && settingsViews.Values.Count(view => view.Visible) == 1);
         UpdateSettingsNavigation();
         if (page == "Firmware") RefreshOtaQueue();
         UpdateSettingsStatus();

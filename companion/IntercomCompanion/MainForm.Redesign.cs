@@ -56,6 +56,11 @@ internal sealed partial class MainForm
 
     private void BuildRedesign()
     {
+        // Keep the controls which carry the real settings/event bindings out
+        // of the temporary legacy tree. ControlCollection.Clear disposes child
+        // controls, which otherwise leaves the settings tabs with blank or
+        // clipped fields on a fresh launch.
+        DetachLegacyControls();
         Controls.Clear();
         Text = "Wi-Fi Intercom Companion";
         MinimumSize = new Size(1024, 700);
@@ -182,6 +187,20 @@ internal sealed partial class MainForm
         cardPulse.Start();
         UpdateIdentityPresentation();
         UpdateNowBarAppearance();
+    }
+
+    private void DetachLegacyControls()
+    {
+        foreach (var control in new Control[]
+        {
+            companionAlias, recordingDevice, playbackDevice, usbPort, usbSsid,
+            usbPassword, usbAlias, refreshUsbPorts, applyUsbWifi, usbStatus,
+            otaManifest, browseOtaManifest, otaStatus, networkLabel, statusLabel,
+            getUsbConfig, applyAudioDevices, saveCompanionAlias
+        })
+        {
+            control.Parent?.Controls.Remove(control);
+        }
     }
 
     private void BuildTalkPage()
@@ -529,18 +548,18 @@ internal sealed partial class MainForm
         for (var i = 0; i < 4; i++) cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         foreach (var (title, i) in new[] { ("UDP audio", 0), ("Decoded frames", 1), ("PLC frames", 2), ("Output buffer", 3) })
         {
-            var card = new Panel { Dock = DockStyle.Fill, Margin = new Padding(i == 0 ? 0 : 6, 0, i == 3 ? 0 : 6, 0), BackColor = UiStyles.White, Padding = new Padding(16, 12, 16, 8) };
-            card.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 224, 228)), 0, 0, card.Width - 1, card.Height - 1);
-            card.Controls.Add(new Label { Text = title, AutoSize = true, Location = new Point(12, 12), ForeColor = Color.FromArgb(99, 103, 109) });
-            card.Controls.Add(new Label { Text = "—", AutoSize = true, Name = $"Diagnostic{i}", Font = new Font("Segoe UI", 15, FontStyle.Bold), Location = new Point(12, 34) });
+            var card = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = new Padding(i == 0 ? 0 : 6, 0, i == 3 ? 0 : 6, 0), BackColor = UiStyles.White, Padding = new Padding(16, 12, 16, 8) };
+            card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.Paint += (_, e) => UiStyles.DrawBorder(e, card);
+            card.Controls.Add(new Label { Text = title.ToUpperInvariant(), AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Anchor = AnchorStyles.Left }, 0, 0);
+            card.Controls.Add(new Label { Text = "—", AutoSize = true, Name = $"Diagnostic{i}", Font = new Font("Segoe UI", 16.5f, FontStyle.Bold), ForeColor = UiStyles.Ink, Margin = new Padding(0, 6, 0, 0), Anchor = AnchorStyles.Left }, 0, 1);
             cards.Controls.Add(card, i, 0);
         }
         diagnosticsCounters.Visible = false;
         var copy = PlainButton("Copy log");
-        copy.Location = new Point(30, 526);
         copy.Click += (_, _) => { try { Clipboard.SetText(ReadDiagnosticLog()); } catch { } };
         var save = PlainButton("Save log to file…");
-        save.Location = new Point(122, 526);
         save.Click += (_, _) => SaveDiagnosticLog();
         var log = new RichTextBox { Width = 820, Height = 300, ReadOnly = true, DetectUrls = false, BorderStyle = BorderStyle.None, BackColor = Color.FromArgb(28, 31, 35), ForeColor = UiStyles.Disabled, Font = UiStyles.Log, ScrollBars = RichTextBoxScrollBars.Vertical, Padding = new Padding(16, 14, 16, 14), Margin = new Padding(0, 18, 0, 0) };
         AppendDiagnosticLines(log, ReadDiagnosticLog());
@@ -975,21 +994,35 @@ internal sealed partial class MainForm
         var peers = displayPeers.Where(peer => queuedOtaDevices.Contains(peer.NodeId)).OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
         if (peers.Length == 0)
         {
-            otaQueue.Controls.Add(new Label { Text = "No devices queued. Add compatible active devices to update them sequentially.", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Padding = new Padding(0, 12, 0, 0) });
+            otaQueue.Controls.Add(new Label { Text = "No devices queued. Add compatible active devices to update them sequentially.", AutoSize = true, ForeColor = UiStyles.Secondary, Font = UiStyles.SecondaryFont, Padding = new Padding(0, 14, 0, 14), Margin = Padding.Empty });
             return;
         }
         foreach (var peer in peers)
         {
-            var row = new Panel { Width = 770, Height = 82, BackColor = Color.White, Margin = new Padding(0, 0, 0, 0) };
-            row.Paint += (_, e) => e.Graphics.DrawLine(new Pen(Color.FromArgb(242, 244, 245)), 0, row.Height - 1, row.Width, row.Height - 1);
-            row.Controls.Add(new Label { Text = peer.Alias, AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold), Location = new Point(12, 10) });
-            row.Controls.Add(new Label { Text = $"{peer.FirmwareVersion}  →  selected package", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Location = new Point(168, 11) });
-            row.Controls.Add(new Label { Text = "Queued", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Location = new Point(388, 11) });
-            var progress = new Panel { Location = new Point(12, 42), Size = new Size(650, 6), BackColor = Color.FromArgb(233, 235, 238) };
-            row.Controls.Add(progress);
-            row.Controls.Add(new Label { Text = "Waiting for earlier devices", AutoSize = true, ForeColor = Color.FromArgb(131, 135, 141), Font = new Font("Segoe UI", 7.5f), Location = new Point(12, 57) });
-            var remove = PlainButton("Remove"); remove.Location = new Point(686, 8); remove.Click += (_, _) => { queuedOtaDevices.Remove(peer.NodeId); RefreshOtaQueue(); };
-            row.Controls.Add(remove); otaQueue.Controls.Add(row);
+            var row = new TableLayoutPanel { Width = 778, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, BackColor = UiStyles.White, Padding = new Padding(0, 12, 0, 12), Margin = Padding.Empty };
+            row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            row.RowStyles.Add(new RowStyle(SizeType.Absolute, 10));
+            row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            row.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, row.Height - 1, row.Width, row.Height - 1); };
+
+            var header = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 4, Padding = new Padding(0, 0, 0, 0), Margin = Padding.Empty };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new Label { Text = peer.Alias, AutoEllipsis = true, AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.CardAlias, ForeColor = UiStyles.Ink, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+            header.Controls.Add(new Label { Text = $"{peer.FirmwareVersion}  →  selected package", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Left }, 1, 0);
+            header.Controls.Add(new Label { Text = "QUEUED", AutoSize = true, Font = UiStyles.Badge, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Left }, 2, 0);
+            var remove = PlainButton("Remove");
+            remove.Click += (_, _) => { queuedOtaDevices.Remove(peer.NodeId); RefreshOtaQueue(); };
+            header.Controls.Add(remove, 3, 0);
+
+            var progress = new Panel { Dock = DockStyle.Fill, Height = 6, BackColor = Color.FromArgb(233, 235, 238), Margin = new Padding(0, 0, 0, 0) };
+            var detail = new Label { Text = "Waiting for earlier devices", AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Margin = Padding.Empty };
+            row.Controls.Add(header, 0, 0);
+            row.Controls.Add(progress, 0, 1);
+            row.Controls.Add(detail, 0, 2);
+            otaQueue.Controls.Add(row);
         }
     }
 

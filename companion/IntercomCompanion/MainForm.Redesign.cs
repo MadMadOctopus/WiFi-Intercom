@@ -54,7 +54,8 @@ internal sealed partial class MainForm
 
         // The application name belongs in the native Windows title bar.  This strip is
         // deliberately only the companion's identity and local audio state.
-        var identityStrip = new TableLayoutPanel { Dock = DockStyle.Top, Height = 56, BackColor = Color.White, Padding = new Padding(20, 4, 20, 4), ColumnCount = 7 };
+        var identityStrip = new TableLayoutPanel { Dock = DockStyle.Top, Height = 56, BackColor = Color.White, Padding = new Padding(20, 4, 20, 4), ColumnCount = 8 };
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 290));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
@@ -62,6 +63,16 @@ internal sealed partial class MainForm
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var glyphSize = BrandIconFrame(16);
+        using var glyphIcon = BrandAssets.AppIconAt(glyphSize);
+        var identityGlyph = new PictureBox
+        {
+            Image = glyphIcon.ToBitmap(),
+            Size = new Size(glyphSize, glyphSize),
+            SizeMode = PictureBoxSizeMode.CenterImage,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 0, 8, 0),
+        };
         identityLabel.AutoSize = false;
         identityLabel.Dock = DockStyle.Fill;
         identityLabel.Font = new Font("Segoe UI", 8.5f);
@@ -88,12 +99,13 @@ internal sealed partial class MainForm
         settingsButton.Height = 30;
         settingsButton.Margin = new Padding(8, 0, 0, 0);
         settingsButton.Click += (_, _) => ShowSettings("USB");
-        identityStrip.Controls.Add(identityLabel, 0, 0);
-        identityStrip.Controls.Add(identityMicrophone, 1, 0);
-        identityStrip.Controls.Add(identitySpeaker, 2, 0);
-        identityStrip.Controls.Add(changeAudio, 3, 0);
-        identityStrip.Controls.Add(localMute, 5, 0);
-        identityStrip.Controls.Add(settingsButton, 6, 0);
+        identityStrip.Controls.Add(identityGlyph, 0, 0);
+        identityStrip.Controls.Add(identityLabel, 1, 0);
+        identityStrip.Controls.Add(identityMicrophone, 2, 0);
+        identityStrip.Controls.Add(identitySpeaker, 3, 0);
+        identityStrip.Controls.Add(changeAudio, 4, 0);
+        identityStrip.Controls.Add(localMute, 6, 0);
+        identityStrip.Controls.Add(settingsButton, 7, 0);
         identityStrip.Paint += (_, eventArgs) => eventArgs.Graphics.DrawLine(new Pen(Color.FromArgb(222, 225, 229)), 0, identityStrip.Height - 1, identityStrip.Width, identityStrip.Height - 1);
 
         var nowBar = new Panel { Dock = DockStyle.Top, Height = 76, BackColor = Color.FromArgb(232, 243, 251), Padding = new Padding(20, 0, 20, 0) };
@@ -590,12 +602,24 @@ internal sealed partial class MainForm
 
     private void UpdateIdentityPresentation()
     {
-        identityLabel.Text = $"●  {settings.Alias.ToUpperInvariant()}\n    ID {settings.NodeId:x8} · group {settings.MeshId} · {displayPeers.Count} of 16 devices";
+        identityLabel.Text = $"{settings.Alias.ToUpperInvariant()}\nID {settings.NodeId:x8} · group {settings.MeshId} · {displayPeers.Count} of 16 devices";
         identityMicrophone.Text = $"MIC\n{TrimDeviceName((recordingDevice.SelectedItem as RecordingDevice)?.Name ?? "Not selected")}";
         identitySpeaker.Text = $"SPEAKER\n{TrimDeviceName((playbackDevice.SelectedItem as PlaybackDevice)?.Name ?? "Not selected")}";
     }
 
     private static string TrimDeviceName(string value) => value.Length <= 23 ? value : $"{value[..20]}…";
+
+    private int BrandIconFrame(int logicalPixels)
+    {
+        var target = (int)Math.Round(logicalPixels * DeviceDpi / 96.0);
+        var bestFrame = 16;
+        foreach (var frame in new[] { 20, 24, 32, 48 })
+        {
+            if (Math.Abs(frame - target) < Math.Abs(bestFrame - target)) bestFrame = frame;
+        }
+
+        return bestFrame;
+    }
 
     private Panel SettingsNavItem(string title, string page)
     {
@@ -768,7 +792,13 @@ internal sealed partial class MainForm
             var menu = new ContextMenuStrip();
             menu.Items.Add("Show", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
             menu.Items.Add("Exit", null, (_, _) => { allowExit = true; Close(); });
-            trayIcon = new NotifyIcon { Text = "Wi-Fi Intercom Companion", Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
+            trayIcon = new NotifyIcon
+            {
+                Text = "Intercom Companion",
+                Icon = BrandAssets.AppIconAt(SystemInformation.SmallIconSize.Width),
+                ContextMenuStrip = menu,
+                Visible = true,
+            };
             trayIcon.DoubleClick += (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); };
         }
     }

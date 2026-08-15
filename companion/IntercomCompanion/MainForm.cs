@@ -73,6 +73,8 @@ internal sealed partial class MainForm : Form
         MinimumSize = new Size(820, 560);
         Size = new Size(960, 650);
         Font = new Font("Segoe UI", 9);
+        Icon = BrandAssets.AppIcon;
+        ShowIcon = true;
 
         var title = new Label
         {

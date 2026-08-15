@@ -11,7 +11,7 @@ internal sealed partial class MainForm
     private readonly Dictionary<uint, DeviceCard> deviceCards = [];
     private readonly Dictionary<uint, DeviceConfiguration> configurations = [];
     private readonly Dictionary<uint, DateTimeOffset> rememberedAt = [];
-    private readonly FlowLayoutPanel deviceGrid = new() { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = true, BackColor = UiStyles.Surface, Padding = new Padding(0, 0, 0, 2) };
+    private readonly TableLayoutPanel deviceGrid = new() { Dock = DockStyle.Fill, AutoScroll = true, ColumnCount = 3, BackColor = UiStyles.Surface, Padding = Padding.Empty };
     private readonly FlowLayoutPanel offlineDevices = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiStyles.White, Padding = Padding.Empty };
     private readonly Panel offlineFrame = new() { Dock = DockStyle.Top, AutoSize = true, BackColor = UiStyles.White, Padding = Padding.Empty, Visible = false };
     private readonly TextBox deviceFilter = new() { Width = 150, PlaceholderText = "Alias or ID" };
@@ -34,8 +34,8 @@ internal sealed partial class MainForm
     private readonly Label identityMicrophone = new() { AutoEllipsis = true };
     private readonly Label identitySpeaker = new() { AutoEllipsis = true };
     private readonly Label usbDeviceIdentity = new() { AutoSize = true, ForeColor = Color.FromArgb(79, 91, 102) };
-    private readonly FlowLayoutPanel settingsNavigation = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-    private readonly Dictionary<string, Panel> settingsNavItems = [];
+    private readonly Panel settingsNavigation = new() { Dock = DockStyle.Fill };
+    private readonly Dictionary<string, Label> settingsNavItems = [];
     private readonly Panel settingsContentHost = new() { Dock = DockStyle.Fill, BackColor = UiStyles.Surface };
     private readonly Dictionary<string, UserControl> settingsViews = [];
     private readonly Dictionary<string, Panel> filterChips = [];
@@ -339,21 +339,20 @@ internal sealed partial class MainForm
         settingsPage.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         settingsNavigation.Controls.Clear();
         settingsNavItems.Clear();
-        settingsNavigation.Padding = new Padding(0, 16, 0, 0);
-        settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = UiStyles.Muted, AutoSize = true, Padding = new Padding(18, 0, 0, 10), Font = UiStyles.Hint, Margin = Padding.Empty });
-        foreach (var (title, page) in new[] { ("Set up a device (USB)", "USB"), ("Group and device IDs", "Group"), ("Firmware", "Firmware"), ("Identity, audio, shortcuts", "Identity"), ("Diagnostics", "Diagnostics") })
+        var footer = new Label
+        {
+            AutoSize = true, MaximumSize = new Size(200, 0), Padding = new Padding(18, 0, 18, 0), Margin = new Padding(0, 14, 0, 0), Dock = DockStyle.Top,
+            Text = "Settings are rare. Nothing here blocks discovery, talking or the device list.",
+            Font = UiStyles.Hint, ForeColor = UiStyles.Muted,
+        };
+        settingsNavigation.Controls.Add(footer);
+        foreach (var (title, page) in new[] { ("Diagnostics", "Diagnostics"), ("Identity, audio, shortcuts", "Identity"), ("Firmware", "Firmware"), ("Group and device IDs", "Group"), ("Set up a device (USB)", "USB") })
         {
             var item = SettingsNavItem(title, page);
             settingsNavItems.Add(page, item);
             settingsNavigation.Controls.Add(item);
         }
-        var footer = new Label
-        {
-            AutoSize = true, MaximumSize = new Size(200, 0), Padding = new Padding(18, 0, 18, 0), Margin = new Padding(0, 14, 0, 0),
-            Text = "Settings are rare. Nothing here blocks discovery, talking or the device list.",
-            Font = UiStyles.Hint, ForeColor = UiStyles.Muted,
-        };
-        settingsNavigation.Controls.Add(footer);
+        settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = UiStyles.Muted, AutoSize = false, Height = 42, Dock = DockStyle.Top, Padding = new Padding(18, 0, 0, 10), Font = UiStyles.Hint, Margin = Padding.Empty, TextAlign = ContentAlignment.BottomLeft });
         var navHost = new Panel { Dock = DockStyle.Fill, BackColor = UiStyles.Chrome };
         navHost.Controls.Add(settingsNavigation);
         settingsContentHost.Controls.Clear();
@@ -882,10 +881,22 @@ internal sealed partial class MainForm
 
     private void LayoutDeviceCards()
     {
-        var usable = deviceGrid.ClientSize.Width - deviceGrid.Padding.Horizontal - (deviceGrid.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0);
-        if (usable <= 0) return;
-        var width = Math.Max(185, (usable - 30) / 3);
-        foreach (var card in deviceCards.Values) card.Width = width;
+        var cards = deviceCards.Values.Where(card => card.Visible).ToArray();
+        deviceGrid.SuspendLayout();
+        deviceGrid.Controls.Clear();
+        deviceGrid.ColumnStyles.Clear();
+        deviceGrid.RowStyles.Clear();
+        for (var column = 0; column < 3; column++) deviceGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+        deviceGrid.RowCount = (cards.Length + 2) / 3;
+        for (var row = 0; row < deviceGrid.RowCount; row++) deviceGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 130));
+        foreach (var (card, index) in cards.Select((card, index) => (card, index)))
+        {
+            card.Dock = DockStyle.Fill;
+            card.Height = 120;
+            card.Margin = new Padding(5);
+            deviceGrid.Controls.Add(card, index % 3, index / 3);
+        }
+        deviceGrid.ResumeLayout();
     }
 
     private void UpdateNowBarAppearance()
@@ -942,13 +953,11 @@ internal sealed partial class MainForm
         return bestFrame;
     }
 
-    private Panel SettingsNavItem(string title, string page)
+    private Label SettingsNavItem(string title, string page)
     {
-        var item = new Panel { Width = 236, Height = 44, Margin = Padding.Empty, Cursor = Cursors.Hand, BackColor = Color.Transparent, Tag = page };
-        var caption = new Label { Text = title, Dock = DockStyle.Fill, Padding = new Padding(18, 11, 12, 0), Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Cursor = Cursors.Hand };
+        var item = new Label { Text = title, AutoSize = false, Dock = DockStyle.Top, Height = 40, Padding = new Padding(18, 0, 18, 0), Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Cursor = Cursors.Hand, BackColor = Color.Transparent, Tag = page, TextAlign = ContentAlignment.MiddleLeft };
         EventHandler select = (_, _) => ShowSettings(page);
-        item.Click += select; caption.Click += select;
-        item.Controls.Add(caption);
+        item.Click += select;
         item.Paint += (_, e) =>
         {
             if (page != activeSettingsPage) return;
@@ -963,11 +972,8 @@ internal sealed partial class MainForm
         {
             var selected = page == activeSettingsPage;
             item.BackColor = selected ? UiStyles.White : Color.Transparent;
-            if (item.Controls.OfType<Label>().FirstOrDefault() is { } caption)
-            {
-                caption.Font = new Font(UiStyles.BodyFont, selected ? FontStyle.Bold : FontStyle.Regular);
-                caption.ForeColor = selected ? UiStyles.Ink : UiStyles.Body;
-            }
+            item.Font = new Font(UiStyles.BodyFont, selected ? FontStyle.Bold : FontStyle.Regular);
+            item.ForeColor = selected ? UiStyles.Ink : UiStyles.Body;
             item.Invalidate();
         }
     }

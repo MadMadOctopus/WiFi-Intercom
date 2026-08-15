@@ -1084,7 +1084,19 @@ static void ring_task(void *arg)
 {
     while (1) {
         uint32_t t = now_ms();
+        bool hardware_muted = button_pressed(MUTE_SWITCH_GPIO);
         xSemaphoreTake(g_lock, portMAX_DELAY);
+        /* The physical switch always wins. Clearing and saving this once on
+         * engagement means lifting the switch never leaves playback silently
+         * soft-muted by an earlier companion command. */
+        if (hardware_muted && g_config.soft_mute) {
+            g_config.soft_mute = 0;
+            if (device_config_save(&g_config))
+                ESP_LOGI(TAG, "Hardware mute cleared the soft-mute flag");
+            else
+                ESP_LOGW(TAG, "Hardware mute cleared soft mute only until reboot (NVS save failed)");
+        }
+        bool soft_muted = g_config.soft_mute;
         node_state_t state = g.state;
         bool rx_audio_started = g.jb_started;
         bool directed = g.tx_directed;
@@ -1094,7 +1106,8 @@ static void ring_task(void *arg)
         if (ota_manager_is_active()) ring_controller_set(RING_OTA);
         else if (ota_manager_has_recent_error()) ring_controller_set(RING_ERROR);
         else if (error) ring_controller_set(RING_ERROR);
-        else if (button_pressed(MUTE_SWITCH_GPIO)) ring_controller_set(RING_MUTE);
+        else if (hardware_muted) ring_controller_set(RING_MUTE);
+        else if (soft_muted) ring_controller_set(RING_SOFT_MUTE);
         else if (state == ST_TALKING || state == ST_CLAIMING)
             ring_controller_set(directed ? RING_TALK_REPLY : RING_TALK_BROADCAST);
         /* A CLAIM reserves the floor, but Speaking is strictly a playback

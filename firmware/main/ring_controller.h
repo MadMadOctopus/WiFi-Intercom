@@ -12,6 +12,7 @@ typedef enum {
     RING_TALK_REPLY,
     RING_SPEAKING,
     RING_MUTE,
+    RING_SOFT_MUTE,
     RING_ERROR,
     RING_OTA,
 } ring_mode_t;

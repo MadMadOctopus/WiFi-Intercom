@@ -854,21 +854,18 @@ internal sealed partial class MainForm
 
     private Panel CreateFilterChip(string name)
     {
-        var label = new Label { Text = name, AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Body, Margin = new Padding(9, 5, 0, 0), Cursor = Cursors.Hand };
-        var count = new Label { Text = "0", AutoSize = true, Name = "Count", Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Muted, Margin = new Padding(5, 5, 9, 0), Cursor = Cursors.Hand };
-        var chip = new Panel { Height = 26, AutoSize = true, BackColor = UiStyles.White, Cursor = Cursors.Hand, Margin = new Padding(0, 0, 6, 0), Tag = name };
+        var label = new Label { Text = name, AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Body, Cursor = Cursors.Hand };
+        var count = new Label { Text = "0", AutoSize = true, Name = "Count", Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Muted, Cursor = Cursors.Hand };
+        var chip = new Panel { Height = 26, AutoSize = false, BackColor = UiStyles.White, Cursor = Cursors.Hand, Margin = new Padding(0, 0, 6, 0), Tag = name };
         chip.Controls.Add(label); chip.Controls.Add(count);
-        label.Location = new Point(0, 0);
-        count.Location = new Point(label.PreferredWidth + 5, 0);
+        label.Location = new Point(9, (chip.Height - label.PreferredHeight) / 2);
+        count.Location = new Point(9 + label.PreferredWidth + 5, (chip.Height - count.PreferredHeight) / 2);
         chip.Width = label.PreferredWidth + count.PreferredWidth + 23;
         EventHandler select = (_, _) => { activeFilter = name; RefreshRedesignPeers(); };
         chip.Click += select; label.Click += select; count.Click += select;
         chip.Paint += (_, e) =>
         {
             var active = name == activeFilter;
-            chip.BackColor = active ? UiStyles.Ink : UiStyles.White;
-            label.ForeColor = active ? UiStyles.White : UiStyles.Body;
-            count.ForeColor = active ? UiStyles.Disabled : UiStyles.Muted;
             UiStyles.DrawBorder(e, chip, active ? UiStyles.Ink : UiStyles.ControlBorder);
         };
         filterChips[name] = chip;
@@ -887,8 +884,16 @@ internal sealed partial class MainForm
                 "Legacy" => displayPeers.Count(peer => peer.ProtocolVersion is null or 1),
                 _ => displayPeers.Count,
             };
-            if (chip.Controls.Find("Count", false).OfType<Label>().FirstOrDefault() is { } label) label.Text = count.ToString();
-            chip.Invalidate();
+            if (chip.Controls.Find("Count", false).OfType<Label>().FirstOrDefault() is not { } countLabel) continue;
+            var active = name == activeFilter;
+            var nextText = count.ToString();
+            var changed = countLabel.Text != nextText || chip.BackColor != (active ? UiStyles.Ink : UiStyles.White);
+            countLabel.Text = nextText;
+            chip.BackColor = active ? UiStyles.Ink : UiStyles.White;
+            if (chip.Controls.OfType<Label>().FirstOrDefault(label => label.Name != "Count") is { } nameLabel)
+                nameLabel.ForeColor = active ? UiStyles.White : UiStyles.Body;
+            countLabel.ForeColor = active ? UiStyles.Disabled : UiStyles.Muted;
+            if (changed) chip.Invalidate();
         }
     }
 

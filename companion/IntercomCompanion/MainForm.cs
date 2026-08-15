@@ -22,6 +22,7 @@ internal sealed partial class MainForm : Form
     private readonly Button refreshUsbPorts = new() { Text = "Refresh ports", AutoSize = true };
     private readonly TextBox usbSsid = new() { Width = 150, MaxLength = 32 };
     private readonly TextBox usbPassword = new() { Width = 150, MaxLength = 64, UseSystemPasswordChar = true };
+    private readonly TextBox usbAlias = new() { Width = 150, MaxLength = 24 };
     private readonly Button getUsbConfig = new() { Text = "Read USB config", AutoSize = true };
     private readonly Button applyUsbWifi = new() { Text = "Apply Wi-Fi over USB", AutoSize = true };
     private readonly Label usbStatus = new() { AutoSize = true, ForeColor = Color.DimGray };
@@ -61,6 +62,8 @@ internal sealed partial class MainForm : Form
     private uint? selectedDeviceId;
     private bool refreshingDeviceList;
     private readonly CancellationTokenSource otaStopping = new();
+    private IReadOnlyList<Peer>? otaTargetsOverride;
+    private GlobalPttHotkeys? globalHotkeys;
 
     public MainForm()
     {
@@ -186,6 +189,17 @@ internal sealed partial class MainForm : Form
             node.OtaStatusReceived += (_, eventArgs) => PostToUi(() => ShowOtaStatus(eventArgs));
             node.Start();
             networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
+            try
+            {
+                globalHotkeys = new GlobalPttHotkeys();
+                globalHotkeys.BroadcastPressed += () => PostToUi(() => receiveSession?.PressBroadcast());
+                globalHotkeys.ReplyPressed += () => PostToUi(() => receiveSession?.PressReply());
+                globalHotkeys.Released += () => PostToUi(() => receiveSession?.ReleasePtt());
+            }
+            catch (Exception exception)
+            {
+                RecordActivity($"Global hotkeys unavailable: {exception.Message}");
+            }
         }
         catch (SocketException exception)
         {
@@ -379,8 +393,10 @@ internal sealed partial class MainForm : Form
             otaStatus.Text = $"OTA package rejected: {exception.Message}";
             return;
         }
-        var targets = updateAll ? node.SnapshotActivePeers().Where(peer => peer.SupportsOta).ToArray() : new[] { SelectedPeer }.OfType<Peer>().ToArray();
-        if (targets.Length == 0)
+        var targets = otaTargetsOverride ?? (updateAll
+            ? node.SnapshotActivePeers().Where(peer => peer.SupportsOta).ToArray()
+            : new[] { SelectedPeer }.OfType<Peer>().ToArray());
+        if (targets.Count == 0)
         {
             otaStatus.Text = "Choose an active device first.";
             return;
@@ -416,7 +432,7 @@ internal sealed partial class MainForm : Form
                     throw new TimeoutException($"{peer.Alias} did not report {package.Version} after reboot.");
                 otaStatus.Text = $"{peer.Alias} confirmed {package.Version}.";
             }
-            otaStatus.Text = $"OTA completed: {targets.Length} device(s) confirmed on {package.Version}.";
+            otaStatus.Text = $"OTA completed: {targets.Count} device(s) confirmed on {package.Version}.";
         }
         catch (OperationCanceledException) { otaStatus.Text = "OTA stopped while the companion was closing."; }
         catch (Exception exception) when (exception is SocketException or TimeoutException or IOException or InvalidOperationException or InvalidDataException)
@@ -504,7 +520,7 @@ internal sealed partial class MainForm : Form
         if (node is null) return;
         node.SetAlias(companionAlias.Text);
         companionAlias.Text = node.Alias;
-        identityLabel.Text = $"Companion ID: {node.NodeId:x8}";
+        UpdateIdentityPresentation();
     }
 
     private void PopulateAudioDevices()
@@ -550,6 +566,7 @@ internal sealed partial class MainForm : Form
         {
             StartAudioEngine();
             statusLabel.Text = $"Audio devices applied: {recorder.Name} → {playback.Name}";
+            UpdateIdentityPresentation();
         }
         catch (Exception exception)
         {
@@ -584,6 +601,8 @@ internal sealed partial class MainForm : Form
         {
             var configuration = await UsbConfigurationClient.GetConfigurationAsync(port);
             usbSsid.Text = configuration.Ssid == "YOUR_WIFI_SSID" ? "" : configuration.Ssid;
+            usbAlias.Text = configuration.Alias;
+            usbDeviceIdentity.Text = $"{configuration.Alias} · {configuration.DeviceId:x8}";
             usbPassword.Clear();
             usbStatus.Text = $"Read {port}: {configuration.Alias} ({configuration.DeviceId:x8}). Passwords are never read back.";
         }
@@ -610,7 +629,7 @@ internal sealed partial class MainForm : Form
         usbStatus.Text = $"Writing Wi-Fi configuration to {port}…";
         try
         {
-            var configuration = await UsbConfigurationClient.SetWifiAsync(port, ssid, usbPassword.Text);
+            var configuration = await UsbConfigurationClient.SetWifiAsync(port, ssid, usbPassword.Text, usbAlias.Text.Trim());
             usbPassword.Clear();
             usbStatus.Text = $"Wi-Fi saved for {configuration.Alias}. The device is rebooting onto the network…";
         }
@@ -626,7 +645,7 @@ internal sealed partial class MainForm : Form
 
     private void SetUsbControlsEnabled(bool enabled)
     {
-        usbPort.Enabled = refreshUsbPorts.Enabled = usbSsid.Enabled = usbPassword.Enabled =
+        usbPort.Enabled = refreshUsbPorts.Enabled = usbSsid.Enabled = usbPassword.Enabled = usbAlias.Enabled =
             getUsbConfig.Enabled = applyUsbWifi.Enabled = enabled;
     }
 
@@ -635,6 +654,8 @@ internal sealed partial class MainForm : Form
         if (KeepRunningInTray(e)) return;
         refreshTimer.Stop();
         otaStopping.Cancel();
+        globalHotkeys?.Dispose();
+        globalHotkeys = null;
         // Never wait for a timer/socket/audio worker from the UI close path.
         // Cancellation is enough; process shutdown cleans up background tasks.
         receiveSession?.Stop();

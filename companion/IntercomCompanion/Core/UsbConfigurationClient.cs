@@ -20,9 +20,9 @@ internal static class UsbConfigurationClient
                                                                        CancellationToken cancellationToken = default) =>
         SendAsync(portName, new { cmd = "get" }, cancellationToken);
 
-    public static Task<UsbDeviceConfiguration> SetWifiAsync(string portName, string ssid, string password,
+    public static Task<UsbDeviceConfiguration> SetWifiAsync(string portName, string ssid, string password, string alias,
                                                               CancellationToken cancellationToken = default) =>
-        SendAsync(portName, new { ssid, password }, cancellationToken);
+        SendAsync(portName, new { ssid, password, alias }, cancellationToken);
 
     private static Task<UsbDeviceConfiguration> SendAsync(string portName, object request,
                                                             CancellationToken cancellationToken) =>

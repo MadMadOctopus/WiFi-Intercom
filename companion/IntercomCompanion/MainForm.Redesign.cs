@@ -28,7 +28,7 @@ internal sealed partial class MainForm
     private readonly TextBox groupConfirmation = new() { MaxLength = 4, CharacterCasing = CharacterCasing.Upper, Width = 90 };
     private readonly CheckBox applyCompanionGroup = new() { Text = "This companion", Checked = true, AutoSize = true };
     private readonly CheckBox applyActiveGroup = new() { Text = "All active devices, sequentially", AutoSize = true };
-    private readonly Button applyGroup = new() { Text = "Change group ID", BackColor = Color.FromArgb(178, 34, 34), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Enabled = false, AutoSize = true };
+    private readonly DisabledTintButton applyGroup = new() { Text = "Change group ID", BackColor = UiStyles.Red, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Enabled = false, AutoSize = true, DisabledTint = Color.FromArgb(208, 138, 138) };
     private readonly Label diagnosticsCounters = new() { AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
     private readonly CheckBox localMute = new() { Text = "Mute my speaker", AutoSize = true };
     private readonly Label identityMicrophone = new() { AutoEllipsis = true };
@@ -39,6 +39,7 @@ internal sealed partial class MainForm
     private readonly Dictionary<string, Panel> filterChips = [];
     private readonly FlowLayoutPanel otaQueue = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly Label otaPackageSummary = new() { AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary };
+    private readonly Label otaPackageName = new() { AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.Ink };
     private readonly HashSet<uint> queuedOtaDevices = [];
     private string activeSettingsPage = "USB";
     private IReadOnlyList<Peer> displayPeers = [];
@@ -327,12 +328,12 @@ internal sealed partial class MainForm
     private void BuildSettingsPage()
     {
         settingsPage.Controls.Clear();
-        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, SplitterDistance = 236, IsSplitterFixed = true, BackColor = UiStyles.Border };
+        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, SplitterDistance = 236, Panel1MinSize = 236, SplitterWidth = 1, IsSplitterFixed = true, BackColor = UiStyles.Border };
         split.Panel1.BackColor = UiStyles.Chrome;
         split.Panel2.BackColor = UiStyles.Surface;
         settingsNavigation.Controls.Clear();
         settingsNavigation.Padding = new Padding(0, 16, 0, 0);
-        settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = UiStyles.Muted, AutoSize = true, Padding = new Padding(18, 0, 0, 10), Font = UiStyles.Hint });
+        settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = UiStyles.Muted, AutoSize = true, Padding = new Padding(18, 0, 0, 10), Font = UiStyles.Hint, Margin = Padding.Empty });
         foreach (var (title, page) in new[] { ("Set up a device (USB)", "USB"), ("Group and device IDs", "Group"), ("Firmware", "Firmware"), ("Identity, audio, shortcuts", "Identity"), ("Diagnostics", "Diagnostics") })
         {
             var item = SettingsNavItem(title, page);
@@ -341,12 +342,12 @@ internal sealed partial class MainForm
         }
         var footer = new Label
         {
-            Dock = DockStyle.Bottom, AutoSize = false, Height = 92, Padding = new Padding(18, 14, 18, 0),
+            AutoSize = true, MaximumSize = new Size(200, 0), Padding = new Padding(18, 0, 18, 0), Margin = new Padding(0, 14, 0, 0),
             Text = "Settings are rare. Nothing here blocks discovery, talking or the device list.",
             Font = UiStyles.Hint, ForeColor = UiStyles.Muted,
         };
+        settingsNavigation.Controls.Add(footer);
         split.Panel1.Controls.Add(settingsNavigation);
-        split.Panel1.Controls.Add(footer);
         split.Panel2.Controls.Add(BuildSettingsDetail());
         settingsPage.Controls.Add(split);
     }
@@ -441,14 +442,19 @@ internal sealed partial class MainForm
         AddField(summaryFields, "This companion's ID", new Label { Text = $"{settings.NodeId:x8} · generated once, unique on this PC", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Secondary, Padding = new Padding(0, 5, 0, 0) });
         summary.Controls.Add(summaryFields);
 
-        var danger = new Panel { BackColor = UiStyles.RedTint, Width = 760, AutoSize = true, Padding = new Padding(22, 14, 18, 16), Margin = new Padding(0, 18, 0, 0) };
+        var danger = new TableLayoutPanel { BackColor = UiStyles.RedTint, Width = 760, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Margin = new Padding(0, 18, 0, 0) };
+        danger.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        danger.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         danger.Paint += (_, e) => { UiStyles.DrawBorder(e, danger, UiStyles.Red); using var brush = new SolidBrush(UiStyles.Red); e.Graphics.FillRectangle(brush, 0, 0, 4, danger.Height); };
-        var dangerStack = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 716, Margin = Padding.Empty };
-        dangerStack.Controls.Add(new Label { Text = "Change the group ID", AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.DarkRed, Margin = Padding.Empty });
-        dangerStack.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(122, 32, 32), Margin = new Padding(0, 4, 0, 12) });
-        dangerStack.Controls.Add(UiStyles.Rule(Color.FromArgb(242, 214, 214)));
-        dangerStack.Controls.Add(new Label { Text = "· Devices on the old group disappear from this companion and can no longer hear it.\n· Each device must be changed separately, over USB or with a configuration write, and each one reboots.\n· A device you cannot reach keeps the old group until you get to it physically.\n· A half-finished change leaves two isolated intercoms.", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Margin = new Padding(0, 12, 0, 12) });
+        var dangerHeader = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 756, Padding = new Padding(18, 14, 18, 14), Margin = Padding.Empty };
+        dangerHeader.Controls.Add(new Label { Text = "Change the group ID", AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.DarkRed, Margin = Padding.Empty });
+        dangerHeader.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(122, 32, 32), Margin = new Padding(0, 4, 0, 0) });
+        dangerHeader.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(242, 214, 214)); e.Graphics.DrawLine(pen, 0, dangerHeader.Height - 1, dangerHeader.Width, dangerHeader.Height - 1); };
+        var dangerBody = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = 756, Padding = new Padding(18, 16, 18, 16), Margin = Padding.Empty };
+        var dangerStack = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 720, Margin = Padding.Empty };
+        dangerStack.Controls.Add(new Label { Text = $"· Devices still on {settings.MeshId} disappear from this companion and can no longer hear it.\n· Each device must be changed separately, over USB or with a configuration write, and each one reboots.\n· A device you cannot reach right now keeps the old group until you get to it physically.\n· Two groups on the same LAN never mix, so a half-finished change leaves two isolated intercoms.", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Margin = Padding.Empty });
         var fields = FormGrid(170);
+        fields.Margin = new Padding(0, 18, 0, 0);
         UiStyles.StyleInput(groupId, 140); UiStyles.StyleInput(groupConfirmation, 140);
         AddField(fields, "New group ID", groupId, new Label { Text = "exactly 4 characters, A–Z and 0–9", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(10, 5, 0, 0) });
         AddField(fields, $"Type {settings.MeshId} to confirm", groupConfirmation);
@@ -462,7 +468,9 @@ internal sealed partial class MainForm
         action.Controls.Add(new Label { Text = "Enabled once the confirmation matches.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(12, 7, 0, 0) });
         fields.Controls.Add(action, 1, fields.RowCount); fields.RowCount++;
         dangerStack.Controls.Add(fields);
-        danger.Controls.Add(dangerStack);
+        dangerBody.Controls.Add(dangerStack);
+        danger.Controls.Add(dangerHeader, 0, 0);
+        danger.Controls.Add(dangerBody, 0, 1);
 
         var ids = UiStyles.BorderedPanel(new Padding(20, 14, 20, 14)); ids.Width = 760; ids.AutoSize = true; ids.Margin = new Padding(0, 16, 0, 0); ids.Paint += (_, e) => UiStyles.DrawBorder(e, ids);
         var idStack = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 718 };
@@ -483,7 +491,8 @@ internal sealed partial class MainForm
         var packageLayout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
         packageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); packageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var packageInfo = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty };
-        packageInfo.Controls.Add(new Label { Text = "Signed firmware package", AutoSize = true, Font = UiStyles.PanelHeading });
+        otaPackageName.Text = "No package selected";
+        packageInfo.Controls.Add(otaPackageName);
         otaPackageSummary.Text = "Choose a signed OTA package to verify it here.";
         packageInfo.Controls.Add(otaPackageSummary);
         browseOtaManifest.Text = "Choose another package…"; StyleSecondary(browseOtaManifest); browseOtaManifest.Anchor = AnchorStyles.Right;
@@ -491,7 +500,11 @@ internal sealed partial class MainForm
         package.Controls.Add(packageLayout);
 
         var queuePanel = UiStyles.BorderedPanel(Padding.Empty); queuePanel.Width = 820; queuePanel.AutoSize = true; queuePanel.Margin = new Padding(0, 16, 0, 0); queuePanel.Paint += (_, e) => UiStyles.DrawBorder(e, queuePanel);
-        var queueHeader = new TableLayoutPanel { Dock = DockStyle.Top, Height = 52, ColumnCount = 3, Padding = new Padding(20, 0, 20, 0) };
+        var queueLayout = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Width = 818, Margin = Padding.Empty };
+        queueLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        queueLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        queueLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var queueHeader = new TableLayoutPanel { Dock = DockStyle.Fill, Height = 52, ColumnCount = 3, Padding = new Padding(20, 0, 20, 0) };
         queueHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queueHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); queueHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var queueCaption = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Left, Margin = Padding.Empty };
         queueCaption.Controls.Add(new Label { Text = "Update queue", AutoSize = true, Font = new Font(UiStyles.BodyFont, FontStyle.Bold) });
@@ -499,12 +512,16 @@ internal sealed partial class MainForm
         var addAll = PlainButton("Add all compatible"); addAll.Click += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
         var start = new Button { Text = "Start queue…" }; StylePrimary(start); start.Click += async (_, _) => await StartQueuedOtaAsync();
         queueHeader.Controls.Add(queueCaption, 0, 0); queueHeader.Controls.Add(addAll, 1, 0); queueHeader.Controls.Add(start, 2, 0);
-        var queueHost = new Panel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(20, 0, 20, 14), BackColor = UiStyles.White };
+        var queueHost = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Width = 818, Padding = new Padding(20, 0, 20, 0), BackColor = UiStyles.White, Margin = Padding.Empty };
         otaQueue.Width = 778; otaQueue.Margin = Padding.Empty; queueHost.Controls.Add(otaQueue);
-        queuePanel.Controls.Add(queueHost); queuePanel.Controls.Add(UiStyles.Rule()); queuePanel.Controls.Add(queueHeader);
+        var queueFooter = new Label { Text = "Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.", AutoSize = true, MaximumSize = new Size(778, 0), Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(20, 14, 20, 14), Margin = Padding.Empty };
+        queueLayout.Controls.Add(queueHeader, 0, 0);
+        queueLayout.Controls.Add(queueHost, 0, 1);
+        queueLayout.Controls.Add(queueFooter, 0, 2);
+        queueLayout.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, 51, queueLayout.Width, 51); };
+        queuePanel.Controls.Add(queueLayout);
         otaStatus.MaximumSize = new Size(820, 0); otaStatus.Font = UiStyles.SecondaryFont; otaStatus.Margin = new Padding(0, 12, 0, 0);
-        var note = new Label { Text = "Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.", AutoSize = true, MaximumSize = new Size(820, 0), Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Margin = new Padding(0, 12, 0, 0) };
-        content.Controls.Add(package); content.Controls.Add(queuePanel); content.Controls.Add(otaStatus); content.Controls.Add(note);
+        content.Controls.Add(package); content.Controls.Add(queuePanel); content.Controls.Add(otaStatus);
         return page;
     }
 

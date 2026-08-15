@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.ComponentModel;
 
 namespace IntercomCompanion;
 
@@ -110,4 +111,25 @@ internal static class UiStyles
         BackColor = color ?? RowRule,
         Margin = Padding.Empty,
     };
+}
+
+/// <summary>Retains the design's tinted disabled primary state instead of
+/// allowing the Windows button renderer to replace it with system grey.</summary>
+internal sealed class DisabledTintButton : Button
+{
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Color DisabledTint { get; set; } = Color.FromArgb(208, 138, 138);
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+    {
+        base.OnPaint(eventArgs);
+        if (Enabled) return;
+
+        using var brush = new SolidBrush(DisabledTint);
+        eventArgs.Graphics.FillRectangle(brush, ClientRectangle);
+        using var pen = new Pen(DisabledTint);
+        eventArgs.Graphics.DrawRectangle(pen, 0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
+        TextRenderer.DrawText(eventArgs.Graphics, Text, Font, ClientRectangle, Color.White,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+    }
 }

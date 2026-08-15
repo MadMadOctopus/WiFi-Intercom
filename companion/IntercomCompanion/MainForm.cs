@@ -363,11 +363,14 @@ internal sealed partial class MainForm : Form
             var package = OtaPackage.Load(dialog.FileName);
             otaManifest.Text = package.ManifestPath;
             otaStatus.Text = $"Verified {package.Version}: {Path.GetFileName(package.ImagePath)} ({package.Size / 1024.0:0.0} KiB).";
-            otaPackageSummary.Text = $"{package.Version}\n{Path.GetFileName(package.ManifestPath)} · {package.Size / 1024.0:0.0} KiB · signature verified";
+            otaPackageName.Text = package.Version;
+            otaPackageSummary.Text = $"{Path.GetFileName(package.ManifestPath)} · {package.Size / 1024.0:0.0} KiB · signature verified";
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
         {
             otaManifest.Clear();
+            otaPackageName.Text = "No package selected";
+            otaPackageSummary.Text = "Package could not be verified.";
             otaStatus.Text = $"OTA package rejected: {exception.Message}";
         }
         UpdateSelectedDeviceActions();

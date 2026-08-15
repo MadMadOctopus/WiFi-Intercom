@@ -51,8 +51,8 @@ internal sealed partial class MainForm : Form
     // This is a local draft, not a view of the live device list. Discovery
     // must never lock or discard a user's in-progress settings edit.
     private readonly TextBox alias = new();
-    private readonly NumericUpDown volume = new() { Minimum = 64, Maximum = 1024 };
-    private readonly NumericUpDown brightness = new() { Minimum = 0, Maximum = 255 };
+    private readonly FlatSlider volume = new() { Minimum = 64, Maximum = 1024, Width = 220, AccentColor = UiStyles.Green };
+    private readonly FlatSlider brightness = new() { Minimum = 0, Maximum = 255, Width = 220, AccentColor = UiStyles.Amber };
     private readonly CheckBox buttonsSwapped = new();
     private readonly ComboBox orientation = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly Button getConfig = new() { Text = "Get configuration", Enabled = false, AutoSize = true };
@@ -323,8 +323,8 @@ internal sealed partial class MainForm : Form
         RefreshRedesignPeers();
         if (selectedDeviceId != eventArgs.NodeId) return;
         alias.Text = eventArgs.Configuration.Alias;
-        volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, (int)volume.Minimum, (int)volume.Maximum);
-        brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, (int)brightness.Minimum, (int)brightness.Maximum);
+        volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, volume.Minimum, volume.Maximum);
+        brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, brightness.Minimum, brightness.Maximum);
         buttonsSwapped.Checked = eventArgs.Configuration.ButtonsSwapped;
         orientation.SelectedItem = eventArgs.Configuration.RingOrientation.ToString();
     }

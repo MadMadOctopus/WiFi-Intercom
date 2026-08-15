@@ -591,10 +591,13 @@ internal sealed partial class MainForm
         copy.Click += (_, _) => { try { Clipboard.SetText(ReadDiagnosticLog()); } catch { } };
         var save = PlainButton("Save log to file…");
         save.Click += (_, _) => SaveDiagnosticLog();
-        var log = new RichTextBox { Width = 820, Height = 300, ReadOnly = true, DetectUrls = false, BorderStyle = BorderStyle.None, BackColor = Color.FromArgb(28, 31, 35), ForeColor = UiStyles.Disabled, Font = UiStyles.Log, ScrollBars = RichTextBoxScrollBars.Vertical, Padding = new Padding(16, 14, 16, 14), Margin = new Padding(0, 18, 0, 0) };
+        var logFrame = new Panel { Width = 820, Height = 300, BackColor = Color.FromArgb(28, 31, 35), Padding = new Padding(16, 14, 0, 14), Margin = new Padding(0, 18, 0, 0) };
+        logFrame.Paint += (_, e) => UiStyles.DrawBorder(e, logFrame, Color.FromArgb(16, 18, 21));
+        var log = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, DetectUrls = false, BorderStyle = BorderStyle.None, BackColor = Color.FromArgb(28, 31, 35), ForeColor = UiStyles.Disabled, Font = UiStyles.Log, ScrollBars = RichTextBoxScrollBars.Vertical, Margin = Padding.Empty };
         AppendDiagnosticLines(log, ReadDiagnosticLog());
+        logFrame.Controls.Add(log);
         content.Controls.Add(cards);
-        content.Controls.Add(log);
+        content.Controls.Add(logFrame);
         var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 12, 0, 0) };
         actions.Controls.AddRange([copy, Spacer(8), save]);
         content.Controls.Add(actions);
@@ -784,21 +787,26 @@ internal sealed partial class MainForm
             configurations[peer.NodeId] = current;
             using var dialog = new Form { Text = $"Configure {peer.Alias}", ClientSize = new Size(440, 350), StartPosition = FormStartPosition.CenterParent, Font = new Font("Segoe UI", 9), MinimizeBox = false, MaximizeBox = false };
             var aliasBox = new TextBox { Text = current.Alias, Width = 220 };
-            var volumeBox = new NumericUpDown { Minimum = 64, Maximum = 1024, Value = Math.Clamp(current.SpeakerVolume, 64, 1024), Width = 100 };
-            var brightnessBox = new NumericUpDown { Minimum = 0, Maximum = 255, Value = Math.Clamp(current.LedBrightness, 0, 255), Width = 100 };
+            var volumeBox = new FlatSlider { Minimum = 64, Maximum = 1024, Value = Math.Clamp(current.SpeakerVolume, 64, 1024), Width = 220, AccentColor = UiStyles.Green };
+            var brightnessBox = new FlatSlider { Minimum = 0, Maximum = 255, Value = Math.Clamp(current.LedBrightness, 0, 255), Width = 220, AccentColor = UiStyles.Amber };
             var softMuteBox = new CheckBox { Text = current.HardwareMuted ? "Physical mute slider is on" : "Soft mute playback", Checked = current.SoftMute, Enabled = !current.HardwareMuted, AutoSize = true };
             var swapped = new CheckBox { Text = "Buttons swapped", Checked = current.ButtonsSwapped, AutoSize = true };
             var orientationBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 }; orientationBox.Items.AddRange(["0", "180"]); orientationBox.SelectedItem = current.RingOrientation.ToString();
-            var deviceId = new NumericUpDown { Minimum = 1, Maximum = uint.MaxValue, Value = current.DeviceId, Width = 140 };
+            var deviceId = new TextBox { Text = current.DeviceId.ToString(), Width = 140, MaxLength = 10 };
+            UiStyles.StyleInput(aliasBox, 240); UiStyles.StyleInput(deviceId, 140); UiStyles.StyleInput(orientationBox, 140);
             var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(20) };
             fields.Controls.Add(new Label { Text = "Edits remain local until Apply to device. Group, device ID, brightness, buttons and orientation restart after acknowledgement.", AutoSize = true, MaximumSize = new Size(390, 0), ForeColor = Color.FromArgb(99, 103, 109) });
             fields.Controls.Add(Labeled("Alias", aliasBox)); fields.Controls.Add(Labeled("Speaker volume", volumeBox)); fields.Controls.Add(Labeled("Ring brightness", brightnessBox)); fields.Controls.Add(softMuteBox); fields.Controls.Add(swapped); fields.Controls.Add(Labeled("Ring centre", orientationBox)); fields.Controls.Add(Labeled("Device ID", deviceId));
             var apply = new Button { Text = "Apply to device", DialogResult = DialogResult.OK, BackColor = Color.FromArgb(21, 101, 192), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, AutoSize = true };
             fields.Controls.Add(apply); dialog.AcceptButton = apply; dialog.Controls.Add(fields);
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            var requestedId = checked((uint)deviceId.Value);
+            if (!uint.TryParse(deviceId.Text, out var requestedId) || requestedId == 0)
+            {
+                MessageBox.Show(this, "Device ID must be a non-zero unsigned number.", "Invalid device ID", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             if (requestedId != peer.NodeId && node.Peers.Any(other => other.NodeId != peer.NodeId && other.NodeId == requestedId)) { MessageBox.Show(this, "That device ID is already held by a visible device. Nothing was sent.", "Duplicate device ID", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            var next = current with { Alias = aliasBox.Text.Trim(), SpeakerVolume = (int)volumeBox.Value, LedBrightness = (int)brightnessBox.Value, SoftMute = softMuteBox.Checked, ButtonsSwapped = swapped.Checked, RingOrientation = int.Parse(orientationBox.Text), DeviceId = requestedId };
+            var next = current with { Alias = aliasBox.Text.Trim(), SpeakerVolume = volumeBox.Value, LedBrightness = brightnessBox.Value, SoftMute = softMuteBox.Checked, ButtonsSwapped = swapped.Checked, RingOrientation = int.Parse(orientationBox.Text), DeviceId = requestedId };
             var reply = await node.SetConfigurationAsync(peer, next);
             configurations[peer.NodeId] = reply.Configuration; knownDevices.Remember(peer, reply.Configuration); RefreshRedesignPeers();
         }

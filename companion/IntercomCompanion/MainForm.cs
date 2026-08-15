@@ -12,7 +12,7 @@ internal sealed partial class MainForm : Form
     private IntercomNode? node;
     private AudioEngine? audio;
     private ReceiveSession? receiveSession;
-    private readonly Label identityLabel = new() { AutoSize = true };
+    private Label identityLabel = new() { AutoSize = true };
     private readonly TextBox companionAlias = new() { Width = 180 };
     private readonly Button saveCompanionAlias = new() { Text = "Save companion alias", AutoSize = true };
     private readonly ComboBox recordingDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -44,9 +44,9 @@ internal sealed partial class MainForm : Form
         Dock = DockStyle.Fill, FullRowSelect = true, GridLines = true,
         MultiSelect = false, View = View.Details
     };
-    private readonly Button broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
+    private Button broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
     private readonly Button reply = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
-    private readonly Button replySurface = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
+    private Button replySurface = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
     private readonly Button selected = CreatePttButton("Hold to selected device", Color.FromArgb(106, 27, 154));
     // This is a local draft, not a view of the live device list. Discovery
     // must never lock or discard a user's in-progress settings edit.
@@ -363,6 +363,7 @@ internal sealed partial class MainForm : Form
             var package = OtaPackage.Load(dialog.FileName);
             otaManifest.Text = package.ManifestPath;
             otaStatus.Text = $"Verified {package.Version}: {Path.GetFileName(package.ImagePath)} ({package.Size / 1024.0:0.0} KiB).";
+            otaPackageSummary.Text = $"{package.Version}\n{Path.GetFileName(package.ManifestPath)} · {package.Size / 1024.0:0.0} KiB · signature verified";
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
         {
@@ -475,16 +476,18 @@ internal sealed partial class MainForm : Form
     {
         (statusLabel.Text, statusLabel.ForeColor, nowKicker.Text) = sessionState switch
         {
-            IntercomState.Claiming => ("Claiming floor", Color.FromArgb(249, 168, 37), "REQUESTING"),
-            IntercomState.Talking => ("Talking", Color.FromArgb(46, 125, 50), "BROADCASTING"),
+            IntercomState.Claiming => ("Claiming floor", UiStyles.Amber, "CLAIMING"),
+            IntercomState.Talking => ("Talking", UiStyles.Purple, "TALKING"),
             IntercomState.Receiving => ("Receiving", Color.FromArgb(21, 101, 192), "RECEIVING"),
-            IntercomState.WaitingForFloor => ("Floor occupied", Color.FromArgb(249, 168, 37), "WAITING"),
-            _ => ("Idle", Color.FromArgb(46, 125, 50), "READY"),
+            IntercomState.WaitingForFloor => ("Floor occupied", UiStyles.Amber, "FLOOR OCCUPIED"),
+            _ => ("Idle", UiStyles.Green, "IDLE"),
         };
         nowDetail.Text = sessionState == IntercomState.Receiving && receiveSession?.LastTalker is { } talker
-            ? $"{talker.Alias} is speaking" : statusLabel.Text;
+            ? $"{talker.Alias} is speaking · output buffer {audio?.BufferedMilliseconds ?? 0} ms"
+            : sessionState == IntercomState.Idle ? $"nothing on the floor · output buffer {audio?.BufferedMilliseconds ?? 0} ms" : statusLabel.Text;
         nowTitle.Text = statusLabel.Text;
         nowTitle.ForeColor = statusLabel.ForeColor;
+        UpdateNowBarAppearance();
         RecordActivity(statusLabel.Text);
     }
 

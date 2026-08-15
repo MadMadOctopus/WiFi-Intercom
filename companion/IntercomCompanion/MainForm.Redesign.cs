@@ -11,14 +11,15 @@ internal sealed partial class MainForm
     private readonly Dictionary<uint, DeviceCard> deviceCards = [];
     private readonly Dictionary<uint, DeviceConfiguration> configurations = [];
     private readonly Dictionary<uint, DateTimeOffset> rememberedAt = [];
-    private readonly FlowLayoutPanel deviceGrid = new() { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = true, BackColor = Color.FromArgb(245, 246, 247), Padding = new Padding(10, 8, 2, 8) };
-    private readonly FlowLayoutPanel offlineDevices = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = Color.White, Padding = new Padding(10) };
-    private readonly TextBox deviceFilter = new() { Width = 145, PlaceholderText = "Alias or ID" };
-    private readonly Label deviceCount = new() { AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold) };
-    private readonly Label nowKicker = new() { AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 8, FontStyle.Regular) };
-    private readonly Label nowTitle = new() { AutoSize = true, Font = new Font("Segoe UI", 22, FontStyle.Bold) };
-    private readonly Label nowDetail = new() { AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 9) };
-    private readonly ListBox activity = new() { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 8) };
+    private readonly FlowLayoutPanel deviceGrid = new() { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = true, BackColor = UiStyles.Surface, Padding = new Padding(0, 0, 0, 2) };
+    private readonly FlowLayoutPanel offlineDevices = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiStyles.White, Padding = Padding.Empty };
+    private readonly Panel offlineFrame = new() { Dock = DockStyle.Top, AutoSize = true, BackColor = UiStyles.White, Padding = Padding.Empty, Visible = false };
+    private readonly TextBox deviceFilter = new() { Width = 150, PlaceholderText = "Alias or ID" };
+    private readonly Label deviceCount = new() { AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary };
+    private readonly Label nowKicker = new() { AutoSize = true, ForeColor = UiStyles.Secondary, Font = UiStyles.Hint };
+    private readonly Label nowTitle = new() { AutoSize = true, Font = UiStyles.NowTitle };
+    private readonly Label nowDetail = new() { AutoSize = false, ForeColor = UiStyles.Secondary, Font = UiStyles.SecondaryFont, TextAlign = ContentAlignment.MiddleRight };
+    private readonly FlowLayoutPanel activity = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiStyles.White, Padding = Padding.Empty };
     private readonly Panel pageHost = new() { Dock = DockStyle.Fill };
     private readonly Panel talkPage = new() { Dock = DockStyle.Fill };
     private readonly Panel settingsPage = new() { Dock = DockStyle.Fill, Visible = false };
@@ -35,7 +36,9 @@ internal sealed partial class MainForm
     private readonly Label usbDeviceIdentity = new() { AutoSize = true, ForeColor = Color.FromArgb(79, 91, 102) };
     private readonly FlowLayoutPanel settingsNavigation = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly Dictionary<string, Panel> settingsNavItems = [];
+    private readonly Dictionary<string, Panel> filterChips = [];
     private readonly FlowLayoutPanel otaQueue = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+    private readonly Label otaPackageSummary = new() { AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary };
     private readonly HashSet<uint> queuedOtaDevices = [];
     private string activeSettingsPage = "USB";
     private IReadOnlyList<Peer> displayPeers = [];
@@ -43,6 +46,13 @@ internal sealed partial class MainForm
     private float pulsePhase;
     private NotifyIcon? trayIcon;
     private bool allowExit;
+    private readonly TableLayoutPanel shell = new() { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = UiStyles.Surface };
+    private readonly TableLayoutPanel identityStrip = new() { Dock = DockStyle.Fill, BackColor = UiStyles.White, Padding = new Padding(20, 4, 20, 4), ColumnCount = 9 };
+    private readonly Panel identityDot = new() { Size = new Size(9, 9), Anchor = AnchorStyles.Left };
+    private readonly Panel nowBar = new() { Dock = DockStyle.Fill };
+    private readonly Panel nowAccent = new() { Size = new Size(4, 44), Anchor = AnchorStyles.Left };
+    private readonly Panel statusBar = new() { Dock = DockStyle.Fill, BackColor = UiStyles.Chrome, Padding = new Padding(16, 0, 16, 0) };
+    private readonly Label statusRight = new() { AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Right };
 
     private void BuildRedesign()
     {
@@ -50,192 +60,274 @@ internal sealed partial class MainForm
         Text = "Wi-Fi Intercom Companion";
         MinimumSize = new Size(1024, 700);
         Size = new Size(1280, 820);
-        BackColor = Color.FromArgb(245, 246, 247);
+        BackColor = UiStyles.Surface;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AcceptButton = null;
 
-        // The application name belongs in the native Windows title bar.  This strip is
-        // deliberately only the companion's identity and local audio state.
-        var identityStrip = new TableLayoutPanel { Dock = DockStyle.Top, Height = 56, BackColor = Color.White, Padding = new Padding(20, 4, 20, 4), ColumnCount = 8 };
-        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
-        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 290));
-        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
-        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        shell.Controls.Clear();
+        shell.RowStyles.Clear();
+        shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+
+        // The original (pre-redesign) controls were children of the legacy
+        // surface.  Create redesign-owned controls here rather than moving
+        // children out of a surface which Controls.Clear() has disposed.
+        identityLabel = new Label { AutoSize = false };
+
+        identityStrip.Controls.Clear();
+        identityStrip.ColumnStyles.Clear();
+        identityStrip.RowStyles.Clear();
+        identityStrip.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 19));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 244));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 1));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+        identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         identityStrip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var glyphSize = BrandIconFrame(16);
-        using var glyphIcon = BrandAssets.AppIconAt(glyphSize);
-        var identityGlyph = new PictureBox
-        {
-            Image = glyphIcon.ToBitmap(),
-            Size = new Size(glyphSize, glyphSize),
-            SizeMode = PictureBoxSizeMode.CenterImage,
-            Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 0, 8, 0),
-        };
+        identityDot.BackColor = UiStyles.Green;
+        var identityBlock = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty };
+        identityBlock.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        identityBlock.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        identityBlock.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         identityLabel.AutoSize = false;
         identityLabel.Dock = DockStyle.Fill;
-        identityLabel.Font = new Font("Segoe UI", 8.5f);
-        identityLabel.TextAlign = ContentAlignment.MiddleLeft;
+        identityLabel.Font = UiStyles.SecondaryFont;
+        identityLabel.TextAlign = ContentAlignment.BottomLeft;
+        var identityMeta = new Label { Name = "IdentityMeta", Dock = DockStyle.Fill, ForeColor = UiStyles.Secondary, Font = UiStyles.Hint, TextAlign = ContentAlignment.TopLeft };
+        identityBlock.Controls.Add(identityLabel, 0, 0);
+        identityBlock.Controls.Add(identityMeta, 0, 1);
         foreach (var label in new[] { identityMicrophone, identitySpeaker })
         {
             label.AutoSize = false;
             label.Dock = DockStyle.Fill;
-            label.Font = new Font("Segoe UI", 8.5f);
-            label.ForeColor = Color.FromArgb(99, 103, 109);
+            label.Font = UiStyles.SecondaryFont;
+            label.ForeColor = UiStyles.Body;
             label.TextAlign = ContentAlignment.MiddleLeft;
         }
         localMute.Appearance = Appearance.Button;
         localMute.AutoSize = false;
-        localMute.Width = 122;
-        localMute.Height = 30;
+        localMute.Width = 130;
+        localMute.Height = 29;
         localMute.TextAlign = ContentAlignment.MiddleCenter;
+        localMute.Font = UiStyles.SecondaryFont;
         localMute.FlatStyle = FlatStyle.Flat;
-        localMute.FlatAppearance.BorderColor = Color.FromArgb(173, 178, 184);
+        localMute.BackColor = UiStyles.White;
+        localMute.FlatAppearance.BorderColor = UiStyles.ControlBorder;
+        localMute.FlatAppearance.CheckedBackColor = Color.FromArgb(242, 244, 245);
         localMute.CheckedChanged += (_, _) => audio?.SetLocalPlaybackMuted(localMute.Checked);
-        var changeAudio = new LinkLabel { Text = "Change…", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(4, 0, 12, 0), Font = new Font("Segoe UI", 9) };
+        var changeAudio = new LinkLabel { Text = "Change…", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(22, 0, 0, 0), Font = UiStyles.SecondaryFont, LinkColor = UiStyles.Blue, ActiveLinkColor = UiStyles.DeepBlue };
         changeAudio.Click += (_, _) => ShowSettings("Identity");
         var settingsButton = PlainButton("Settings…");
-        settingsButton.Height = 30;
         settingsButton.Margin = new Padding(8, 0, 0, 0);
         settingsButton.Click += (_, _) => ShowSettings("USB");
-        identityStrip.Controls.Add(identityGlyph, 0, 0);
-        identityStrip.Controls.Add(identityLabel, 1, 0);
-        identityStrip.Controls.Add(identityMicrophone, 2, 0);
-        identityStrip.Controls.Add(identitySpeaker, 3, 0);
-        identityStrip.Controls.Add(changeAudio, 4, 0);
-        identityStrip.Controls.Add(localMute, 6, 0);
-        identityStrip.Controls.Add(settingsButton, 7, 0);
-        identityStrip.Paint += (_, eventArgs) => eventArgs.Graphics.DrawLine(new Pen(Color.FromArgb(222, 225, 229)), 0, identityStrip.Height - 1, identityStrip.Width, identityStrip.Height - 1);
+        identityStrip.Controls.Add(identityDot, 0, 0);
+        identityStrip.Controls.Add(identityBlock, 1, 0);
+        identityStrip.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(230, 232, 234), Margin = new Padding(0, 10, 0, 10) }, 2, 0);
+        identityStrip.Controls.Add(identityMicrophone, 3, 0);
+        identityStrip.Controls.Add(identitySpeaker, 4, 0);
+        identityStrip.Controls.Add(changeAudio, 5, 0);
+        identityStrip.Controls.Add(localMute, 7, 0);
+        identityStrip.Controls.Add(settingsButton, 8, 0);
+        identityStrip.Paint += (_, eventArgs) => UiStyles.DrawBorder(eventArgs, identityStrip, UiStyles.Border);
 
-        var nowBar = new Panel { Dock = DockStyle.Top, Height = 76, BackColor = Color.FromArgb(232, 243, 251), Padding = new Padding(20, 0, 20, 0) };
-        var nowAccent = new Panel { Location = new Point(20, 16), Size = new Size(4, 44), BackColor = Color.FromArgb(46, 125, 50), Anchor = AnchorStyles.Left | AnchorStyles.Top };
-        // statusLabel remains the state source for the original audio code;
-        // nowTitle is the dedicated visual owner for this redesigned strip.
+        nowBar.Controls.Clear();
+        nowBar.BackColor = UiStyles.Surface;
+        nowAccent.BackColor = UiStyles.Green;
+        nowAccent.Location = new Point(20, 16);
         statusLabel.Visible = false;
-        nowTitle.Location = new Point(40, 29);
+        nowTitle.Location = new Point(40, 26);
         nowTitle.Text = "Idle";
-        nowTitle.ForeColor = Color.FromArgb(46, 125, 50);
-        nowKicker.Location = new Point(40, 14);
-        nowKicker.Text = "READY";
-        nowDetail.AutoSize = false;
-        nowDetail.Size = new Size(360, 44);
-        nowDetail.Location = new Point(Math.Max(440, nowBar.Width - 380), 16);
+        nowTitle.ForeColor = UiStyles.Green;
+        nowKicker.Location = new Point(40, 11);
+        nowKicker.Text = "IDLE";
+        nowDetail.Size = new Size(370, 44);
+        nowDetail.Location = new Point(Math.Max(440, nowBar.Width - 390), 16);
         nowDetail.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        nowDetail.TextAlign = ContentAlignment.MiddleRight;
         nowDetail.Visible = true;
         nowBar.Controls.AddRange([nowAccent, nowKicker, nowTitle, nowDetail]);
-        nowBar.Paint += (_, _) => nowAccent.BackColor = nowTitle.ForeColor;
-        nowBar.Paint += (_, eventArgs) => eventArgs.Graphics.DrawLine(new Pen(Color.FromArgb(202, 220, 232)), 0, nowBar.Height - 1, nowBar.Width, nowBar.Height - 1);
-        nowTitle.BringToFront();
-        nowDetail.BringToFront();
+        nowBar.Paint += (_, eventArgs) => UiStyles.DrawBorder(eventArgs, nowBar, UiStyles.Border);
+
+        statusBar.Controls.Clear();
+        networkLabel.AutoSize = true;
+        networkLabel.Font = UiStyles.Hint;
+        networkLabel.ForeColor = UiStyles.Secondary;
+        networkLabel.Anchor = AnchorStyles.Left;
+        statusRight.Text = "Running in the notification area · Ctrl+Alt+B to broadcast";
+        var statusLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        statusLayout.Controls.Add(networkLabel, 0, 0);
+        statusLayout.Controls.Add(statusRight, 1, 0);
+        statusBar.Controls.Add(statusLayout);
+        statusBar.Paint += (_, eventArgs) => UiStyles.DrawBorder(eventArgs, statusBar, UiStyles.Border);
 
         BuildTalkPage();
         BuildSettingsPage();
         pageHost.Controls.Add(settingsPage);
         pageHost.Controls.Add(talkPage);
-        Controls.Add(pageHost);
-        Controls.Add(nowBar);
-        Controls.Add(identityStrip);
+        shell.Controls.Add(identityStrip, 0, 0);
+        shell.Controls.Add(nowBar, 0, 1);
+        shell.Controls.Add(pageHost, 0, 2);
+        shell.Controls.Add(statusBar, 0, 3);
+        Controls.Add(shell);
 
         deviceFilter.TextChanged += (_, _) => RefreshRedesignPeers();
+        deviceGrid.Resize += (_, _) => LayoutDeviceCards();
         cardPulse.Tick += (_, _) => PulseCards();
         cardPulse.Start();
         UpdateIdentityPresentation();
+        UpdateNowBarAppearance();
     }
 
     private void BuildTalkPage()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, BackColor = Color.FromArgb(245, 246, 247) };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 154));
-        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Padding = new Padding(28, 10, 20, 4) };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
+        talkPage.Controls.Clear();
+        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, BackColor = UiStyles.Surface, Padding = new Padding(20, 18, 20, 22) };
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 336));
+
+        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, BackColor = UiStyles.Surface };
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Margin = new Padding(0, 0, 12, 0) };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.Controls.Add(new Label { Text = "Devices", Font = new Font("Segoe UI", 11, FontStyle.Bold), AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.Controls.Add(new Label { Text = "Devices", AutoSize = true, Font = UiStyles.CardAlias, Anchor = AnchorStyles.Left }, 0, 0);
+        deviceCount.Margin = new Padding(10, 0, 0, 0);
         deviceCount.Anchor = AnchorStyles.Left;
         header.Controls.Add(deviceCount, 1, 0);
-        var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoSize = false, FlowDirection = FlowDirection.LeftToRight };
-        foreach (var name in new[] { "All", "Speaking", "Muted", "Silenced", "Legacy" })
-        {
-            var chip = Chip(name);
-            chip.Click += (_, _) => { activeFilter = name; RefreshRedesignPeers(); };
-            filters.Controls.Add(chip);
-        }
-        deviceFilter.Anchor = AnchorStyles.Left;
-        header.Controls.Add(deviceFilter, 2, 0);
-        filters.Anchor = AnchorStyles.Right;
+        var filters = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
+        UiStyles.StyleInput(deviceFilter, 150);
+        deviceFilter.Margin = new Padding(0, 0, 6, 0);
+        filters.Controls.Add(deviceFilter);
+        foreach (var name in new[] { "All", "Speaking", "Muted", "Silenced", "Legacy" }) filters.Controls.Add(CreateFilterChip(name));
         header.Controls.Add(filters, 3, 0);
 
-        var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(28, 0, 20, 10) };
-        // 1280px is the reference layout: this keeps three 296px device cards
-        // aligned in the grid instead of letting the action column force a wrap.
-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 79));
-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 21));
-        var deviceSurface = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(245, 246, 247) };
-        deviceSurface.Controls.Add(deviceGrid);
-        var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 0, 0), BackColor = Color.FromArgb(245, 246, 247) };
-        var pttPanel = new Panel { Dock = DockStyle.Top, Height = 214, Padding = new Padding(16, 14, 16, 0), BackColor = Color.White };
-        pttPanel.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, pttPanel.Width - 1, pttPanel.Height - 1);
-        broadcast.AutoSize = replySurface.AutoSize = false;
-        broadcast.SetBounds(16, 14, 260, 62);
-        replySurface.SetBounds(16, 116, 260, 44);
-        broadcast.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        replySurface.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        pttPanel.Resize += (_, _) =>
+        deviceGrid.Controls.Clear();
+        var gridHost = new Panel { Dock = DockStyle.Fill, BackColor = UiStyles.Surface, Margin = new Padding(0, 0, 12, 0) };
+        gridHost.Controls.Add(deviceGrid);
+        offlineFrame.Controls.Clear();
+        offlineFrame.Controls.Add(offlineDevices);
+        offlineFrame.Paint += (_, e) => UiStyles.DrawBorder(e, offlineFrame);
+        var note = new Label
         {
-            broadcast.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
-            replySurface.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
+            Text = "Up to 16 devices per group. Cards are one row high and the grid scrolls. Silence is a soft mute on the device: it stops received audio while discovery and floor control continue. A device whose physical mute slider is on reports that state and its Silence control is unavailable.",
+            AutoSize = true, MaximumSize = new Size(900, 0), Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Margin = new Padding(0, 12, 12, 0), Padding = new Padding(0, 0, 0, 0)
         };
-        var broadcastHint = new Label { Text = $"Everyone in group {settings.MeshId}                         Space / Ctrl+Alt+B", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f), Location = new Point(16, 90), Size = new Size(260, 14), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
-        var replyHint = new Label { Text = "Last sender: none                                         Ctrl+Alt+R", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f), Location = new Point(16, 169), Size = new Size(260, 14), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
+        left.Controls.Add(header, 0, 0);
+        left.Controls.Add(gridHost, 0, 1);
+        left.Controls.Add(offlineFrame, 0, 2);
+        left.Controls.Add(note, 0, 3);
+
+        var right = BuildTalkActionsPanel();
+        body.Controls.Add(left, 0, 0);
+        body.Controls.Add(right, 1, 0);
+        talkPage.Controls.Add(body);
+    }
+
+    private Control BuildTalkActionsPanel()
+    {
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, BackColor = UiStyles.Surface, Padding = new Padding(12, 0, 0, 0) };
+        right.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 230));
+        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var ptt = UiStyles.BorderedPanel(new Padding(16));
+        ptt.AutoSize = false;
+        ptt.Height = 230;
+        ptt.Paint += (_, e) => UiStyles.DrawBorder(e, ptt);
+        var commands = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1 };
+        commands.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        broadcast = CreatePttButton("Hold to broadcast", UiStyles.Green);
+        replySurface = CreatePttButton("Hold to reply", UiStyles.Blue);
+        broadcast.Enabled = replySurface.Enabled = receiveSession is not null;
+        BindPtt(broadcast, () => receiveSession?.PressBroadcast());
+        BindPtt(replySurface, () => receiveSession?.PressReply());
+        broadcast.AutoSize = false;
+        broadcast.Height = 68;
+        broadcast.Dock = DockStyle.Top;
+        broadcast.Font = UiStyles.Broadcast;
+        broadcast.Padding = new Padding(0, 12, 0, 12);
+        broadcast.BackColor = UiStyles.Green;
+        broadcast.FlatAppearance.BorderColor = UiStyles.Green;
         replySurface.AutoSize = false;
-        replySurface.UseVisualStyleBackColor = false;
-        replySurface.BackColor = Color.FromArgb(21, 101, 192);
-        replySurface.ForeColor = Color.White;
-        replySurface.FlatAppearance.BorderColor = Color.FromArgb(21, 101, 192);
-        pttPanel.Controls.AddRange([broadcast, broadcastHint, replySurface, replyHint]);
-        var gap = new Panel { Dock = DockStyle.Top, Height = 12, BackColor = Color.FromArgb(245, 246, 247) };
-        var activityPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
-        activityPanel.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, activityPanel.Width - 1, activityPanel.Height - 1);
-        var activityTitle = new Label { Text = "Activity", Dock = DockStyle.Top, Height = 42, Padding = new Padding(16, 13, 0, 0), Font = new Font("Segoe UI", 10, FontStyle.Bold) };
-        var diagnostics = new LinkLabel { Text = "Diagnostics…", AutoSize = true, Dock = DockStyle.Bottom, Padding = new Padding(16, 10, 0, 10) };
-        diagnostics.Click += (_, _) => ShowSettings("Diagnostics");
-        var recordings = new LinkLabel { Text = "Open recordings folder", AutoSize = true, Dock = DockStyle.Bottom, Padding = new Padding(16, 4, 0, 10) };
+        replySurface.Height = 48;
+        replySurface.Dock = DockStyle.Top;
+        replySurface.Font = UiStyles.CardAlias;
+        replySurface.Padding = new Padding(0, 7, 0, 7);
+        replySurface.BackColor = UiStyles.Blue;
+        replySurface.FlatAppearance.BorderColor = UiStyles.Blue;
+        commands.Controls.Add(broadcast, 0, 0);
+        commands.Controls.Add(HintRow($"Everyone in group {settings.MeshId}", "Space, or Ctrl+Alt+B anywhere"), 0, 1);
+        commands.Controls.Add(new Panel { Height = 12, Dock = DockStyle.Top, BackColor = UiStyles.White }, 0, 2);
+        commands.Controls.Add(replySurface, 0, 3);
+        commands.Controls.Add(HintRow("Last sender: none", "Ctrl+Alt+R"), 0, 4);
+        ptt.Controls.Add(commands);
+
+        var activityPanel = UiStyles.BorderedPanel(Padding.Empty);
+        activityPanel.Paint += (_, e) => UiStyles.DrawBorder(e, activityPanel);
+        var activityHeader = new TableLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(16, 0, 16, 0), ColumnCount = 2 };
+        activityHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        activityHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        activityHeader.Controls.Add(new Label { Text = "Activity", AutoSize = true, Font = UiStyles.PanelHeading, Anchor = AnchorStyles.Left }, 0, 0);
+        var recordings = new LinkLabel { Text = "Open recordings folder", AutoSize = true, Font = UiStyles.SecondaryFont, LinkColor = UiStyles.Blue, Anchor = AnchorStyles.Right };
         recordings.Click += (_, _) => { try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(CompanionSettings.RecordingsDirectory) { UseShellExecute = true }); } catch { } };
+        activityHeader.Controls.Add(recordings, 1, 0);
+        var diagnostics = new LinkLabel { Text = "Diagnostics…", AutoSize = true, Dock = DockStyle.Bottom, Font = UiStyles.SecondaryFont, Padding = new Padding(16, 10, 0, 10), LinkColor = UiStyles.Blue };
+        diagnostics.Click += (_, _) => ShowSettings("Diagnostics");
+        activity.Controls.Clear();
         activityPanel.Controls.Add(activity);
         activityPanel.Controls.Add(diagnostics);
-        activityPanel.Controls.Add(recordings);
-        activityPanel.Controls.Add(activityTitle);
-        right.Controls.Add(activityPanel);
-        right.Controls.Add(gap);
-        right.Controls.Add(pttPanel);
-        content.Controls.Add(deviceSurface, 0, 0);
-        content.Controls.Add(right, 1, 0);
-        var offlineContainer = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.White, Padding = new Padding(18, 10, 18, 8) };
-        offlineContainer.Controls.Add(offlineDevices);
-        layout.Controls.Add(header, 0, 0);
-        layout.Controls.Add(content, 0, 1);
-        layout.Controls.Add(offlineContainer, 0, 2);
-        talkPage.Controls.Add(layout);
+        activityPanel.Controls.Add(UiStyles.Rule());
+        activityPanel.Controls.Add(activityHeader);
+        right.Controls.Add(ptt, 0, 0);
+        right.Controls.Add(new Panel { BackColor = UiStyles.Surface }, 0, 1);
+        right.Controls.Add(activityPanel, 0, 2);
+        return right;
+    }
+
+    private static TableLayoutPanel HintRow(string left, string right)
+    {
+        var row = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, Margin = new Padding(0, 8, 0, 0) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.Controls.Add(new Label { Text = left, AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Left }, 0, 0);
+        row.Controls.Add(new Label { Text = right, AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Right }, 1, 0);
+        return row;
     }
 
     private void BuildSettingsPage()
     {
-        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, SplitterDistance = 238, IsSplitterFixed = true };
-        split.Panel1.BackColor = Color.FromArgb(240, 241, 243);
-        settingsNavigation.Padding = new Padding(0, 18, 0, 0);
-        settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = Color.FromArgb(99, 103, 109), AutoSize = true, Padding = new Padding(18, 0, 0, 12), Font = new Font("Segoe UI", 8, FontStyle.Regular) });
+        settingsPage.Controls.Clear();
+        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, SplitterDistance = 236, IsSplitterFixed = true, BackColor = UiStyles.Border };
+        split.Panel1.BackColor = UiStyles.Chrome;
+        split.Panel2.BackColor = UiStyles.Surface;
+        settingsNavigation.Controls.Clear();
+        settingsNavigation.Padding = new Padding(0, 16, 0, 0);
+        settingsNavigation.Controls.Add(new Label { Text = "SETTINGS", ForeColor = UiStyles.Muted, AutoSize = true, Padding = new Padding(18, 0, 0, 10), Font = UiStyles.Hint });
         foreach (var (title, page) in new[] { ("Set up a device (USB)", "USB"), ("Group and device IDs", "Group"), ("Firmware", "Firmware"), ("Identity, audio, shortcuts", "Identity"), ("Diagnostics", "Diagnostics") })
         {
             var item = SettingsNavItem(title, page);
             settingsNavItems.Add(page, item);
             settingsNavigation.Controls.Add(item);
         }
+        var footer = new Label
+        {
+            Dock = DockStyle.Bottom, AutoSize = false, Height = 92, Padding = new Padding(18, 14, 18, 0),
+            Text = "Settings are rare. Nothing here blocks discovery, talking or the device list.",
+            Font = UiStyles.Hint, ForeColor = UiStyles.Muted,
+        };
         split.Panel1.Controls.Add(settingsNavigation);
+        split.Panel1.Controls.Add(footer);
         split.Panel2.Controls.Add(BuildSettingsDetail());
         settingsPage.Controls.Add(split);
     }
@@ -252,71 +344,113 @@ internal sealed partial class MainForm
         return tabs;
     }
 
-    private TabPage Page(string name, string title, string detail)
+    private TabPage Page(string name, string title, string detail, int maxWidth, out FlowLayoutPanel content)
     {
-        var page = new TabPage { Name = name, BackColor = Color.FromArgb(245, 246, 247), Padding = new Padding(30, 24, 30, 20) };
-        page.Controls.Add(new Label { Text = title, AutoSize = true, Font = new Font("Segoe UI", 16, FontStyle.Bold), Location = new Point(30, 24) });
-        page.Controls.Add(new Label { Text = detail, AutoSize = true, MaximumSize = new Size(920, 0), ForeColor = Color.FromArgb(99, 103, 109), Location = new Point(30, 58) });
+        var page = new TabPage { Name = name, BackColor = UiStyles.Surface, Padding = Padding.Empty };
+        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = UiStyles.Surface, Padding = new Padding(28, 24, SystemInformation.VerticalScrollBarWidth + 28, 24) };
+        content = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = maxWidth, BackColor = UiStyles.Surface, Margin = Padding.Empty };
+        content.Controls.Add(new Label { Text = title, AutoSize = true, Font = UiStyles.PageHeading, ForeColor = UiStyles.Ink, Margin = Padding.Empty });
+        if (!string.IsNullOrEmpty(detail))
+            content.Controls.Add(new Label { Text = detail, AutoSize = true, MaximumSize = new Size(maxWidth, 0), Font = UiStyles.BodyFont, ForeColor = UiStyles.Secondary, Margin = new Padding(0, 6, 0, 0) });
+        scroll.Controls.Add(content);
+        page.Controls.Add(scroll);
         return page;
     }
 
     private TabPage BuildUsbPage()
     {
-        var page = Page("USB", "Set up a device over USB", "Connect the device by USB, enter Wi-Fi credentials, and reboot it onto the network. Passwords are never saved by the companion.");
-        var steps = new TableLayoutPanel { Location = new Point(30, 114), Size = new Size(720, 62), ColumnCount = 3, BackColor = Color.White };
+        var page = Page("USB", "Set up a device over USB", "Connect the device by USB, give it your Wi-Fi credentials, and it reboots onto the network. The password stays on this PC and is never saved by the companion.", 720, out var content);
+        var steps = new TableLayoutPanel { Width = 720, Height = 68, ColumnCount = 3, BackColor = UiStyles.White, Margin = new Padding(0, 22, 0, 0) };
         for (var i = 0; i < 3; i++) steps.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
-        foreach (var (caption, i) in new[] { ("STEP 1\nConnect by USB", 0), ("STEP 2\nEnter Wi-Fi credentials", 1), ("STEP 3\nDevice reboots and joins", 2) })
-            steps.Controls.Add(new Label { Text = caption, Dock = DockStyle.Fill, Padding = new Padding(14, 12, 8, 0), Font = new Font("Segoe UI", 9, i == 1 ? FontStyle.Bold : FontStyle.Regular), ForeColor = i == 1 ? Color.FromArgb(21, 101, 192) : Color.FromArgb(79, 91, 102), BackColor = i == 1 ? Color.FromArgb(238, 246, 253) : Color.White }, i, 0);
-        steps.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(220, 224, 228)); for (var i = 0; i < 3; i++) e.Graphics.DrawRectangle(pen, i * steps.Width / 3, 0, steps.Width / 3, steps.Height - 1); };
-        var card = new Panel { Location = new Point(30, 196), Size = new Size(720, 304), BackColor = Color.White, Padding = new Padding(20) };
-        card.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, card.Width - 1, card.Height - 1);
-        var form = FormGrid(new Point(20, 18), 680);
-        usbPort.Width = 280;
-        refreshUsbPorts.Text = "Rescan";
-        getUsbConfig.Text = "Identify";
-        AddField(form, "USB port", usbPort, refreshUsbPorts, getUsbConfig);
-        AddField(form, "Device identified", usbDeviceIdentity);
-        AddField(form, "Wi-Fi network (SSID)", usbSsid);
-        AddField(form, "Wi-Fi password", usbPassword);
-        AddField(form, "Device label", usbAlias);
+        var stepData = new[]
+        {
+            ("STEP 1", "Connect by USB", UiStyles.White, UiStyles.Green, UiStyles.Ink),
+            ("STEP 2", "Enter Wi-Fi credentials", UiStyles.BlueTint, UiStyles.Blue, UiStyles.DeepBlue),
+            ("STEP 3", "Device reboots and appears", UiStyles.Surface, UiStyles.Disabled, UiStyles.Muted),
+        };
+        for (var i = 0; i < stepData.Length; i++)
+        {
+            var step = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = stepData[i].Item3, Padding = new Padding(14, 10, 8, 8), ColumnCount = 1 };
+            step.Controls.Add(new Label { Text = stepData[i].Item1, AutoSize = true, Font = UiStyles.Hint, ForeColor = stepData[i].Item4 }, 0, 0);
+            step.Controls.Add(new Label { Text = stepData[i].Item2, AutoSize = true, Font = UiStyles.BodyFont, ForeColor = stepData[i].Item5, Margin = new Padding(0, 3, 0, 0) }, 0, 1);
+            steps.Controls.Add(step, i, 0);
+        }
+        steps.Paint += (_, e) => UiStyles.DrawBorder(e, steps);
+        var card = UiStyles.BorderedPanel(new Padding(20));
+        card.AutoSize = true; card.AutoSizeMode = AutoSizeMode.GrowAndShrink; card.Width = 720; card.Margin = new Padding(0, 18, 0, 0);
+        card.Paint += (_, e) => UiStyles.DrawBorder(e, card);
+        var form = FormGrid(150);
+        UiStyles.StyleInput(usbPort, 280);
+        UiStyles.StyleInput(usbSsid, 240);
+        UiStyles.StyleInput(usbPassword, 240);
+        UiStyles.StyleInput(usbAlias, 240);
+        refreshUsbPorts.Text = "Rescan"; UiStyles.StyleButton(refreshUsbPorts, new Padding(12, 6, 12, 6));
+        usbDeviceIdentity.Text = string.IsNullOrWhiteSpace(usbDeviceIdentity.Text) ? "Connect a device to identify it over USB" : usbDeviceIdentity.Text;
+        usbDeviceIdentity.ForeColor = UiStyles.Green; usbDeviceIdentity.Font = UiStyles.SecondaryFont;
+        refreshUsbPorts.Click += async (_, _) => await ReadUsbConfigurationAsync();
+        var portRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Margin = Padding.Empty };
+        portRow.Controls.AddRange([usbPort, Spacer(8), refreshUsbPorts, Spacer(8), usbDeviceIdentity]);
+        AddField(form, "USB port", portRow);
+        var wifiRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Margin = Padding.Empty };
+        wifiRow.Controls.AddRange([usbSsid, Spacer(8), new Label { Text = "2.4 GHz only", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(0, 6, 0, 0) }]);
+        AddField(form, "Wi-Fi network", wifiRow);
+        var show = PlainButton("Show");
+        show.Click += (_, _) => { usbPassword.UseSystemPasswordChar = !usbPassword.UseSystemPasswordChar; show.Text = usbPassword.UseSystemPasswordChar ? "Show" : "Hide"; };
+        var passwordRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Margin = Padding.Empty };
+        passwordRow.Controls.AddRange([usbPassword, Spacer(8), show]);
+        AddField(form, "Password", passwordRow);
+        AddField(form, "Device alias", usbAlias);
         applyUsbWifi.Text = "Send to device and reboot"; StylePrimary(applyUsbWifi);
-        form.Controls.Add(applyUsbWifi, 1, form.RowCount); form.SetColumnSpan(applyUsbWifi, 2); form.RowCount++;
-        form.Controls.Add(usbStatus, 1, form.RowCount); form.SetColumnSpan(usbStatus, 2);
+        var submit = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, BorderStyle = BorderStyle.None, Margin = new Padding(0, 20, 0, 0), Padding = new Padding(0, 16, 0, 0) };
+        submit.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, 0, submit.Width, 0); };
+        submit.Controls.Add(applyUsbWifi);
+        submit.Controls.Add(new Label { Text = "The device restarts and should appear in Devices within a few seconds.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(12, 7, 0, 0) });
+        form.Controls.Add(submit, 1, form.RowCount); form.RowCount++;
         card.Controls.Add(form);
-        page.Controls.AddRange([steps, card]);
+        content.Controls.Add(steps);
+        content.Controls.Add(card);
         return page;
     }
 
     private TabPage BuildGroupPage()
     {
-        var page = Page("Group", "Group and device IDs", "A group is an intercom channel, not a radio network. A group holds up to 16 devices on the same trusted LAN.");
-        var summary = new Panel { Location = new Point(30, 112), Size = new Size(760, 92), BackColor = Color.White, Padding = new Padding(20, 16, 20, 12) };
-        summary.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, summary.Width - 1, summary.Height - 1);
-        summary.Controls.Add(new Label { Text = "Current group", AutoSize = true, Location = new Point(20, 18) });
-        summary.Controls.Add(new Label { Text = "This companion's ID", AutoSize = true, Location = new Point(20, 52) });
-        var current = new Label { AutoSize = true, Location = new Point(190, 18), Font = new Font("Segoe UI", 9, FontStyle.Bold), ForeColor = Color.FromArgb(61, 65, 71) };
-        current.Name = "CurrentGroup";
-        summary.Controls.Add(current);
-        summary.Controls.Add(new Label { Text = $"{settings.NodeId:x8} · generated once, unique on this PC", AutoSize = true, Location = new Point(190, 52), ForeColor = Color.FromArgb(99, 103, 109) });
-        var danger = new Panel { Location = new Point(30, 222), Size = new Size(760, 370), BackColor = Color.FromArgb(253, 243, 243), Padding = new Padding(18, 14, 18, 12) };
-        danger.Paint += (_, e) => { using var border = new Pen(Color.FromArgb(178, 34, 34)); e.Graphics.DrawRectangle(border, 0, 0, danger.Width - 1, danger.Height - 1); e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(178, 34, 34)), 0, 0, 4, danger.Height); };
-        danger.Controls.Add(new Label { Text = "Change the group ID", AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), ForeColor = Color.FromArgb(142, 26, 26), Location = new Point(18, 14) });
-        danger.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, ForeColor = Color.FromArgb(122, 32, 32), Location = new Point(18, 42) });
-        danger.Controls.Add(new Label { Text = "· Devices on the old group disappear from this companion and can no longer hear it.\n· Each device reboots after its configuration update.\n· A device you cannot reach keeps the old group until you get to it physically.\n· A half-finished change leaves two isolated intercoms.", AutoSize = true, ForeColor = Color.FromArgb(61, 65, 71), Location = new Point(18, 70) });
-        var fields = FormGrid(new Point(18, 155), 704);
-        AddField(fields, "New group ID", groupId, new Label { Text = "exactly 4 characters, A–Z and 0–9", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Padding = new Padding(0, 6, 0, 0) });
+        var page = Page("Group", "Group and device IDs", "A group is an intercom channel, not a radio network. A group holds up to 16 devices on the same trusted LAN.", 760, out var content);
+        var summary = UiStyles.BorderedPanel(new Padding(20, 14, 20, 14)); summary.Width = 760; summary.AutoSize = true; summary.Margin = new Padding(0, 18, 0, 0); summary.Paint += (_, e) => UiStyles.DrawBorder(e, summary);
+        var summaryFields = FormGrid(170);
+        var current = new Label { AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Name = "CurrentGroup", Padding = new Padding(0, 5, 0, 0) };
+        AddField(summaryFields, "Current group", current);
+        AddField(summaryFields, "This companion's ID", new Label { Text = $"{settings.NodeId:x8} · generated once, unique on this PC", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Secondary, Padding = new Padding(0, 5, 0, 0) });
+        summary.Controls.Add(summaryFields);
+
+        var danger = new Panel { BackColor = UiStyles.RedTint, Width = 760, AutoSize = true, Padding = new Padding(22, 14, 18, 16), Margin = new Padding(0, 18, 0, 0) };
+        danger.Paint += (_, e) => { UiStyles.DrawBorder(e, danger, UiStyles.Red); using var brush = new SolidBrush(UiStyles.Red); e.Graphics.FillRectangle(brush, 0, 0, 4, danger.Height); };
+        var dangerStack = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 716, Margin = Padding.Empty };
+        dangerStack.Controls.Add(new Label { Text = "Change the group ID", AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.DarkRed, Margin = Padding.Empty });
+        dangerStack.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(122, 32, 32), Margin = new Padding(0, 4, 0, 12) });
+        dangerStack.Controls.Add(UiStyles.Rule(Color.FromArgb(242, 214, 214)));
+        dangerStack.Controls.Add(new Label { Text = "· Devices on the old group disappear from this companion and can no longer hear it.\n· Each device must be changed separately, over USB or with a configuration write, and each one reboots.\n· A device you cannot reach keeps the old group until you get to it physically.\n· A half-finished change leaves two isolated intercoms.", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Margin = new Padding(0, 12, 0, 12) });
+        var fields = FormGrid(170);
+        UiStyles.StyleInput(groupId, 140); UiStyles.StyleInput(groupConfirmation, 140);
+        AddField(fields, "New group ID", groupId, new Label { Text = "exactly 4 characters, A–Z and 0–9", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(10, 5, 0, 0) });
         AddField(fields, $"Type {settings.MeshId} to confirm", groupConfirmation);
-        fields.Controls.Add(new Label { Text = "Apply to", AutoSize = true, Anchor = AnchorStyles.Left }, 0, fields.RowCount);
-        fields.Controls.Add(applyCompanionGroup, 1, fields.RowCount); fields.RowCount++;
-        fields.Controls.Add(applyActiveGroup, 1, fields.RowCount); fields.RowCount++;
+        applyActiveGroup.Text = $"All {displayPeers.Count} active devices, one at a time (each reboots)";
+        var choices = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty };
+        choices.Controls.Add(applyCompanionGroup); choices.Controls.Add(applyActiveGroup);
+        AddField(fields, "Apply to", choices);
         applyGroup.Text = "Change group ID"; StyleDanger(applyGroup);
-        fields.Controls.Add(applyGroup, 1, fields.RowCount);
-        danger.Controls.Add(fields);
-        var ids = new Panel { Location = new Point(30, 608), Size = new Size(760, 86), BackColor = Color.White, Padding = new Padding(20, 14, 20, 12) };
-        ids.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, ids.Width - 1, ids.Height - 1);
-        ids.Controls.Add(new Label { Text = "Device IDs", AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold), Location = new Point(20, 14) });
-        ids.Controls.Add(new Label { Text = "A device ID is unique inside the group. Change it from that device's Configure dialog; the companion refuses an ID already held by another visible device.", AutoSize = true, MaximumSize = new Size(700, 0), ForeColor = Color.FromArgb(99, 103, 109), Location = new Point(20, 36) });
-        page.Controls.AddRange([summary, danger, ids]);
+        var action = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+        action.Controls.Add(applyGroup);
+        action.Controls.Add(new Label { Text = "Enabled once the confirmation matches.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(12, 7, 0, 0) });
+        fields.Controls.Add(action, 1, fields.RowCount); fields.RowCount++;
+        dangerStack.Controls.Add(fields);
+        danger.Controls.Add(dangerStack);
+
+        var ids = UiStyles.BorderedPanel(new Padding(20, 14, 20, 14)); ids.Width = 760; ids.AutoSize = true; ids.Margin = new Padding(0, 16, 0, 0); ids.Paint += (_, e) => UiStyles.DrawBorder(e, ids);
+        var idStack = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 718 };
+        idStack.Controls.Add(new Label { Text = "Device IDs", AutoSize = true, Font = UiStyles.PanelHeading });
+        idStack.Controls.Add(new Label { Text = "A device ID is unique inside the group. Change it from that device's Configure dialog; the companion refuses an ID already held by another visible device.", AutoSize = true, MaximumSize = new Size(700, 0), Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(0, 5, 0, 0) });
+        ids.Controls.Add(idStack);
+        content.Controls.Add(summary); content.Controls.Add(danger); content.Controls.Add(ids);
         groupId.TextChanged += (_, _) => UpdateGroupButton();
         groupConfirmation.TextChanged += (_, _) => UpdateGroupButton();
         applyGroup.Click += async (_, _) => await ApplyGroupChangeAsync();
@@ -325,64 +459,77 @@ internal sealed partial class MainForm
 
     private TabPage BuildFirmwarePage()
     {
-        var page = Page("Firmware", "Firmware", "Signed packages only. Updates are queued one device at a time and complete only after the device re-announces the offered version.");
-        var package = new Panel { Location = new Point(30, 112), Size = new Size(820, 82), BackColor = Color.White, Padding = new Padding(20, 14, 20, 10) };
-        package.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 224, 228)), 0, 0, package.Width - 1, package.Height - 1);
-        package.Controls.Add(new Label { Text = "Signed firmware package", AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold), Location = new Point(20, 14) });
-        otaManifest.BorderStyle = BorderStyle.None; otaManifest.BackColor = Color.White; otaManifest.Location = new Point(20, 45); otaManifest.Width = 560;
-        browseOtaManifest.Text = "Choose another package…"; browseOtaManifest.Location = new Point(600, 23); StyleSecondary(browseOtaManifest);
-        package.Controls.AddRange([otaManifest, browseOtaManifest]);
-        var queuePanel = new Panel { Location = new Point(30, 210), Size = new Size(820, 420), BackColor = Color.White, AutoScroll = true, Padding = new Padding(20, 14, 20, 14) };
-        queuePanel.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 224, 228)), 0, 0, queuePanel.Width - 1, queuePanel.Height - 1);
-        queuePanel.Controls.Add(otaQueue);
-        var queueTitle = new Label { Text = "Update queue", AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), Location = new Point(20, 15) };
-        var queueDetail = new Label { Text = "sequential, one device at a time", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Location = new Point(120, 18) };
-        var addAll = PlainButton("Add all compatible"); addAll.Location = new Point(536, 10); addAll.Click += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
-        var start = new Button { Text = "Start queue…", AutoSize = true, Location = new Point(676, 10) }; StylePrimary(start); start.Click += async (_, _) => await StartQueuedOtaAsync();
-        queuePanel.Controls.AddRange([queueTitle, queueDetail, addAll, start]);
-        otaQueue.Location = new Point(20, 54); otaQueue.Width = 778;
-        otaStatus.Location = new Point(30, 646); otaStatus.MaximumSize = new Size(820, 0);
-        page.Controls.AddRange([package, queuePanel, otaStatus]);
+        var page = Page("Firmware", "Firmware", "Signed packages only. Updates are queued one device at a time and complete only after the device re-announces the offered version.", 820, out var content);
+        var package = UiStyles.BorderedPanel(new Padding(20, 18, 20, 18)); package.Width = 820; package.AutoSize = true; package.Margin = new Padding(0, 18, 0, 0); package.Paint += (_, e) => UiStyles.DrawBorder(e, package);
+        var packageLayout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
+        packageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); packageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var packageInfo = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty };
+        packageInfo.Controls.Add(new Label { Text = "Signed firmware package", AutoSize = true, Font = UiStyles.PanelHeading });
+        otaPackageSummary.Text = "Choose a signed OTA package to verify it here.";
+        packageInfo.Controls.Add(otaPackageSummary);
+        browseOtaManifest.Text = "Choose another package…"; StyleSecondary(browseOtaManifest); browseOtaManifest.Anchor = AnchorStyles.Right;
+        packageLayout.Controls.Add(packageInfo, 0, 0); packageLayout.Controls.Add(browseOtaManifest, 1, 0);
+        package.Controls.Add(packageLayout);
+
+        var queuePanel = UiStyles.BorderedPanel(Padding.Empty); queuePanel.Width = 820; queuePanel.AutoSize = true; queuePanel.Margin = new Padding(0, 16, 0, 0); queuePanel.Paint += (_, e) => UiStyles.DrawBorder(e, queuePanel);
+        var queueHeader = new TableLayoutPanel { Dock = DockStyle.Top, Height = 52, ColumnCount = 3, Padding = new Padding(20, 0, 20, 0) };
+        queueHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queueHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); queueHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var queueCaption = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Left, Margin = Padding.Empty };
+        queueCaption.Controls.Add(new Label { Text = "Update queue", AutoSize = true, Font = new Font(UiStyles.BodyFont, FontStyle.Bold) });
+        queueCaption.Controls.Add(new Label { Text = "sequential, one device at a time", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(10, 1, 0, 0) });
+        var addAll = PlainButton("Add all compatible"); addAll.Click += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
+        var start = new Button { Text = "Start queue…" }; StylePrimary(start); start.Click += async (_, _) => await StartQueuedOtaAsync();
+        queueHeader.Controls.Add(queueCaption, 0, 0); queueHeader.Controls.Add(addAll, 1, 0); queueHeader.Controls.Add(start, 2, 0);
+        var queueHost = new Panel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(20, 0, 20, 14), BackColor = UiStyles.White };
+        otaQueue.Width = 778; otaQueue.Margin = Padding.Empty; queueHost.Controls.Add(otaQueue);
+        queuePanel.Controls.Add(queueHost); queuePanel.Controls.Add(UiStyles.Rule()); queuePanel.Controls.Add(queueHeader);
+        otaStatus.MaximumSize = new Size(820, 0); otaStatus.Font = UiStyles.SecondaryFont; otaStatus.Margin = new Padding(0, 12, 0, 0);
+        var note = new Label { Text = "Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.", AutoSize = true, MaximumSize = new Size(820, 0), Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Margin = new Padding(0, 12, 0, 0) };
+        content.Controls.Add(package); content.Controls.Add(queuePanel); content.Controls.Add(otaStatus); content.Controls.Add(note);
         return page;
     }
 
     private TabPage BuildIdentityPage()
     {
-        var page = Page("Identity", "Identity, audio and shortcuts", "Changes to audio devices are applied independently from discovery and the device grid.");
-        var card = new Panel { Location = new Point(30, 112), Size = new Size(720, 430), BackColor = Color.White, Padding = new Padding(20) };
-        card.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, card.Width - 1, card.Height - 1);
-        var panel = FormGrid(new Point(20, 18), 680);
-        companionAlias.Width = 330; recordingDevice.Width = playbackDevice.Width = 390;
+        var page = Page("Identity", "Identity, audio and shortcuts", "Choose the local name, audio devices and global push-to-talk shortcuts for this companion.", 720, out var content);
+        var card = UiStyles.BorderedPanel(new Padding(20)); card.Width = 720; card.AutoSize = true; card.Margin = new Padding(0, 18, 0, 0); card.Paint += (_, e) => UiStyles.DrawBorder(e, card);
+        var panel = FormGrid(170);
+        UiStyles.StyleInput(companionAlias, 260); UiStyles.StyleInput(recordingDevice, 320); UiStyles.StyleInput(playbackDevice, 320);
         AddField(panel, "Companion alias", companionAlias);
-        AddField(panel, "Companion ID", new Label { Text = $"{settings.NodeId:x8} · fixed for this PC", AutoSize = true, Padding = new Padding(0, 6, 0, 0), ForeColor = Color.FromArgb(79, 91, 102) });
+        AddField(panel, "Companion ID", new Label { Text = $"{settings.NodeId:x8} · fixed for this PC", AutoSize = true, Font = UiStyles.BodyFont, Padding = new Padding(0, 5, 0, 0), ForeColor = UiStyles.Secondary });
         AddField(panel, "Microphone", recordingDevice);
         AddField(panel, "Speaker", playbackDevice);
-        var broadcastKey = new TextBox { Text = "Ctrl + Alt + B", Width = 160, ReadOnly = true, BackColor = Color.White };
-        var replyKey = new TextBox { Text = "Ctrl + Alt + R", Width = 160, ReadOnly = true, BackColor = Color.White };
-        AddField(panel, "Broadcast hotkey", broadcastKey);
+        var broadcastKey = new TextBox { Text = "Ctrl + Alt + B", ReadOnly = true, BackColor = UiStyles.White };
+        var replyKey = new TextBox { Text = "Ctrl + Alt + R", ReadOnly = true, BackColor = UiStyles.White };
+        UiStyles.StyleInput(broadcastKey, 130); UiStyles.StyleInput(replyKey, 130);
+        var broadcastRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+        broadcastRow.Controls.AddRange([broadcastKey, Spacer(8), new Label { Text = "works when the window is not focused", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(0, 5, 0, 0) }]);
+        AddField(panel, "Broadcast hotkey", broadcastRow);
         AddField(panel, "Reply hotkey", replyKey);
-        var runInTray = new CheckBox { Text = "Run in notification area when closed", Checked = settings.RunInNotificationArea, AutoSize = true };
+        var runInTray = new CheckBox { Text = "Keep running in the notification area when closed", Checked = settings.RunInNotificationArea, AutoSize = true, Font = UiStyles.BodyFont };
         var startWithWindows = new CheckBox { Text = "Start with Windows", Checked = settings.StartWithWindows, AutoSize = true };
-        panel.Controls.Add(runInTray, 1, panel.RowCount); panel.RowCount++;
-        panel.Controls.Add(startWithWindows, 1, panel.RowCount); panel.RowCount++;
-        var save = new Button { Text = "Save", AutoSize = true }; StylePrimary(save);
+        var windowOptions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty };
+        startWithWindows.Font = UiStyles.BodyFont;
+        windowOptions.Controls.Add(runInTray); windowOptions.Controls.Add(startWithWindows);
+        AddField(panel, "Window", windowOptions);
+        var save = new Button { Text = "Save" }; StylePrimary(save);
         save.Click += (_, _) => SaveIdentityAudioSettings(runInTray.Checked, startWithWindows.Checked);
-        panel.Controls.Add(save, 1, panel.RowCount); panel.RowCount++;
-        panel.Controls.Add(new Label { Text = "Hotkeys work while the companion is running. Hold the hotkey to talk; release it to stop.", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109) }, 1, panel.RowCount);
         card.Controls.Add(panel);
-        var back = new Button { Text = "Back to Talk", AutoSize = true, Location = new Point(146, 558) }; StyleSecondary(back); back.Click += (_, _) => ShowTalk();
-        page.Controls.AddRange([card, back]);
+        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 16, 0, 0) };
+        var back = new Button { Text = "Back to Talk" }; StyleSecondary(back); back.Click += (_, _) => ShowTalk();
+        actions.Controls.AddRange([save, Spacer(8), back]);
+        content.Controls.Add(card); content.Controls.Add(actions);
         return page;
     }
 
     private TabPage BuildDiagnosticsPage()
     {
-        var page = Page("Diagnostics", "Diagnostics", "Live receive counters and the discovery/session log. Audio availability never controls discovery.");
-        var cards = new TableLayoutPanel { Location = new Point(30, 112), Size = new Size(820, 80), ColumnCount = 4 };
+        var page = Page("Diagnostics", "Diagnostics", "Live receive counters and the discovery/session log. Audio availability never controls discovery.", 860, out var content);
+        var cards = new TableLayoutPanel { Width = 820, Height = 72, ColumnCount = 4, Margin = new Padding(0, 18, 0, 0) };
         for (var i = 0; i < 4; i++) cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         foreach (var (title, i) in new[] { ("UDP audio", 0), ("Decoded frames", 1), ("PLC frames", 2), ("Output buffer", 3) })
         {
-            var card = new Panel { Dock = DockStyle.Fill, Margin = new Padding(i == 0 ? 0 : 4, 0, i == 3 ? 0 : 4, 0), BackColor = Color.White };
+            var card = new Panel { Dock = DockStyle.Fill, Margin = new Padding(i == 0 ? 0 : 6, 0, i == 3 ? 0 : 6, 0), BackColor = UiStyles.White, Padding = new Padding(16, 12, 16, 8) };
             card.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 224, 228)), 0, 0, card.Width - 1, card.Height - 1);
             card.Controls.Add(new Label { Text = title, AutoSize = true, Location = new Point(12, 12), ForeColor = Color.FromArgb(99, 103, 109) });
             card.Controls.Add(new Label { Text = "—", AutoSize = true, Name = $"Diagnostic{i}", Font = new Font("Segoe UI", 15, FontStyle.Bold), Location = new Point(12, 34) });
@@ -395,8 +542,13 @@ internal sealed partial class MainForm
         var save = PlainButton("Save log to file…");
         save.Location = new Point(122, 526);
         save.Click += (_, _) => SaveDiagnosticLog();
-        var log = new TextBox { Location = new Point(30, 210), Size = new Size(820, 300), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.FromArgb(28, 31, 35), ForeColor = Color.FromArgb(222, 232, 238), BorderStyle = BorderStyle.FixedSingle, Font = new Font("Cascadia Mono", 8), Text = ReadDiagnosticLog() };
-        page.Controls.AddRange([cards, diagnosticsCounters, copy, save, log]);
+        var log = new RichTextBox { Width = 820, Height = 300, ReadOnly = true, DetectUrls = false, BorderStyle = BorderStyle.None, BackColor = Color.FromArgb(28, 31, 35), ForeColor = UiStyles.Disabled, Font = UiStyles.Log, ScrollBars = RichTextBoxScrollBars.Vertical, Padding = new Padding(16, 14, 16, 14), Margin = new Padding(0, 18, 0, 0) };
+        AppendDiagnosticLines(log, ReadDiagnosticLog());
+        content.Controls.Add(cards);
+        content.Controls.Add(log);
+        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 12, 0, 0) };
+        actions.Controls.AddRange([copy, Spacer(8), save]);
+        content.Controls.Add(actions);
         return page;
     }
 
@@ -404,6 +556,8 @@ internal sealed partial class MainForm
     {
         talkPage.Visible = false;
         settingsPage.Visible = true;
+        nowBar.Visible = false;
+        shell.RowStyles[1].Height = 0;
         activeSettingsPage = page;
         var tabs = settingsPage.Controls.Find("SettingsTabs", true).OfType<TabControl>().FirstOrDefault();
         if (tabs is not null) tabs.SelectedIndex = page switch { "USB" => 0, "Group" => 1, "Firmware" => 2, "Identity" => 3, _ => 4 };
@@ -416,6 +570,8 @@ internal sealed partial class MainForm
     {
         settingsPage.Visible = false;
         talkPage.Visible = true;
+        nowBar.Visible = true;
+        shell.RowStyles[1].Height = 76;
     }
 
     private void RefreshRedesignPeers(IReadOnlyList<Peer>? peers = null)
@@ -424,6 +580,7 @@ internal sealed partial class MainForm
         var search = deviceFilter.Text.Trim();
         var active = displayPeers.Where(peer => (string.IsNullOrEmpty(search) || peer.Alias.Contains(search, StringComparison.OrdinalIgnoreCase) || peer.NodeId.ToString("x8").Contains(search, StringComparison.OrdinalIgnoreCase)) && MatchesActiveFilter(peer)).OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
         deviceCount.Text = $"{displayPeers.Count} of 16 in group {settings.MeshId}";
+        UpdateFilterChips();
         UpdateIdentityPresentation();
         var activeIds = displayPeers.Select(peer => peer.NodeId).ToHashSet();
         foreach (var peer in displayPeers)
@@ -445,6 +602,7 @@ internal sealed partial class MainForm
             card.Visible = active.Contains(peer);
         }
         foreach (var stale in deviceCards.Keys.Except(activeIds).ToArray()) { deviceGrid.Controls.Remove(deviceCards[stale]); deviceCards[stale].Dispose(); deviceCards.Remove(stale); }
+        LayoutDeviceCards();
         RefreshOfflineRows(activeIds);
         UpdateSettingsStatus();
     }
@@ -454,19 +612,29 @@ internal sealed partial class MainForm
         offlineDevices.SuspendLayout();
         offlineDevices.Controls.Clear();
         var offline = knownDevices.Devices.Where(device => !activeIds.Contains(device.NodeId)).OrderBy(device => device.Alias).ToArray();
-        var title = new Panel { Height = 32, Width = Math.Max(760, offlineDevices.Parent?.ClientSize.Width - 36 ?? 760), BackColor = Color.White };
-        title.Controls.Add(new Label { Text = "Known, not responding", AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold), Location = new Point(0, 7) });
-        title.Controls.Add(new Label { Text = offline.Length == 0 ? "No devices kept from earlier sessions" : $"{offline.Length} device(s) kept from earlier sessions — they return when they announce", AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Location = new Point(170, 8) });
-        if (offline.Length > 0) { var all = PlainButton($"Remove all {offline.Length}…"); all.Anchor = AnchorStyles.Top | AnchorStyles.Right; all.Location = new Point(title.Width - 118, 2); all.Click += (_, _) => RemoveAllOffline(activeIds, offline.Length); title.Controls.Add(all); }
+        offlineFrame.Visible = offline.Length > 0;
+        if (offline.Length == 0) { offlineDevices.ResumeLayout(); return; }
+        var width = Math.Max(600, deviceGrid.Parent?.ClientSize.Width ?? 600);
+        var title = new TableLayoutPanel { Height = 48, Width = width, BackColor = UiStyles.White, Padding = new Padding(14, 0, 14, 0), ColumnCount = 2, Margin = Padding.Empty };
+        title.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); title.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var titleCopy = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Left, Margin = Padding.Empty };
+        titleCopy.Controls.Add(new Label { Text = "Known, not responding", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Ink, Margin = Padding.Empty });
+        titleCopy.Controls.Add(new Label { Text = $"{offline.Length} {Plural(offline.Length, "device", "devices")} kept from earlier sessions — they return to the grid as soon as they announce", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(10, 1, 0, 0) });
+        var all = PlainButton($"Remove all {CountWord(offline.Length)}…"); all.Click += (_, _) => RemoveAllOffline(activeIds, offline.Length);
+        title.Controls.Add(titleCopy, 0, 0); title.Controls.Add(all, 1, 0);
+        title.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, title.Height - 1, title.Width, title.Height - 1); };
         offlineDevices.Controls.Add(title);
         foreach (var device in offline)
         {
-            var row = new Panel { Height = 30, Width = title.Width, BackColor = Color.White };
-            row.Controls.Add(new Label { Text = "■", ForeColor = Color.FromArgb(201, 204, 208), AutoSize = true, Location = new Point(0, 8) });
-            row.Controls.Add(new Label { Text = device.Alias, AutoEllipsis = true, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Location = new Point(18, 7), Size = new Size(150, 16) });
-            row.Controls.Add(new Label { Text = $"{device.NodeId:x8} · {device.LastAddress}", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Location = new Point(180, 7), Size = new Size(250, 16) });
-            row.Controls.Add(new Label { Text = $"last seen {(DateTimeOffset.Now - device.LastSeen):g} ago", AutoSize = true, ForeColor = Color.FromArgb(131, 135, 141), Location = new Point(444, 7) });
-            var remove = PlainButton("Remove…"); remove.Anchor = AnchorStyles.Top | AnchorStyles.Right; remove.Location = new Point(row.Width - 84, 1); remove.Click += (_, _) => RemoveKnownDevice(device); row.Controls.Add(remove); offlineDevices.Controls.Add(row);
+            var row = new TableLayoutPanel { Height = 34, Width = width, BackColor = UiStyles.White, Padding = new Padding(14, 0, 14, 0), ColumnCount = 5, Margin = Padding.Empty };
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 18)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            row.Controls.Add(new Panel { Size = new Size(6, 6), BackColor = Color.FromArgb(201, 204, 208), Anchor = AnchorStyles.Left }, 0, 0);
+            row.Controls.Add(new Label { Text = device.Alias, AutoEllipsis = true, AutoSize = false, Dock = DockStyle.Fill, Font = new Font(UiStyles.SecondaryFont, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft }, 1, 0);
+            row.Controls.Add(new Label { Text = $"{device.NodeId:x8} · {device.LastAddress}", AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, TextAlign = ContentAlignment.MiddleLeft }, 2, 0);
+            row.Controls.Add(new Label { Text = HumanAge(DateTimeOffset.UtcNow - device.LastSeen), AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Muted, Anchor = AnchorStyles.Left }, 3, 0);
+            var remove = PlainButton("Remove…"); remove.Click += (_, _) => RemoveKnownDevice(device); row.Controls.Add(remove, 4, 0);
+            row.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(242, 244, 245)); e.Graphics.DrawLine(pen, 0, row.Height - 1, row.Width, row.Height - 1); };
+            offlineDevices.Controls.Add(row);
         }
         offlineDevices.ResumeLayout();
     }
@@ -502,6 +670,13 @@ internal sealed partial class MainForm
         }
         nowTitle.Text = statusLabel.Text;
         nowTitle.ForeColor = statusLabel.ForeColor;
+        UpdateNowBarAppearance();
+        if (receiveSession is not null)
+        {
+            var statistics = receiveSession.Statistics;
+            statusRight.Text = $"Running in the notification area · Ctrl+Alt+B to broadcast";
+            networkLabel.Text = $"Discovery: listening on 239.255.42.99:45678 · audio 16 kHz mono ADPCM · UDP {statistics.AudioPackets:n0} · PLC {statistics.ConcealedFrames:n0} · buffer {audio?.BufferedMilliseconds ?? 0} ms";
+        }
     }
 
     private async Task ToggleSoftMuteAsync(Peer peer)
@@ -596,18 +771,118 @@ internal sealed partial class MainForm
     private void UpdateSettingsStatus()
     {
         var label = settingsPage.Controls.Find("CurrentGroup", true).OfType<Label>().FirstOrDefault();
-        if (label is not null) label.Text = $"Current group: {settings.MeshId} · {displayPeers.Count} active device(s) · companion ID {settings.NodeId:x8}";
+        if (label is not null) label.Text = $"{settings.MeshId} · {displayPeers.Count} {Plural(displayPeers.Count, "device", "devices")}, 1 companion";
+        applyActiveGroup.Text = $"All {displayPeers.Count} active {Plural(displayPeers.Count, "device", "devices")}, one at a time (each reboots)";
         UpdateGroupButton();
     }
 
     private void UpdateIdentityPresentation()
     {
-        identityLabel.Text = $"{settings.Alias.ToUpperInvariant()}\nID {settings.NodeId:x8} · group {settings.MeshId} · {displayPeers.Count} of 16 devices";
+        identityLabel.Text = settings.Alias.ToUpperInvariant();
+        if (identityStrip.Controls.Find("IdentityMeta", true).OfType<Label>().FirstOrDefault() is { } meta)
+            meta.Text = $"ID {settings.NodeId:x8} · group {settings.MeshId} · {displayPeers.Count} of 16 devices";
         identityMicrophone.Text = $"MIC\n{TrimDeviceName((recordingDevice.SelectedItem as RecordingDevice)?.Name ?? "Not selected")}";
         identitySpeaker.Text = $"SPEAKER\n{TrimDeviceName((playbackDevice.SelectedItem as PlaybackDevice)?.Name ?? "Not selected")}";
     }
 
-    private static string TrimDeviceName(string value) => value.Length <= 23 ? value : $"{value[..20]}…";
+    private static string TrimDeviceName(string value)
+    {
+        value = value.Replace("Microphone (", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("Headset Earphone (", "", StringComparison.OrdinalIgnoreCase).TrimEnd(')');
+        return value.Length <= 23 ? value : $"{value[..20]}…";
+    }
+
+    private static Control Spacer(int width) => new Panel { Width = width, Height = 1, Margin = Padding.Empty };
+
+    private Panel CreateFilterChip(string name)
+    {
+        var label = new Label { Text = name, AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Body, Margin = new Padding(9, 5, 0, 0), Cursor = Cursors.Hand };
+        var count = new Label { Text = "0", AutoSize = true, Name = "Count", Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Muted, Margin = new Padding(5, 5, 9, 0), Cursor = Cursors.Hand };
+        var chip = new Panel { Height = 26, AutoSize = true, BackColor = UiStyles.White, Cursor = Cursors.Hand, Margin = new Padding(0, 0, 6, 0), Tag = name };
+        chip.Controls.Add(label); chip.Controls.Add(count);
+        label.Location = new Point(0, 0);
+        count.Location = new Point(label.PreferredWidth + 5, 0);
+        chip.Width = label.PreferredWidth + count.PreferredWidth + 23;
+        EventHandler select = (_, _) => { activeFilter = name; RefreshRedesignPeers(); };
+        chip.Click += select; label.Click += select; count.Click += select;
+        chip.Paint += (_, e) =>
+        {
+            var active = name == activeFilter;
+            chip.BackColor = active ? UiStyles.Ink : UiStyles.White;
+            label.ForeColor = active ? UiStyles.White : UiStyles.Body;
+            count.ForeColor = active ? UiStyles.Disabled : UiStyles.Muted;
+            UiStyles.DrawBorder(e, chip, active ? UiStyles.Ink : UiStyles.ControlBorder);
+        };
+        filterChips[name] = chip;
+        return chip;
+    }
+
+    private void UpdateFilterChips()
+    {
+        foreach (var (name, chip) in filterChips)
+        {
+            var count = name switch
+            {
+                "Speaking" => displayPeers.Count(peer => peer.IsTalking),
+                "Muted" => displayPeers.Count(peer => peer.HardwareMuted),
+                "Silenced" => displayPeers.Count(peer => peer.SoftMuted),
+                "Legacy" => displayPeers.Count(peer => peer.ProtocolVersion is null or 1),
+                _ => displayPeers.Count,
+            };
+            if (chip.Controls.Find("Count", false).OfType<Label>().FirstOrDefault() is { } label) label.Text = count.ToString();
+            chip.Invalidate();
+        }
+    }
+
+    private void LayoutDeviceCards()
+    {
+        var usable = deviceGrid.ClientSize.Width - deviceGrid.Padding.Horizontal - (deviceGrid.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0);
+        if (usable <= 0) return;
+        var width = Math.Max(185, (usable - 30) / 3);
+        foreach (var card in deviceCards.Values) card.Width = width;
+    }
+
+    private void UpdateNowBarAppearance()
+    {
+        var (background, accent, dot) = statusLabel.ForeColor == UiStyles.Blue
+            ? (UiStyles.BlueTint, UiStyles.Blue, UiStyles.Blue)
+            : statusLabel.ForeColor == UiStyles.Purple
+                ? (UiStyles.PurpleTint, UiStyles.Purple, UiStyles.Purple)
+                : statusLabel.ForeColor == UiStyles.Amber
+                    ? (UiStyles.AmberTint, UiStyles.Amber, UiStyles.Amber)
+                    : statusLabel.ForeColor == UiStyles.Red || statusLabel.ForeColor == Color.Firebrick
+                        ? (UiStyles.RedTint, UiStyles.Red, UiStyles.Red)
+                        : (UiStyles.Surface, UiStyles.Green, UiStyles.Green);
+        nowBar.BackColor = background;
+        nowAccent.BackColor = accent;
+        nowTitle.ForeColor = accent;
+        identityDot.BackColor = dot;
+    }
+
+    private static string Plural(int count, string singular, string plural) => count == 1 ? singular : plural;
+    private static string CountWord(int count) => count switch { 0 => "zero", 1 => "one", 2 => "two", 3 => "three", 4 => "four", 5 => "five", _ => count.ToString() };
+    private static string HumanAge(TimeSpan age) => age < TimeSpan.FromSeconds(90) ? "just now"
+        : age < TimeSpan.FromHours(1) ? $"not heard for {(int)age.TotalMinutes} minutes"
+        : age < TimeSpan.FromDays(1) ? $"not heard for {(int)age.TotalHours} hours"
+        : $"not heard for {(int)age.TotalDays} days";
+
+    private static void AppendDiagnosticLines(RichTextBox log, string source)
+    {
+        foreach (var raw in source.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var timestamp = raw.Length >= 19 && DateTimeOffset.TryParse(raw[..Math.Min(raw.Length, 34)], out var parsed)
+                ? parsed.ToLocalTime().ToString("HH:mm:ss") : DateTime.Now.ToString("HH:mm:ss");
+            var detail = raw.Length >= 34 && raw[10] == 'T' ? raw[34..].TrimStart() : raw;
+            var color = detail.Contains("error", StringComparison.OrdinalIgnoreCase) || detail.Contains("failed", StringComparison.OrdinalIgnoreCase) || detail.Contains("expire", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(239, 154, 154)
+                : detail.Contains("audio", StringComparison.OrdinalIgnoreCase) || detail.Contains("claim", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(100, 181, 246)
+                : detail.Contains("busy", StringComparison.OrdinalIgnoreCase) || detail.Contains("mute", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(255, 213, 79)
+                : UiStyles.Disabled;
+            log.SelectionColor = color;
+            log.AppendText($"{timestamp}  {detail.ToUpperInvariant()}{Environment.NewLine}");
+        }
+        log.SelectionStart = 0;
+        log.ScrollToCaret();
+    }
 
     private int BrandIconFrame(int logicalPixels)
     {
@@ -623,16 +898,15 @@ internal sealed partial class MainForm
 
     private Panel SettingsNavItem(string title, string page)
     {
-        var item = new Panel { Width = 238, Height = 48, Margin = Padding.Empty, Cursor = Cursors.Hand, BackColor = Color.Transparent, Tag = page };
-        var caption = new Label { Text = title, Dock = DockStyle.Fill, Padding = new Padding(18, 15, 8, 0), Font = new Font("Segoe UI", 9), Cursor = Cursors.Hand };
+        var item = new Panel { Width = 236, Height = 44, Margin = Padding.Empty, Cursor = Cursors.Hand, BackColor = Color.Transparent, Tag = page };
+        var caption = new Label { Text = title, Dock = DockStyle.Fill, Padding = new Padding(18, 11, 12, 0), Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Cursor = Cursors.Hand };
         EventHandler select = (_, _) => ShowSettings(page);
         item.Click += select; caption.Click += select;
         item.Controls.Add(caption);
         item.Paint += (_, e) =>
         {
             if (page != activeSettingsPage) return;
-            e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(21, 101, 192)), 0, 0, 3, item.Height);
-            e.Graphics.DrawLine(new Pen(Color.FromArgb(222, 225, 229)), 3, item.Height - 1, item.Width, item.Height - 1);
+            e.Graphics.FillRectangle(new SolidBrush(UiStyles.Blue), 0, 0, 3, item.Height);
         };
         return item;
     }
@@ -642,18 +916,20 @@ internal sealed partial class MainForm
         foreach (var (page, item) in settingsNavItems)
         {
             var selected = page == activeSettingsPage;
-            item.BackColor = selected ? Color.White : Color.Transparent;
+            item.BackColor = selected ? UiStyles.White : Color.Transparent;
             if (item.Controls.OfType<Label>().FirstOrDefault() is { } caption)
-                caption.Font = new Font("Segoe UI", 9, selected ? FontStyle.Bold : FontStyle.Regular);
+            {
+                caption.Font = new Font(UiStyles.BodyFont, selected ? FontStyle.Bold : FontStyle.Regular);
+                caption.ForeColor = selected ? UiStyles.Ink : UiStyles.Body;
+            }
             item.Invalidate();
         }
     }
 
-    private static TableLayoutPanel FormGrid(Point location, int width)
+    private static TableLayoutPanel FormGrid(int labelWidth)
     {
-        var grid = new TableLayoutPanel { Location = location, Width = width, AutoSize = true, ColumnCount = 3, GrowStyle = TableLayoutPanelGrowStyle.AddRows };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
+        var grid = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, GrowStyle = TableLayoutPanelGrowStyle.AddRows, Margin = Padding.Empty };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, labelWidth));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         return grid;
     }
@@ -661,42 +937,26 @@ internal sealed partial class MainForm
     private static void AddField(TableLayoutPanel grid, string label, params Control[] fields)
     {
         var row = grid.RowCount++;
-        grid.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 7, 10, 7) }, 0, row);
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.Controls.Add(new Label { Text = label, AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Padding = new Padding(0, 7, 16, 7) }, 0, row);
         var fieldPanel = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Anchor = AnchorStyles.Left };
-        foreach (var field in fields) { field.Margin = new Padding(0, 2, 8, 2); fieldPanel.Controls.Add(field); }
+        foreach (var field in fields) { field.Margin = new Padding(0, 2, 8, 8); fieldPanel.Controls.Add(field); }
         grid.Controls.Add(fieldPanel, 1, row);
-        grid.SetColumnSpan(fieldPanel, 2);
-    }
-
-    private static Button Chip(string text)
-    {
-        var button = PlainButton(text);
-        button.AutoSize = false; button.Height = 28; button.Width = text.Length > 7 ? 72 : 60;
-        button.Margin = new Padding(0, 1, 5, 0);
-        button.Padding = Padding.Empty;
-        button.FlatAppearance.BorderColor = Color.FromArgb(205, 210, 215);
-        return button;
     }
 
     private static void StylePrimary(Button button)
     {
-        button.FlatStyle = FlatStyle.Flat; button.UseVisualStyleBackColor = false;
-        button.BackColor = Color.FromArgb(21, 101, 192); button.ForeColor = Color.White;
-        button.FlatAppearance.BorderColor = Color.FromArgb(21, 101, 192); button.Padding = new Padding(12, 7, 12, 7);
+        UiStyles.StylePrimary(button);
     }
 
     private static void StyleSecondary(Button button)
     {
-        button.FlatStyle = FlatStyle.Flat; button.UseVisualStyleBackColor = false;
-        button.BackColor = Color.White; button.ForeColor = Color.FromArgb(23, 25, 28);
-        button.FlatAppearance.BorderColor = Color.FromArgb(175, 181, 187); button.Padding = new Padding(8, 5, 8, 5);
+        UiStyles.StyleButton(button, new Padding(10, 6, 10, 6));
     }
 
     private static void StyleDanger(Button button)
     {
-        button.FlatStyle = FlatStyle.Flat; button.UseVisualStyleBackColor = false;
-        button.BackColor = Color.FromArgb(178, 34, 34); button.ForeColor = Color.White;
-        button.FlatAppearance.BorderColor = Color.FromArgb(178, 34, 34); button.Padding = new Padding(10, 6, 10, 6);
+        UiStyles.StyleDanger(button);
     }
 
     private void SaveIdentityAudioSettings(bool tray, bool startWithWindows)
@@ -742,7 +1002,14 @@ internal sealed partial class MainForm
         finally { otaTargetsOverride = null; RefreshOtaQueue(); }
     }
 
-    private void UpdateGroupButton() => applyGroup.Enabled = Protocol.IsValidMeshId(groupId.Text) && groupConfirmation.Text == settings.MeshId && (applyCompanionGroup.Checked || applyActiveGroup.Checked);
+    private void UpdateGroupButton()
+    {
+        var enabled = Protocol.IsValidMeshId(groupId.Text) && groupConfirmation.Text == settings.MeshId && (applyCompanionGroup.Checked || applyActiveGroup.Checked);
+        applyGroup.Enabled = enabled;
+        applyGroup.BackColor = enabled ? UiStyles.Red : Color.FromArgb(208, 138, 138);
+        applyGroup.ForeColor = UiStyles.White;
+        applyGroup.FlatAppearance.BorderColor = applyGroup.BackColor;
+    }
 
     private async Task ApplyGroupChangeAsync()
     {
@@ -761,8 +1028,20 @@ internal sealed partial class MainForm
 
     private void RecordActivity(string text)
     {
-        activity.Items.Insert(0, $"{DateTime.Now:HH:mm:ss}  {text}");
-        while (activity.Items.Count > 120) activity.Items.RemoveAt(activity.Items.Count - 1);
+        var row = new TableLayoutPanel { Width = Math.Max(280, activity.ClientSize.Width - SystemInformation.VerticalScrollBarWidth), Height = 32, ColumnCount = 3, Padding = new Padding(16, 0, 16, 0), Margin = Padding.Empty, BackColor = UiStyles.White };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 46));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 18));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var color = text.Contains("failed", StringComparison.OrdinalIgnoreCase) ? UiStyles.Red
+            : text.Contains("busy", StringComparison.OrdinalIgnoreCase) || text.Contains("claim", StringComparison.OrdinalIgnoreCase) ? UiStyles.Amber
+            : text.Contains("receiv", StringComparison.OrdinalIgnoreCase) ? UiStyles.Blue : UiStyles.Green;
+        row.Controls.Add(new Label { Text = DateTime.Now.ToString("HH:mm"), AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Anchor = AnchorStyles.Left }, 0, 0);
+        row.Controls.Add(new Panel { Size = new Size(8, 8), BackColor = color, Anchor = AnchorStyles.Left }, 1, 0);
+        row.Controls.Add(new Label { Text = text, AutoEllipsis = true, Dock = DockStyle.Fill, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Body, TextAlign = ContentAlignment.MiddleLeft }, 2, 0);
+        row.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(242, 244, 245)); e.Graphics.DrawLine(pen, 0, row.Height - 1, row.Width, row.Height - 1); };
+        activity.Controls.Add(row);
+        activity.Controls.SetChildIndex(row, 0);
+        while (activity.Controls.Count > 6) { var old = activity.Controls[^1]; activity.Controls.Remove(old); old.Dispose(); }
     }
 
     private static FlowLayoutPanel Labeled(string label, Control field)

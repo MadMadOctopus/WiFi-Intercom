@@ -2,48 +2,93 @@ using IntercomCompanion.Core;
 
 namespace IntercomCompanion;
 
-/// <summary>One independently refreshable active-device card. It owns no network work.</summary>
+/// <summary>One refreshable device card. Network operations are delegated through events.</summary>
 internal sealed class DeviceCard : Panel
 {
-    private static readonly Color Purple = Color.FromArgb(106, 27, 154);
-    private readonly Label alias = new() { AutoEllipsis = true, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
-    private readonly Label badge = new() { AutoSize = true, ForeColor = Color.White, Font = new Font("Segoe UI", 7, FontStyle.Bold), Padding = new Padding(4, 2, 4, 2) };
-    private readonly Label details = new() { AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f) };
-    private readonly Label mute = new() { AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 8) };
-    private readonly Button talk = FlatButton("Hold to talk", Purple);
-    private readonly Button silence = FlatButton("Silence", Color.White, Color.FromArgb(23, 25, 28));
-    private readonly Button more = FlatButton("⋯", Color.White, Color.FromArgb(23, 25, 28));
-    private readonly TrackBar volume = new() { Minimum = 64, Maximum = 1024, TickStyle = TickStyle.None, SmallChange = 16 };
-    private readonly Label volumeValue = new() { AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 8) };
+    private readonly Label alias = new() { AutoEllipsis = true, Font = UiStyles.CardAlias, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label badge = new() { AutoSize = true, ForeColor = Color.White, Font = UiStyles.Badge, Padding = new Padding(6, 2, 6, 2), Margin = Padding.Empty, Anchor = AnchorStyles.Right };
+    private readonly Label details = new() { AutoEllipsis = true, ForeColor = UiStyles.Muted, Font = UiStyles.Meta, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Panel muteMarker = new() { Size = new Size(6, 6), Anchor = AnchorStyles.Left };
+    private readonly Label muteNote = new() { AutoEllipsis = true, Font = UiStyles.Meta, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Button talk = new() { Text = "Hold to talk", Dock = DockStyle.Fill };
+    private readonly Button silence = new() { Text = "Silence", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly Button more = new() { Text = "⋯", Width = 26, Height = 27, AutoSize = false, Anchor = AnchorStyles.Left };
+    private readonly FlatSlider volume = new() { Dock = DockStyle.Fill };
+    private readonly Label volumeValue = new() { AutoSize = false, Width = 34, ForeColor = UiStyles.Body, Font = UiStyles.Meta, TextAlign = ContentAlignment.MiddleRight, Anchor = AnchorStyles.Right };
     private Peer? peer;
     private bool updating;
     private float pulse;
+    private Color accent = UiStyles.Green;
 
     public DeviceCard()
     {
-        Size = new Size(304, 151);
-        Margin = new Padding(0, 0, 9, 10);
-        BackColor = Color.White;
-        Padding = new Padding(14, 10, 14, 9);
+        Size = new Size(292, 150);
+        MinimumSize = new Size(180, 150);
+        Margin = new Padding(0, 0, 10, 10);
+        BackColor = UiStyles.White;
+        Padding = new Padding(15, 10, 12, 10);
         DoubleBuffered = true;
 
-        alias.SetBounds(14, 11, 182, 18);
-        badge.Location = new Point(205, 10);
-        details.SetBounds(14, 34, 267, 15);
-        mute.SetBounds(14, 55, 267, 16);
-        talk.SetBounds(14, 76, 180, 32);
-        silence.SetBounds(198, 76, 54, 32);
-        more.SetBounds(256, 76, 26, 32);
-        volume.SetBounds(28, 118, 202, 25);
-        volumeValue.SetBounds(242, 124, 40, 16);
-        Controls.AddRange([alias, badge, details, mute, talk, silence, more, volume, volumeValue]);
+        UiStyles.StylePrimary(talk, UiStyles.Purple);
+        talk.Font = UiStyles.SecondaryFont;
+        talk.Padding = new Padding(6, 6, 6, 6);
+        UiStyles.StyleButton(silence, new Padding(8, 6, 8, 6));
+        UiStyles.StyleButton(more, Padding.Empty);
+        more.Font = new Font("Segoe UI", 12f);
+        more.Padding = Padding.Empty;
 
-        talk.MouseDown += (_, eventArgs) => { if (eventArgs.Button == MouseButtons.Left && peer is not null) TalkPressed?.Invoke(peer); };
-        talk.MouseUp += (_, eventArgs) => { if (eventArgs.Button == MouseButtons.Left) TalkReleased?.Invoke(); };
+        var rows = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty, Padding = Padding.Empty };
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 9));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+
+        var aliasRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        aliasRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        aliasRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        aliasRow.Controls.Add(alias, 0, 0);
+        aliasRow.Controls.Add(badge, 1, 0);
+
+        var muteRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty, Padding = new Padding(0, 2, 0, 0) };
+        muteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 11));
+        muteRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        muteRow.Controls.Add(muteMarker, 0, 0);
+        muteRow.Controls.Add(muteNote, 1, 0);
+
+        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty, Padding = new Padding(0, 1, 0, 0) };
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 31));
+        silence.Margin = new Padding(5, 0, 0, 0);
+        more.Margin = new Padding(5, 0, 0, 0);
+        buttons.Controls.Add(talk, 0, 0);
+        buttons.Controls.Add(silence, 1, 0);
+        buttons.Controls.Add(more, 2, 0);
+
+        var volumeRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty };
+        volumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
+        volumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        volumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));
+        volumeRow.Controls.Add(new Label { Text = "Vol", Font = UiStyles.Meta, ForeColor = UiStyles.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        volumeRow.Controls.Add(volume, 1, 0);
+        volumeRow.Controls.Add(volumeValue, 2, 0);
+
+        rows.Controls.Add(aliasRow, 0, 0);
+        rows.Controls.Add(details, 0, 1);
+        rows.Controls.Add(muteRow, 0, 2);
+        rows.Controls.Add(buttons, 0, 3);
+        rows.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = UiStyles.RowRule, Margin = new Padding(0, 8, 0, 0) }, 0, 4);
+        rows.Controls.Add(volumeRow, 0, 5);
+        Controls.Add(rows);
+
+        talk.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left && peer is not null) TalkPressed?.Invoke(peer); };
+        talk.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) TalkReleased?.Invoke(); };
         talk.MouseCaptureChanged += (_, _) => { if (!talk.Capture) TalkReleased?.Invoke(); };
         silence.Click += (_, _) => { if (peer is not null) SilenceClicked?.Invoke(peer); };
         more.Click += (_, _) => { if (peer is not null) MoreClicked?.Invoke(peer); };
-        volume.MouseUp += (_, eventArgs) => { if (eventArgs.Button == MouseButtons.Left && peer is not null && !updating) VolumeCommitted?.Invoke(peer, volume.Value); };
+        volume.ValueCommitted += (_, _) => { if (peer is not null && !updating) VolumeCommitted?.Invoke(peer, volume.Value); };
     }
 
     public event Action<Peer>? TalkPressed;
@@ -56,30 +101,35 @@ internal sealed class DeviceCard : Panel
     {
         peer = value;
         updating = true;
+        accent = value.IsTalking ? UiStyles.Blue
+            : value.HardwareMuted || value.ProtocolVersion is null or 1 ? UiStyles.Amber
+            : value.SoftMuted ? UiStyles.Body : UiStyles.Green;
         alias.Text = value.Alias;
-        var (badgeText, badgeColor) = value.IsTalking ? ("SPEAKING", Color.FromArgb(21, 101, 192))
-            : value.HardwareMuted ? ("MUTED", Color.FromArgb(249, 168, 37))
-            : value.SoftMuted ? ("SOFT MUTED", Color.FromArgb(99, 103, 109))
-            : value.ProtocolVersion is null or 1 ? ("LEGACY", Color.FromArgb(99, 103, 109))
-            : ("IDLE", Color.FromArgb(46, 125, 50));
-        badge.Text = badgeText;
-        badge.BackColor = badgeColor;
+        var state = value.IsTalking ? "SPEAKING" : value.HardwareMuted ? "MUTED"
+            : value.SoftMuted ? "SOFT MUTED" : value.ProtocolVersion is null or 1 ? "LEGACY" : "IDLE";
+        badge.Text = state;
+        badge.BackColor = accent;
         details.Text = $"{value.NodeId:x8} · {value.Endpoint.Address} · {value.FirmwareVersion} · {(value.ProtocolVersion is null ? "legacy" : $"p{value.ProtocolVersion}")}";
-        mute.Text = value.HardwareMuted ? "● Mute slider on at the device"
-            : value.SoftMuted ? "● Soft muted from here"
-            : value.SupportsMuteReporting ? "● Playing received audio"
-            : "● No mute reporting before p2";
+        muteMarker.BackColor = value.IsTalking ? UiStyles.Blue : value.HardwareMuted ? UiStyles.Amber
+            : value.SoftMuted ? UiStyles.Body : value.SupportsMuteReporting ? UiStyles.Green : Color.FromArgb(201, 204, 208);
+        muteNote.ForeColor = value.IsTalking ? UiStyles.Blue : value.HardwareMuted ? Color.FromArgb(107, 83, 0)
+            : value.SoftMuted ? UiStyles.Body : UiStyles.Muted;
+        muteNote.Text = value.IsTalking ? "Holding the floor" : value.HardwareMuted ? "Mute slider on at the device"
+            : value.SoftMuted ? "Soft muted from here" : value.SupportsMuteReporting ? "Playing received audio"
+            : "No mute reporting before p2";
+
         talk.Enabled = !pttDisabled;
         silence.Enabled = !pttDisabled && value.SupportsMuteReporting && !value.HardwareMuted;
         silence.Text = value.SoftMuted ? "Silenced" : "Silence";
-        var silenceUnavailable = !silence.Enabled;
-        silence.ForeColor = silenceUnavailable ? Color.FromArgb(154, 160, 166) : value.SoftMuted ? Color.White : Color.FromArgb(23, 25, 28);
-        silence.BackColor = silenceUnavailable ? Color.FromArgb(245, 246, 247) : value.SoftMuted ? Color.FromArgb(99, 103, 109) : Color.White;
-        silence.FlatAppearance.BorderColor = silenceUnavailable ? Color.FromArgb(220, 223, 227) : Color.FromArgb(173, 178, 184);
+        silence.ForeColor = !silence.Enabled ? UiStyles.Disabled : value.SoftMuted ? UiStyles.White : UiStyles.Body;
+        silence.BackColor = !silence.Enabled ? Color.FromArgb(242, 244, 245) : value.SoftMuted ? UiStyles.Body : UiStyles.White;
+        silence.FlatAppearance.BorderColor = !silence.Enabled ? UiStyles.Border : UiStyles.ControlBorder;
         silence.AccessibleDescription = value.HardwareMuted ? "Unavailable while the physical mute slider is on" : null;
-        var correctedVolume = Math.Clamp(knownVolume, volume.Minimum, volume.Maximum);
-        if (!volume.Capture) volume.Value = correctedVolume;
-        volumeValue.Text = correctedVolume.ToString();
+
+        volume.Enabled = !pttDisabled;
+        volume.AccentColor = accent;
+        volume.Value = Math.Clamp(knownVolume, volume.Minimum, volume.Maximum);
+        volumeValue.Text = knownVolume.ToString();
         updating = false;
         Invalidate();
     }
@@ -87,29 +137,25 @@ internal sealed class DeviceCard : Panel
     public void SetPulse(float nextPulse)
     {
         pulse = nextPulse;
-        Invalidate();
+        if (peer?.IsTalking == true) Invalidate();
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
-        var talking = peer?.IsTalking == true;
-        var phase = (MathF.Sin(pulse) + 1f) / 2f;
-        var colour = talking
-            ? Blend(Color.FromArgb(70, 150, 220), Color.FromArgb(21, 101, 192), phase)
-            : Color.FromArgb(220, 223, 227);
-        using var basePen = new Pen(colour, talking ? 3 : 1);
-        eventArgs.Graphics.DrawRectangle(basePen, 2, 2, Width - 5, Height - 5);
-        if (!talking) return;
+        var border = peer?.IsTalking == true
+            ? Blend(UiStyles.Border, UiStyles.Blue, (MathF.Sin(pulse) + 1f) / 2f)
+            : UiStyles.Border;
+        using var pen = new Pen(border);
+        eventArgs.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        using var accentBrush = new SolidBrush(accent);
+        eventArgs.Graphics.FillRectangle(accentBrush, 0, 0, 3, Height);
+        if (peer?.IsTalking != true) return;
+        using var halo = new Pen(Color.FromArgb(70, UiStyles.Blue), 2);
+        eventArgs.Graphics.DrawRectangle(halo, 1, 1, Width - 3, Height - 3);
     }
 
     private static Color Blend(Color from, Color to, float amount) => Color.FromArgb(
         (int)(from.R + (to.R - from.R) * amount), (int)(from.G + (to.G - from.G) * amount),
         (int)(from.B + (to.B - from.B) * amount));
-
-    private static Button FlatButton(string text, Color background, Color? foreground = null) => new()
-    {
-        Text = text, BackColor = background, ForeColor = foreground ?? Color.White, FlatStyle = FlatStyle.Flat,
-        Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), UseVisualStyleBackColor = false,
-    };
 }

@@ -16,6 +16,7 @@ internal sealed partial class MainForm
     private readonly TextBox deviceFilter = new() { Width = 145, PlaceholderText = "Alias or ID" };
     private readonly Label deviceCount = new() { AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold) };
     private readonly Label nowKicker = new() { AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 8, FontStyle.Regular) };
+    private readonly Label nowTitle = new() { AutoSize = true, Font = new Font("Segoe UI", 22, FontStyle.Bold) };
     private readonly Label nowDetail = new() { AutoSize = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 9) };
     private readonly ListBox activity = new() { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 8) };
     private readonly Panel pageHost = new() { Dock = DockStyle.Fill };
@@ -97,10 +98,12 @@ internal sealed partial class MainForm
 
         var nowBar = new Panel { Dock = DockStyle.Top, Height = 76, BackColor = Color.FromArgb(232, 243, 251), Padding = new Padding(20, 0, 20, 0) };
         var nowAccent = new Panel { Location = new Point(20, 16), Size = new Size(4, 44), BackColor = Color.FromArgb(46, 125, 50), Anchor = AnchorStyles.Left | AnchorStyles.Top };
-        statusLabel.Location = new Point(40, 29);
-        statusLabel.AutoSize = true;
-        statusLabel.Font = new Font("Segoe UI", 22, FontStyle.Bold);
-        statusLabel.Visible = true;
+        // statusLabel remains the state source for the original audio code;
+        // nowTitle is the dedicated visual owner for this redesigned strip.
+        statusLabel.Visible = false;
+        nowTitle.Location = new Point(40, 29);
+        nowTitle.Text = "Idle";
+        nowTitle.ForeColor = Color.FromArgb(46, 125, 50);
         nowKicker.Location = new Point(40, 14);
         nowKicker.Text = "READY";
         nowDetail.AutoSize = false;
@@ -109,10 +112,10 @@ internal sealed partial class MainForm
         nowDetail.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         nowDetail.TextAlign = ContentAlignment.MiddleRight;
         nowDetail.Visible = true;
-        nowBar.Controls.AddRange([nowAccent, nowKicker, statusLabel, nowDetail]);
-        nowBar.Paint += (_, _) => nowAccent.BackColor = statusLabel.ForeColor;
+        nowBar.Controls.AddRange([nowAccent, nowKicker, nowTitle, nowDetail]);
+        nowBar.Paint += (_, _) => nowAccent.BackColor = nowTitle.ForeColor;
         nowBar.Paint += (_, eventArgs) => eventArgs.Graphics.DrawLine(new Pen(Color.FromArgb(202, 220, 232)), 0, nowBar.Height - 1, nowBar.Width, nowBar.Height - 1);
-        statusLabel.BringToFront();
+        nowTitle.BringToFront();
         nowDetail.BringToFront();
 
         BuildTalkPage();
@@ -165,19 +168,24 @@ internal sealed partial class MainForm
         var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 0, 0), BackColor = Color.FromArgb(245, 246, 247) };
         var pttPanel = new Panel { Dock = DockStyle.Top, Height = 214, Padding = new Padding(16, 14, 16, 0), BackColor = Color.White };
         pttPanel.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, pttPanel.Width - 1, pttPanel.Height - 1);
-        broadcast.AutoSize = reply.AutoSize = false;
+        broadcast.AutoSize = replySurface.AutoSize = false;
         broadcast.SetBounds(16, 14, 260, 62);
-        reply.SetBounds(16, 116, 260, 44);
+        replySurface.SetBounds(16, 116, 260, 44);
         broadcast.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        reply.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+        replySurface.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         pttPanel.Resize += (_, _) =>
         {
             broadcast.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
-            reply.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
+            replySurface.Width = Math.Max(1, pttPanel.ClientSize.Width - 32);
         };
         var broadcastHint = new Label { Text = $"Everyone in group {settings.MeshId}                         Space / Ctrl+Alt+B", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f), Location = new Point(16, 90), Size = new Size(260, 14), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
         var replyHint = new Label { Text = "Last sender: none                                         Ctrl+Alt+R", AutoEllipsis = true, ForeColor = Color.FromArgb(99, 103, 109), Font = new Font("Segoe UI", 7.5f), Location = new Point(16, 169), Size = new Size(260, 14), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
-        pttPanel.Controls.AddRange([broadcast, broadcastHint, reply, replyHint]);
+        replySurface.AutoSize = false;
+        replySurface.UseVisualStyleBackColor = false;
+        replySurface.BackColor = Color.FromArgb(21, 101, 192);
+        replySurface.ForeColor = Color.White;
+        replySurface.FlatAppearance.BorderColor = Color.FromArgb(21, 101, 192);
+        pttPanel.Controls.AddRange([broadcast, broadcastHint, replySurface, replyHint]);
         var gap = new Panel { Dock = DockStyle.Top, Height = 12, BackColor = Color.FromArgb(245, 246, 247) };
         var activityPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
         activityPanel.Paint += (_, e) => e.Graphics.DrawRectangle(new Pen(Color.FromArgb(220, 223, 227)), 0, 0, activityPanel.Width - 1, activityPanel.Height - 1);
@@ -480,6 +488,8 @@ internal sealed partial class MainForm
             foreach (var (value, name) in new[] { ($"{statistics.AudioPackets:n0}", "Diagnostic0"), ($"{statistics.DecodedFrames:n0}", "Diagnostic1"), ($"{statistics.ConcealedFrames:n0}", "Diagnostic2"), ($"{audio?.BufferedMilliseconds ?? 0} ms", "Diagnostic3") })
                 foreach (var label in settingsPage.Controls.Find(name, true).OfType<Label>()) label.Text = value;
         }
+        nowTitle.Text = statusLabel.Text;
+        nowTitle.ForeColor = statusLabel.ForeColor;
     }
 
     private async Task ToggleSoftMuteAsync(Peer peer)

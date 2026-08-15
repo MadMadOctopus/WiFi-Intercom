@@ -46,6 +46,7 @@ internal sealed partial class MainForm : Form
     };
     private readonly Button broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
     private readonly Button reply = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
+    private readonly Button replySurface = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
     private readonly Button selected = CreatePttButton("Hold to selected device", Color.FromArgb(106, 27, 154));
     // This is a local draft, not a view of the live device list. Discovery
     // must never lock or discard a user's in-progress settings edit.
@@ -83,9 +84,10 @@ internal sealed partial class MainForm : Form
         companionAlias.Text = settings.Alias;
         networkLabel.Text = "Discovery: starting…";
 
-        broadcast.Enabled = reply.Enabled = selected.Enabled = false;
+        broadcast.Enabled = reply.Enabled = replySurface.Enabled = selected.Enabled = false;
         BindPtt(broadcast, () => receiveSession?.PressBroadcast());
         BindPtt(reply, () => receiveSession?.PressReply());
+        BindPtt(replySurface, () => receiveSession?.PressReply());
         BindPtt(selected, () =>
         {
             var peer = SelectedPeer;
@@ -214,7 +216,7 @@ internal sealed partial class MainForm : Form
             PopulateAudioDevices();
             StartAudioEngine();
             ShowIntercomState(IntercomState.Idle);
-            broadcast.Enabled = reply.Enabled = true;
+            broadcast.Enabled = reply.Enabled = replySurface.Enabled = true;
             selected.Enabled = SelectedPeer is not null;
         }
         catch (Exception exception)
@@ -405,7 +407,7 @@ internal sealed partial class MainForm : Form
         if (!ConfirmOtaUpdate(package, targets)) return;
 
         otaUpdating = true;
-        broadcast.Enabled = reply.Enabled = selected.Enabled = false;
+        broadcast.Enabled = reply.Enabled = replySurface.Enabled = selected.Enabled = false;
         UpdateSelectedDeviceActions();
         try
         {
@@ -443,7 +445,7 @@ internal sealed partial class MainForm : Form
         finally
         {
             otaUpdating = false;
-            broadcast.Enabled = reply.Enabled = true;
+            broadcast.Enabled = reply.Enabled = replySurface.Enabled = true;
             UpdateSelectedDeviceActions();
         }
     }
@@ -479,6 +481,8 @@ internal sealed partial class MainForm : Form
         };
         nowDetail.Text = sessionState == IntercomState.Receiving && receiveSession?.LastTalker is { } talker
             ? $"{talker.Alias} is speaking" : statusLabel.Text;
+        nowTitle.Text = statusLabel.Text;
+        nowTitle.ForeColor = statusLabel.ForeColor;
         RecordActivity(statusLabel.Text);
     }
 

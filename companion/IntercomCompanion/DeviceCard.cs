@@ -11,8 +11,8 @@ internal sealed class DeviceCard : Panel
     private readonly Panel muteMarker = new() { Size = new Size(6, 6), Anchor = AnchorStyles.Left };
     private readonly Label muteNote = new() { AutoEllipsis = true, Font = UiStyles.Meta, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button talk = new() { Text = "Hold to talk", Dock = DockStyle.Fill };
-    private readonly Button silence = new() { Text = "Silence", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly Button more = new() { Text = "⋯", Width = 26, Height = 27, AutoSize = false, Anchor = AnchorStyles.Left };
+    private readonly Button silence = new() { Text = "Silence", AutoSize = false, Dock = DockStyle.Fill };
+    private readonly Button more = new() { Text = "⋯", AutoSize = false, Dock = DockStyle.Fill };
     private readonly FlatSlider volume = new() { Dock = DockStyle.Fill };
     private readonly Label volumeValue = new() { AutoSize = false, Width = 34, ForeColor = UiStyles.Body, Font = UiStyles.Meta, TextAlign = ContentAlignment.MiddleRight, Anchor = AnchorStyles.Right };
     private Peer? peer;
@@ -22,28 +22,32 @@ internal sealed class DeviceCard : Panel
 
     public DeviceCard()
     {
-        Size = new Size(292, 150);
-        MinimumSize = new Size(180, 150);
-        Margin = new Padding(0, 0, 10, 10);
+        // The grid owns placement: Dock = Fill, a fixed row height and a 5 px
+        // margin. The card never carries an absolute Size of its own.
+        Dock = DockStyle.Fill;
+        Margin = new Padding(5);
         BackColor = UiStyles.White;
         Padding = new Padding(15, 10, 12, 10);
         DoubleBuffered = true;
 
         UiStyles.StylePrimary(talk, UiStyles.Purple);
+        talk.AutoSize = false;
         talk.Font = UiStyles.SecondaryFont;
-        talk.Padding = new Padding(6, 6, 6, 6);
-        UiStyles.StyleButton(silence, new Padding(8, 6, 8, 6));
+        talk.Padding = Padding.Empty;
+        UiStyles.StyleButton(silence, Padding.Empty);
+        silence.AutoSize = false;
         UiStyles.StyleButton(more, Padding.Empty);
+        more.AutoSize = false;
         more.Font = new Font("Segoe UI", 12f);
         more.Padding = Padding.Empty;
 
         var rows = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty, Padding = Padding.Empty };
         rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 15));
         rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
-        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 9));
-        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        rows.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
 
         var aliasRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
         aliasRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -57,10 +61,11 @@ internal sealed class DeviceCard : Panel
         muteRow.Controls.Add(muteMarker, 0, 0);
         muteRow.Controls.Add(muteNote, 1, 0);
 
-        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty, Padding = new Padding(0, 1, 0, 0) };
+        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty, Padding = Padding.Empty };
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 31));
+        talk.Margin = Padding.Empty;
         silence.Margin = new Padding(5, 0, 0, 0);
         more.Margin = new Padding(5, 0, 0, 0);
         buttons.Controls.Add(talk, 0, 0);
@@ -101,6 +106,7 @@ internal sealed class DeviceCard : Panel
     {
         peer = value;
         updating = true;
+        var previousAccent = accent;
         accent = value.IsTalking ? UiStyles.Blue
             : value.HardwareMuted || value.ProtocolVersion is null or 1 ? UiStyles.Amber
             : value.SoftMuted ? UiStyles.Body : UiStyles.Green;
@@ -131,7 +137,10 @@ internal sealed class DeviceCard : Panel
         volume.Value = Math.Clamp(knownVolume, volume.Minimum, volume.Maximum);
         volumeValue.Text = knownVolume.ToString();
         updating = false;
-        Invalidate();
+        // The painted parts (accent bar, animated border) only depend on accent
+        // and the pulse phase; repaint just those cases so an idle 1 s refresh of
+        // sixteen cards does not force sixteen full repaints.
+        if (accent != previousAccent) Invalidate();
     }
 
     public void SetPulse(float nextPulse)

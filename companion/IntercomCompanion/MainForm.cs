@@ -1,186 +1,130 @@
-using IntercomCompanion.Core;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using IntercomCompanion.Audio;
+using IntercomCompanion.Core;
+using IntercomCompanion.Dialogs;
+using IntercomCompanion.Views;
+using IntercomCompanion.Views.Settings;
 
 namespace IntercomCompanion;
 
-/// <summary>UI-only WinForms surface; all intercom work lives in Core.</summary>
-internal sealed partial class MainForm : Form
+/// <summary>The window controller. It owns node, audio, session, timers and
+/// event wiring only; every pixel of layout lives in the views under
+/// <c>Views/</c> and <c>Dialogs/</c>.</summary>
+internal sealed class MainForm : Form
 {
     private readonly CompanionSettings settings = CompanionSettings.Load();
+    private readonly KnownDevicesStore knownDevices = KnownDevicesStore.Load();
+    private readonly Dictionary<uint, DeviceConfiguration> configurations = [];
+    private readonly Dictionary<uint, DateTimeOffset> rememberedAt = [];
+
+    private readonly IdentityStrip identityStrip = new();
+    private readonly NowBar nowBar = new();
+    private readonly TalkView talkView = new();
+    private readonly SettingsView settingsView = new();
+    private readonly AppStatusBar statusBar = new();
+    private readonly ShellView shell;
+
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
+    private readonly CancellationTokenSource otaStopping = new();
+    private readonly HashSet<uint> queuedOtaDevices = [];
+    private readonly Dictionary<uint, (string State, Color Color, int Progress, string Detail)> otaProgress = [];
+
     private IntercomNode? node;
     private AudioEngine? audio;
     private ReceiveSession? receiveSession;
-    private Label identityLabel = new() { AutoSize = true };
-    private readonly TextBox companionAlias = new() { Width = 180 };
-    private readonly Button saveCompanionAlias = new() { Text = "Save companion alias", AutoSize = true };
-    private readonly ComboBox recordingDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly ComboBox playbackDevice = new() { Width = 250, DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly Button applyAudioDevices = new() { Text = "Apply audio devices", AutoSize = true };
-    private readonly ComboBox usbPort = new() { Width = 90, DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly Button refreshUsbPorts = new() { Text = "Refresh ports", AutoSize = true };
-    private readonly TextBox usbSsid = new() { Width = 150, MaxLength = 32 };
-    private readonly TextBox usbPassword = new() { Width = 150, MaxLength = 64, UseSystemPasswordChar = true };
-    private readonly TextBox usbAlias = new() { Width = 150, MaxLength = 24 };
-    private readonly Button getUsbConfig = new() { Text = "Read USB config", AutoSize = true };
-    private readonly Button applyUsbWifi = new() { Text = "Apply Wi-Fi over USB", AutoSize = true };
-    private readonly Label usbStatus = new() { AutoSize = true, ForeColor = Color.DimGray };
-    private readonly TextBox otaManifest = new() { Width = 260, ReadOnly = true };
-    private readonly Button browseOtaManifest = new() { Text = "Choose signed OTA package", AutoSize = true };
-    private readonly Button updateSelectedDevice = new() { Text = "Update selected device", Enabled = false, AutoSize = true };
-    private readonly Button updateAllDevices = new() { Text = "Update all active devices", Enabled = false, AutoSize = true };
-    private readonly Label otaStatus = new() { AutoSize = true, ForeColor = Color.DimGray, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
-    private readonly Label networkLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
-    private readonly Label statusLabel = new()
-    {
-        AutoSize = true,
-        Font = new Font("Segoe UI", 18, FontStyle.Bold),
-        ForeColor = Color.DimGray,
-        Text = "Starting…"
-    };
-    private readonly ListView devices = new()
-    {
-        Dock = DockStyle.Fill, FullRowSelect = true, GridLines = true,
-        MultiSelect = false, View = View.Details
-    };
-    private Button broadcast = CreatePttButton("Hold to broadcast", Color.FromArgb(46, 125, 50));
-    private readonly Button reply = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
-    private Button replySurface = CreatePttButton("Hold to reply", Color.FromArgb(21, 101, 192));
-    private readonly Button selected = CreatePttButton("Hold to selected device", Color.FromArgb(106, 27, 154));
-    // This is a local draft, not a view of the live device list. Discovery
-    // must never lock or discard a user's in-progress settings edit.
-    private readonly TextBox alias = new();
-    private readonly FlatSlider volume = new() { Minimum = 64, Maximum = 1024, Width = 220, AccentColor = UiStyles.Green };
-    private readonly FlatSlider brightness = new() { Minimum = 0, Maximum = 255, Width = 220, AccentColor = UiStyles.Amber };
-    private readonly CheckBox buttonsSwapped = new();
-    private readonly ComboBox orientation = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly Button getConfig = new() { Text = "Get configuration", Enabled = false, AutoSize = true };
-    private readonly Button applyConfig = new() { Text = "Apply configuration", Enabled = false, AutoSize = true };
-    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
+    private GlobalPttHotkeys? globalHotkeys;
+    private NotifyIcon? trayIcon;
+
+    private IReadOnlyList<Peer> displayPeers = [];
+    private OtaPackage? otaPackage;
     private bool spaceHeld;
     private bool otaUpdating;
-    private uint? selectedDeviceId;
-    private bool refreshingDeviceList;
-    private readonly CancellationTokenSource otaStopping = new();
-    private IReadOnlyList<Peer>? otaTargetsOverride;
-    private GlobalPttHotkeys? globalHotkeys;
+    private bool allowExit;
+    private string? degraded;
+    private DateTimeOffset receivingSince = DateTimeOffset.UtcNow;
+    private long lastLogLength = -1;
 
     public MainForm()
     {
         Text = "Wi-Fi Intercom Companion";
-        StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(820, 560);
-        Size = new Size(960, 650);
-        Font = new Font("Segoe UI", 9);
         Icon = BrandAssets.AppIcon;
         ShowIcon = true;
+        StartPosition = FormStartPosition.CenterScreen;
+        Font = new Font("Segoe UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ClientSize = new Size(1280, 820);
+        MinimumSize = new Size(1024, 700);
+        BackColor = UiStyles.Surface;
+        DoubleBuffered = true;
+        KeyPreview = true;
+        AcceptButton = null;
 
-        var title = new Label
-        {
-            Text = "Wi-Fi Intercom Companion",
-            Font = new Font("Segoe UI", 14, FontStyle.Bold),
-            AutoSize = true,
-        };
-        identityLabel.Text = $"Companion ID: {settings.NodeId:x8}";
-        companionAlias.Text = settings.Alias;
-        networkLabel.Text = "Discovery: starting…";
+        shell = new ShellView(identityStrip, nowBar, talkView, settingsView, statusBar);
+        Controls.Add(shell);
 
-        broadcast.Enabled = reply.Enabled = replySurface.Enabled = selected.Enabled = false;
-        BindPtt(broadcast, () => receiveSession?.PressBroadcast());
-        BindPtt(reply, () => receiveSession?.PressReply());
-        BindPtt(replySurface, () => receiveSession?.PressReply());
-        BindPtt(selected, () =>
-        {
-            var peer = SelectedPeer;
-            if (peer is not null) receiveSession?.PressSelected(peer);
-        });
-        var pttPanel = new FlowLayoutPanel
-        {
-            AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false, Padding = new Padding(0, 8, 0, 8),
-        };
-        pttPanel.Controls.AddRange([broadcast, reply, selected]);
-
-        devices.Columns.Add("Alias", 150);
-        devices.Columns.Add("Device ID", 110);
-        devices.Columns.Add("Address", 135);
-        devices.Columns.Add("Firmware / protocol", 145);
-        devices.Columns.Add("Last seen", 90);
-        devices.SelectedIndexChanged += (_, _) =>
-        {
-            if (!refreshingDeviceList) OnSelectedDeviceChanged();
-        };
-        var deviceGroup = new GroupBox { Text = "Active devices", Dock = DockStyle.Fill };
-        deviceGroup.Controls.Add(devices);
-
-        orientation.Items.AddRange(["0", "180"]);
-        orientation.SelectedItem = "0";
-        var config = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Top, Padding = new Padding(8) };
-        config.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        config.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        AddConfigField(config, "Alias", alias);
-        AddConfigField(config, "Volume", volume);
-        AddConfigField(config, "Ring brightness", brightness);
-        AddConfigField(config, "Buttons swapped", buttonsSwapped);
-        AddConfigField(config, "Ring orientation", orientation);
-        var configActions = new FlowLayoutPanel { AutoSize = true };
-        configActions.Controls.AddRange([getConfig, applyConfig]);
-        config.SetColumnSpan(configActions, 2);
-        config.Controls.Add(configActions, 0, config.RowCount++);
-        getConfig.Click += async (_, _) => await RequestSelectedConfigAsync();
-        applyConfig.Click += async (_, _) => await ApplySelectedConfigAsync();
-        var configGroup = new GroupBox { Text = "Selected device configuration", Dock = DockStyle.Fill };
-        configGroup.Controls.Add(config);
-
-        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(12, 0, 12, 12) };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
-        body.Controls.Add(deviceGroup, 0, 0);
-        body.Controls.Add(configGroup, 1, 0);
-
-        var top = new FlowLayoutPanel
-        {
-            AutoSize = true, FlowDirection = FlowDirection.TopDown,
-            WrapContents = false, Dock = DockStyle.Top, Padding = new Padding(12, 12, 12, 0),
-        };
-        var aliasRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        aliasRow.Controls.AddRange([new Label { Text = "Companion alias", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, companionAlias, saveCompanionAlias]);
-        saveCompanionAlias.Click += (_, _) => SaveCompanionAlias();
-        var audioRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        audioRow.Controls.AddRange([
-            new Label { Text = "Recording", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, recordingDevice,
-            new Label { Text = "Playback", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, playbackDevice,
-            applyAudioDevices]);
-        applyAudioDevices.Click += (_, _) => ApplyAudioDeviceSelection();
-        var usbRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        usbRow.Controls.AddRange([
-            new Label { Text = "USB port", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, usbPort, refreshUsbPorts,
-            new Label { Text = "Wi-Fi SSID", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, usbSsid,
-            new Label { Text = "Password", AutoSize = true, Padding = new Padding(8, 5, 0, 0) }, usbPassword,
-            getUsbConfig, applyUsbWifi]);
-        refreshUsbPorts.Click += (_, _) => RefreshUsbPorts();
-        getUsbConfig.Click += async (_, _) => await ReadUsbConfigurationAsync();
-        applyUsbWifi.Click += async (_, _) => await ApplyUsbWifiAsync();
-        var otaRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        otaRow.Controls.AddRange([
-            new Label { Text = "Firmware OTA", AutoSize = true, Padding = new Padding(0, 5, 0, 0) }, otaManifest,
-            browseOtaManifest, updateSelectedDevice, updateAllDevices]);
-        browseOtaManifest.Click += (_, _) => ChooseOtaManifest();
-        updateSelectedDevice.Click += async (_, _) => await StartOtaUpdateAsync(updateAll: false);
-        updateAllDevices.Click += async (_, _) => await StartOtaUpdateAsync(updateAll: true);
-        top.Controls.AddRange([title, identityLabel, aliasRow, audioRow, usbRow, usbStatus, otaRow, otaStatus, networkLabel, statusLabel, pttPanel]);
-        Controls.Add(body);
-        Controls.Add(top);
+        WireEvents();
 
         Shown += OnShown;
         FormClosing += OnFormClosing;
         refreshTimer.Tick += (_, _) => RefreshPeers();
-        KeyPreview = true;
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
-        BuildRedesign();
+
+        talkView.SetBroadcastScope(settings.MeshId);
+        settingsView.Group.SetCompanionId(settings.NodeId);
+        settingsView.Identity.SetCompanionId(settings.NodeId);
+        settingsView.Identity.SetAlias(settings.Alias);
+        settingsView.Identity.SetWindowOptions(settings.RunInNotificationArea, settings.StartWithWindows);
+        settingsView.Group.SetContext(settings.MeshId, 0);
+        UpdateIdentityStrip();
+        UpdateNowBar();
     }
+
+    // ---- Event wiring ------------------------------------------------------
+
+    private void WireEvents()
+    {
+        identityStrip.ChangeAudioClicked += (_, _) => OpenSettings("Identity");
+        identityStrip.SettingsClicked += (_, _) => OpenSettings("USB");
+        identityStrip.LocalMuteToggled += (_, muted) => audio?.SetLocalPlaybackMuted(muted);
+
+        BindPtt(talkView.Broadcast, () => receiveSession?.PressBroadcast());
+        BindPtt(talkView.Reply, () => receiveSession?.PressReply());
+
+        talkView.Grid.TalkPressed += peer => { if (!otaUpdating) receiveSession?.PressSelected(peer); };
+        talkView.Grid.TalkReleased += () => receiveSession?.ReleasePtt();
+        talkView.Grid.SilenceClicked += async peer => await ToggleSoftMuteAsync(peer);
+        talkView.Grid.MoreClicked += ShowDeviceMenu;
+        talkView.Grid.VolumeCommitted += async (peer, value) => await CommitVolumeAsync(peer, value);
+
+        talkView.KnownDevices.RemoveClicked += RemoveKnownDevice;
+        talkView.KnownDevices.RemoveAllClicked += RemoveAllOffline;
+        talkView.Activity.OpenRecordingsClicked += (_, _) => OpenRecordingsFolder();
+        talkView.Activity.DiagnosticsClicked += (_, _) => OpenSettings("Diagnostics");
+
+        settingsView.PageShown += OnSettingsPageShown;
+        settingsView.BackToTalkClicked += () => shell.ShowTalk();
+        settingsView.Usb.RescanClicked += async (_, _) => await RescanUsbAsync();
+        settingsView.Usb.SendClicked += async (_, _) => await ApplyUsbWifiAsync();
+        settingsView.Group.ApplyClicked += async (_, _) => await ApplyGroupChangeAsync();
+        settingsView.Firmware.ChoosePackageClicked += (_, _) => ChooseOtaPackage();
+        settingsView.Firmware.AddAllClicked += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
+        settingsView.Firmware.StartQueueClicked += async (_, _) => await RunOtaQueueAsync();
+        settingsView.Firmware.RowActionClicked += nodeId => { if (!otaUpdating) { queuedOtaDevices.Remove(nodeId); otaProgress.Remove(nodeId); RefreshOtaQueue(); } };
+        settingsView.Identity.SaveClicked += (_, _) => SaveIdentitySettings();
+        settingsView.Diagnostics.CopyLogClicked += (_, _) => { try { Clipboard.SetText(ReadDiagnosticLog()); } catch { } };
+        settingsView.Diagnostics.SaveLogClicked += (_, _) => SaveDiagnosticLog();
+    }
+
+    private void OpenSettings(string page)
+    {
+        settingsView.Show(page);
+        shell.ShowSettings();
+    }
+
+    // ---- Lifecycle ---------------------------------------------------------
 
     private void OnShown(object? sender, EventArgs e)
     {
@@ -189,10 +133,10 @@ internal sealed partial class MainForm : Form
             settings.Save();
             node = new IntercomNode(settings);
             node.PeersChanged += (_, _) => PostToUi(RefreshPeers);
-            node.Diagnostic += message => PostToUi(() => networkLabel.Text = $"Discovery: {message}");
-            node.OtaStatusReceived += (_, eventArgs) => PostToUi(() => ShowOtaStatus(eventArgs));
+            node.Diagnostic += message => PostToUi(() => statusBar.SetMessage($"Discovery: {message}"));
+            node.OtaStatusReceived += (_, args) => PostToUi(() => OnOtaStatus(args));
             node.Start();
-            networkLabel.Text = "Discovery: listening on 239.255.42.99:45678";
+            statusBar.SetMessage("Discovery: listening on 239.255.42.99:45678");
             try
             {
                 globalHotkeys = new GlobalPttHotkeys();
@@ -207,256 +151,636 @@ internal sealed partial class MainForm : Form
         }
         catch (SocketException exception)
         {
-            networkLabel.Text = $"Discovery unavailable: {exception.SocketErrorCode}";
-            statusLabel.Text = "Network unavailable";
-            nowKicker.Text = "NETWORK";
-            statusLabel.ForeColor = Color.Firebrick;
+            ShowDegraded("NETWORK UNAVAILABLE", "Network unavailable", $"Discovery unavailable: {exception.SocketErrorCode}", UiStyles.Red, UiStyles.RedTint);
             return;
         }
+
         try
         {
             PopulateAudioDevices();
             StartAudioEngine();
-            ShowIntercomState(IntercomState.Idle);
-            broadcast.Enabled = reply.Enabled = replySurface.Enabled = true;
-            selected.Enabled = SelectedPeer is not null;
+            talkView.Broadcast.Enabled = talkView.Reply.Enabled = true;
+            UpdateNowBar();
         }
         catch (Exception exception)
         {
-            statusLabel.Text = "Audio unavailable";
-            nowKicker.Text = "AUDIO";
-            nowDetail.Text = exception.Message;
-            statusLabel.ForeColor = Color.Firebrick;
+            ShowDegraded("AUDIO UNAVAILABLE", "Audio unavailable", exception.Message, UiStyles.Amber, UiStyles.AmberTint);
         }
-        RefreshUsbPorts();
+
+        _ = RescanUsbAsync();
+        _ = RefreshSsidsAsync();
         refreshTimer.Start();
         EnableTray();
+        RefreshPeers();
     }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (KeepRunningInTray(e)) return;
+        refreshTimer.Stop();
+        otaStopping.Cancel();
+        globalHotkeys?.Dispose();
+        globalHotkeys = null;
+        receiveSession?.Stop();
+        audio?.Dispose();
+        node?.Stop();
+    }
+
+    private void PostToUi(Action action)
+    {
+        if (!IsDisposed && IsHandleCreated) BeginInvoke(action);
+    }
+
+    // Esc returns to Talk from any settings page — except while a combo drop-down
+    // is open, where Esc must close the drop-down first (adjustments/01-back-to-talk.md).
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape && settingsView.Visible)
+        {
+            var focused = ActiveControl;
+            while (focused is ContainerControl { ActiveControl: { } inner }) focused = inner;
+            if (focused is not ComboBox { DroppedDown: true })
+            {
+                shell.ShowTalk();
+                return true;
+            }
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    // ---- Peer refresh ------------------------------------------------------
 
     private void RefreshPeers()
     {
         if (node is null || IsDisposed) return;
-        var selectedId = selectedDeviceId;
         var peers = node.Peers.OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
-        refreshingDeviceList = true;
-        try
+        displayPeers = peers;
+
+        foreach (var peer in peers)
         {
-            devices.BeginUpdate();
-            devices.Items.Clear();
-            foreach (var peer in peers)
+            if (!rememberedAt.TryGetValue(peer.NodeId, out var seen) || seen != peer.LastSeen)
             {
-                var age = DateTimeOffset.UtcNow - peer.LastSeen;
-                var protocol = peer.ProtocolVersion is null ? "legacy" : $"p{peer.ProtocolVersion}";
-                var compatibility = peer.IsProtocolCompatible
-                    ? peer.SupportsOta ? $"{protocol} / OTA" : protocol
-                    : $"{protocol} incompatible";
-                var item = new ListViewItem([peer.Alias, peer.NodeId.ToString("x8"), peer.Endpoint.Address.ToString(),
-                    $"{peer.FirmwareVersion} / {compatibility}", $"{Math.Max(0, age.TotalSeconds):0}s"])
-                {
-                    Tag = peer
-                };
-                devices.Items.Add(item);
-                if (peer.NodeId == selectedId) item.Selected = true;
+                knownDevices.Remember(peer, configurations.GetValueOrDefault(peer.NodeId));
+                rememberedAt[peer.NodeId] = peer.LastSeen;
             }
-            devices.EndUpdate();
         }
-        finally
+
+        talkView.Grid.Update(peers, settings.MeshId, VolumeFor, otaUpdating);
+
+        var activeIds = peers.Select(peer => peer.NodeId).ToHashSet();
+        var offline = knownDevices.Devices.Where(device => !activeIds.Contains(device.NodeId)).ToArray();
+        talkView.KnownDevices.Update(offline);
+
+        settingsView.Group.SetContext(settings.MeshId, peers.Length);
+        if (settingsView.Firmware.Visible) RefreshOtaQueue();
+
+        talkView.SetLastSender(receiveSession?.LastTalker?.Alias);
+        UpdateIdentityStrip();
+        UpdateNowBar();
+        UpdateDiagnostics();
+    }
+
+    private int VolumeFor(uint nodeId) => configurations.GetValueOrDefault(nodeId)?.SpeakerVolume
+        ?? knownDevices.Devices.FirstOrDefault(device => device.NodeId == nodeId)?.SpeakerVolume
+        ?? 512;
+
+    private void UpdateIdentityStrip()
+    {
+        var mic = TrimDeviceName((settingsView.Identity.MicCombo.SelectedItem as RecordingDevice)?.Name ?? "Not selected");
+        var speaker = TrimDeviceName((settingsView.Identity.SpeakerCombo.SelectedItem as PlaybackDevice)?.Name ?? "Not selected");
+        identityStrip.Update(settings.Alias, settings.NodeId, settings.MeshId, displayPeers.Count, mic, speaker, StateColor());
+    }
+
+    private Color StateColor() => degraded switch
+    {
+        "NETWORK UNAVAILABLE" => UiStyles.Red,
+        "AUDIO UNAVAILABLE" => UiStyles.Amber,
+        _ => (receiveSession?.State ?? IntercomState.Idle) switch
         {
-            refreshingDeviceList = false;
+            IntercomState.Receiving => UiStyles.Blue,
+            IntercomState.Talking => UiStyles.Purple,
+            IntercomState.Claiming or IntercomState.WaitingForFloor => UiStyles.Amber,
+            _ => UiStyles.Green,
+        },
+    };
+
+    // ---- Now bar -----------------------------------------------------------
+
+    private void UpdateNowBar()
+    {
+        if (degraded is not null) return;
+        var state = receiveSession?.State ?? IntercomState.Idle;
+        var buffer = audio?.BufferedMilliseconds ?? 0;
+        var talker = receiveSession?.LastTalker?.Alias ?? "A device";
+        // A directed reception with no audio reaching us is two other devices
+        // talking privately: name it as such and use a muted accent, since this
+        // companion is not playing it.
+        var directedElsewhere = receiveSession is { ReceptionDirected: true, ReceptionHasAudio: false };
+        var directedToUs = receiveSession is { ReceptionDirected: true, ReceptionHasAudio: true };
+        var receivingTitle = directedElsewhere ? $"{talker} is speaking to another device"
+            : directedToUs ? $"{talker} is replying to you"
+            : $"{talker} is speaking";
+        var (kicker, title, color, background) = state switch
+        {
+            IntercomState.Claiming => ("CLAIMING", "Claiming", UiStyles.Amber, UiStyles.AmberTint),
+            IntercomState.Talking => ("TALKING", "Talking", UiStyles.Purple, UiStyles.PurpleTint),
+            IntercomState.Receiving when directedElsewhere => ("RECEIVING", receivingTitle, UiStyles.Secondary, UiStyles.Surface),
+            IntercomState.Receiving => ("RECEIVING", receivingTitle, UiStyles.Blue, UiStyles.BlueTint),
+            IntercomState.WaitingForFloor => ("FLOOR OCCUPIED", "Floor occupied", UiStyles.Amber, UiStyles.AmberTint),
+            _ => ("IDLE", "Idle", UiStyles.Green, UiStyles.Surface),
+        };
+        var detail = state switch
+        {
+            IntercomState.Receiving when directedElsewhere => $"directed to another device · not played here · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s",
+            IntercomState.Receiving => $"{talker} · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s · output buffer {buffer} ms",
+            IntercomState.Talking => $"talking to the group · output buffer {buffer} ms",
+            IntercomState.Claiming => $"claiming the floor · output buffer {buffer} ms",
+            IntercomState.WaitingForFloor => $"another device holds the floor · output buffer {buffer} ms",
+            _ => $"nothing on the floor · output buffer {buffer} ms",
+        };
+        nowBar.Update(kicker, title, detail, color, background);
+    }
+
+    private void ShowDegraded(string kicker, string title, string detail, Color color, Color background)
+    {
+        degraded = kicker;
+        nowBar.Update(kicker, title, detail, color, background);
+        UpdateIdentityStrip();
+        RecordActivity(detail);
+    }
+
+    private void OnIntercomState(IntercomState state)
+    {
+        if (state == IntercomState.Receiving) receivingSince = DateTimeOffset.UtcNow;
+        if (degraded == "AUDIO UNAVAILABLE") degraded = null;
+        UpdateNowBar();
+        UpdateIdentityStrip();
+        var talker = receiveSession?.LastTalker?.Alias ?? "A device";
+        RecordActivity(state switch
+        {
+            IntercomState.Claiming => "Claiming floor",
+            IntercomState.Talking => "You — talking",
+            IntercomState.Receiving when receiveSession?.ReceptionDirected == true => $"{talker} is speaking to another device",
+            IntercomState.Receiving => $"{talker} is speaking",
+            IntercomState.WaitingForFloor => "Floor busy — your press was dropped",
+            _ => "Idle",
+        });
+    }
+
+    // ---- Talk handlers -----------------------------------------------------
+
+    private void BindPtt(Button button, Action press)
+    {
+        button.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left && !otaUpdating) { button.Capture = true; press(); } };
+        button.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) receiveSession?.ReleasePtt(); };
+        button.MouseCaptureChanged += (_, _) => { if (!button.Capture) receiveSession?.ReleasePtt(); };
+    }
+
+    private void OnKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Space || spaceHeld || otaUpdating) return;
+        spaceHeld = true;
+        receiveSession?.PressBroadcast();
+        e.Handled = true;
+    }
+
+    private void OnKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Space) return;
+        spaceHeld = false;
+        receiveSession?.ReleasePtt();
+        e.Handled = true;
+    }
+
+    private async Task ToggleSoftMuteAsync(Peer peer)
+    {
+        if (node is null || !peer.SupportsMuteReporting || peer.HardwareMuted || otaUpdating) return;
+        try
+        {
+            var current = await node.RequestConfigurationAsync(peer);
+            configurations[peer.NodeId] = current.Configuration;
+            var reply = await node.SetConfigurationAsync(peer, current.Configuration with { SoftMute = !current.Configuration.SoftMute });
+            configurations[peer.NodeId] = reply.Configuration;
+            knownDevices.Remember(peer, reply.Configuration);
+            RefreshPeers();
         }
-        RefreshRedesignPeers(peers);
-        UpdateSelectedDeviceActions();
-        if (receiveSession?.State == IntercomState.Receiving && audio is not null)
+        catch (Exception exception) when (exception is SocketException or TimeoutException or InvalidOperationException)
         {
-            var stats = receiveSession.Statistics;
-            nowDetail.Text = $"UDP {stats.AudioPackets:n0} · decoded {stats.DecodedFrames:n0} · PLC {stats.ConcealedFrames:n0} · output {audio.BufferedMilliseconds} ms";
+            statusBar.SetMessage($"Silence failed: {exception.Message}");
         }
     }
 
-    private Peer? SelectedPeer => selectedDeviceId is uint deviceId && node is not null
-        ? node.Peers.FirstOrDefault(peer => peer.NodeId == deviceId)
-        : null;
-
-    private async Task RequestSelectedConfigAsync()
+    private async Task CommitVolumeAsync(Peer peer, int value)
     {
-        var peer = SelectedPeer;
-        if (node is null || peer is null) return;
-        getConfig.Enabled = false;
+        if (node is null || otaUpdating) return;
         try
         {
-            var response = await node.RequestConfigurationAsync(peer);
-            if (selectedDeviceId == response.NodeId) ShowConfiguration(response);
+            var current = configurations.GetValueOrDefault(peer.NodeId) ?? (await node.RequestConfigurationAsync(peer)).Configuration;
+            var reply = await node.SetConfigurationAsync(peer, current with { SpeakerVolume = value });
+            configurations[peer.NodeId] = reply.Configuration;
+            knownDevices.Remember(peer, reply.Configuration);
         }
         catch (Exception exception) when (exception is SocketException or TimeoutException)
         {
-            networkLabel.Text = $"Configuration read failed: {exception.Message}";
+            statusBar.SetMessage($"Volume update failed: {exception.Message}");
         }
-        finally { UpdateSelectedDeviceActions(); }
     }
 
-    private async Task ApplySelectedConfigAsync()
+    private void ShowDeviceMenu(Control card, Peer peer)
     {
-        var peer = SelectedPeer;
-        if (node is null || peer is null) return;
-        var configuration = new DeviceConfiguration(alias.Text.Trim(), (int)volume.Value,
-            (int)brightness.Value, buttonsSwapped.Checked, int.Parse(orientation.Text), false, false,
-            node.MeshId, peer.NodeId);
-        applyConfig.Enabled = false;
+        var menu = new ContextMenuStrip { RenderMode = ToolStripRenderMode.Professional };
+        menu.Renderer = new ToolStripProfessionalRenderer(new FlatMenuColors()) { RoundedEdges = false };
+        menu.ShowImageMargin = false;
+        menu.Font = UiStyles.BodyFont;
+        menu.Items.Add("Configure…", null, async (_, _) => await ConfigurePeerAsync(peer));
+        menu.Items.Add("Get configuration", null, async (_, _) => await GetPeerConfigurationAsync(peer));
+        menu.Items.Add("Update firmware…", null, (_, _) => { queuedOtaDevices.Add(peer.NodeId); OpenSettings("Firmware"); RefreshOtaQueue(); });
+        menu.Items.Add("Remove", null, (_, _) => RemoveKnownDevice(ToKnownDevice(peer)));
+        menu.Show(card, new Point(card.Width - 28, 65));
+    }
+
+    private async Task GetPeerConfigurationAsync(Peer peer)
+    {
+        if (node is null) return;
         try
         {
-            var response = await node.SetConfigurationAsync(peer, configuration);
-            if (selectedDeviceId == response.NodeId) ShowConfiguration(response);
-            networkLabel.Text = $"Configuration applied to {peer.Alias}.";
+            var reply = await node.RequestConfigurationAsync(peer);
+            configurations[peer.NodeId] = reply.Configuration;
+            knownDevices.Remember(peer, reply.Configuration);
+            RefreshPeers();
         }
         catch (Exception exception) when (exception is SocketException or TimeoutException)
         {
-            networkLabel.Text = $"Configuration update failed: {exception.Message}";
+            statusBar.SetMessage($"Configuration read failed: {exception.Message}");
         }
-        finally { UpdateSelectedDeviceActions(); }
     }
 
-    private void ShowConfiguration(DeviceConfigurationReceivedEventArgs eventArgs)
+    private async Task ConfigurePeerAsync(Peer peer)
     {
-        configurations[eventArgs.NodeId] = eventArgs.Configuration;
-        knownDevices.Remember(new Peer(eventArgs.NodeId, eventArgs.Endpoint, eventArgs.Configuration.Alias,
-            Protocol.Version, "unknown", 0, 0, DateTimeOffset.UtcNow), eventArgs.Configuration);
-        RefreshRedesignPeers();
-        if (selectedDeviceId != eventArgs.NodeId) return;
-        alias.Text = eventArgs.Configuration.Alias;
-        volume.Value = Math.Clamp(eventArgs.Configuration.SpeakerVolume, volume.Minimum, volume.Maximum);
-        brightness.Value = Math.Clamp(eventArgs.Configuration.LedBrightness, brightness.Minimum, brightness.Maximum);
-        buttonsSwapped.Checked = eventArgs.Configuration.ButtonsSwapped;
-        orientation.SelectedItem = eventArgs.Configuration.RingOrientation.ToString();
+        if (node is null) return;
+        try
+        {
+            var current = (await node.RequestConfigurationAsync(peer)).Configuration;
+            configurations[peer.NodeId] = current;
+            using var dialog = new ConfigureDeviceDialog(peer, current,
+                requestedId => node.Peers.Any(other => other.NodeId != peer.NodeId && other.NodeId == requestedId));
+            if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result is not { } next) return;
+            var reply = await node.SetConfigurationAsync(peer, next);
+            configurations[peer.NodeId] = reply.Configuration;
+            knownDevices.Remember(peer, reply.Configuration);
+            RefreshPeers();
+        }
+        catch (Exception exception) when (exception is SocketException or TimeoutException or InvalidOperationException)
+        {
+            statusBar.SetMessage($"Configuration update failed: {exception.Message}");
+        }
     }
 
-    private void OnSelectedDeviceChanged()
+    private void RemoveKnownDevice(KnownDevice device)
     {
-        selectedDeviceId = devices.SelectedItems.Count == 1
-            ? (devices.SelectedItems[0].Tag as Peer)?.NodeId
-            : null;
-        UpdateSelectedDeviceActions();
-        // Selecting a row intentionally does not perform network I/O. The user
-        // explicitly chooses Get configuration when they want to populate it.
+        if (!RemoveDeviceDialog.ConfirmRemove(this, device.Alias, settings.MeshId)) return;
+        knownDevices.Remove(device.NodeId);
+        RefreshPeers();
     }
 
-    private void UpdateSelectedDeviceActions()
+    private void RemoveAllOffline(int count)
     {
-        var hasSelectedPeer = SelectedPeer is not null;
-        selected.Enabled = receiveSession is not null && hasSelectedPeer;
-        getConfig.Enabled = hasSelectedPeer;
-        applyConfig.Enabled = hasSelectedPeer;
-        updateSelectedDevice.Enabled = hasSelectedPeer && SelectedPeer!.SupportsOta && !otaUpdating && !string.IsNullOrWhiteSpace(otaManifest.Text);
-        updateAllDevices.Enabled = !otaUpdating && !string.IsNullOrWhiteSpace(otaManifest.Text) && node?.SnapshotActivePeers().Any(peer => peer.SupportsOta) == true;
+        if (!RemoveDeviceDialog.ConfirmRemoveAll(this, count)) return;
+        var activeIds = displayPeers.Select(peer => peer.NodeId).ToHashSet();
+        knownDevices.RemoveAllOffline(activeIds);
+        RefreshPeers();
     }
 
-    private void ChooseOtaManifest()
+    private static KnownDevice ToKnownDevice(Peer peer) =>
+        new(peer.NodeId, peer.Alias, peer.Endpoint.Address.ToString(), peer.LastSeen, null, null, peer.SoftMuted);
+
+    // ---- Settings page changes --------------------------------------------
+
+    private void OnSettingsPageShown(string page)
+    {
+        switch (page)
+        {
+            case "Firmware": RefreshOtaQueue(); break;
+            case "Diagnostics": lastLogLength = -1; UpdateDiagnostics(); break;
+            case "Group": settingsView.Group.SetContext(settings.MeshId, displayPeers.Count); break;
+        }
+    }
+
+    private void SaveIdentitySettings()
+    {
+        if (node is null) return;
+        node.SetAlias(settingsView.Identity.AliasText);
+        settings.Alias = node.Alias;
+        settings.RunInNotificationArea = settingsView.Identity.RunInNotificationArea;
+        settings.StartWithWindows = settingsView.Identity.StartWithWindows;
+        settings.Save();
+        settingsView.Identity.SetAlias(settings.Alias);
+        ApplyAudioDeviceSelection();
+        UpdateIdentityStrip();
+        statusBar.SetMessage("Identity, audio and shortcut settings saved.");
+    }
+
+    // ---- Audio -------------------------------------------------------------
+
+    private void PopulateAudioDevices()
+    {
+        var mics = AudioEngine.RecordingDevices();
+        settingsView.Identity.MicCombo.Items.Clear();
+        settingsView.Identity.MicCombo.Items.AddRange(mics.Cast<object>().ToArray());
+        settingsView.Identity.MicCombo.SelectedItem = mics.FirstOrDefault(device => device.Name == settings.RecordingDeviceName) ?? mics.FirstOrDefault();
+
+        var speakers = AudioEngine.PlaybackDevices();
+        settingsView.Identity.SpeakerCombo.Items.Clear();
+        settingsView.Identity.SpeakerCombo.Items.AddRange(speakers.Cast<object>().ToArray());
+        settingsView.Identity.SpeakerCombo.SelectedItem = speakers.FirstOrDefault(device => device.Id == settings.PlaybackDeviceId) ?? speakers.FirstOrDefault();
+    }
+
+    private void StartAudioEngine()
+    {
+        audio = new AudioEngine(settings.RecordingDeviceName, settings.PlaybackDeviceId);
+        audio.Diagnostic += message => PostToUi(() => statusBar.SetMessage(message));
+        audio.StartPlayback();
+        receiveSession = new ReceiveSession(node!, audio);
+        receiveSession.StateChanged += state => PostToUi(() => OnIntercomState(state));
+        receiveSession.Diagnostic += message => PostToUi(() => statusBar.SetMessage(message));
+        receiveSession.Start();
+    }
+
+    private void ApplyAudioDeviceSelection()
+    {
+        var recorder = settingsView.Identity.MicCombo.SelectedItem as RecordingDevice;
+        var playback = settingsView.Identity.SpeakerCombo.SelectedItem as PlaybackDevice;
+        if (recorder is null || playback is null) return;
+        if (receiveSession?.State != IntercomState.Idle)
+        {
+            statusBar.SetMessage("Release the floor before changing audio devices.");
+            return;
+        }
+        receiveSession?.Stop();
+        audio?.Dispose();
+        settings.RecordingDeviceName = recorder.Name;
+        settings.PlaybackDeviceId = playback.Id;
+        settings.Save();
+        try
+        {
+            StartAudioEngine();
+            degraded = null;
+            statusBar.SetMessage($"Audio devices applied: {recorder.Name} → {playback.Name}");
+            UpdateIdentityStrip();
+            UpdateNowBar();
+        }
+        catch (Exception exception)
+        {
+            ShowDegraded("AUDIO UNAVAILABLE", "Audio unavailable", $"Audio device change failed: {exception.Message}", UiStyles.Amber, UiStyles.AmberTint);
+        }
+    }
+
+    // ---- USB ---------------------------------------------------------------
+
+    private async Task RescanUsbAsync()
+    {
+        var ports = UsbConfigurationClient.GetPortNames();
+        settingsView.Usb.SetPorts(ports.Select(port => new UsbPage.PortOption(port, port)).ToArray(), settingsView.Usb.SelectedPort);
+        if (ports.Count == 0)
+        {
+            settingsView.Usb.SetIdentity("No serial port found. Connect the device by USB.", UiStyles.Secondary);
+            return;
+        }
+        await IdentifySelectedPortAsync();
+    }
+
+    private async Task IdentifySelectedPortAsync()
+    {
+        var port = settingsView.Usb.SelectedPort;
+        if (string.IsNullOrWhiteSpace(port)) return;
+        settingsView.Usb.SetIdentity($"Identifying {port}…", UiStyles.Secondary);
+        try
+        {
+            var configuration = await UsbConfigurationClient.GetConfigurationAsync(port);
+            settingsView.Usb.SetPorts([new UsbPage.PortOption(port, $"{port} — {configuration.Alias} ({configuration.DeviceId:x8})")], port);
+            settingsView.Usb.SetAlias(configuration.Alias);
+            if (!string.Equals(configuration.Ssid, "YOUR_WIFI_SSID", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(configuration.Ssid))
+                settingsView.Usb.SetSsids([configuration.Ssid], configuration.Ssid);
+            settingsView.Usb.SetIdentity("Device identified over USB", UiStyles.Green);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TimeoutException)
+        {
+            settingsView.Usb.SetIdentity($"Could not identify the device: {exception.Message}", UiStyles.Red);
+        }
+    }
+
+    private async Task ApplyUsbWifiAsync()
+    {
+        var port = settingsView.Usb.SelectedPort;
+        var ssid = settingsView.Usb.Ssid;
+        if (string.IsNullOrWhiteSpace(port) || string.IsNullOrWhiteSpace(ssid))
+        {
+            settingsView.Usb.SetIdentity("Choose a USB port and a Wi-Fi network first.", UiStyles.Red);
+            return;
+        }
+        settingsView.Usb.SetIdentity($"Writing Wi-Fi configuration to {port}…", UiStyles.Secondary);
+        try
+        {
+            var configuration = await UsbConfigurationClient.SetWifiAsync(port, ssid, settingsView.Usb.Password, settingsView.Usb.DeviceAlias);
+            settingsView.Usb.ClearPassword();
+            settingsView.Usb.SetIdentity($"Wi-Fi saved for {configuration.Alias}. The device is rebooting onto the network…", UiStyles.Green);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TimeoutException)
+        {
+            settingsView.Usb.SetIdentity($"USB update failed: {exception.Message}", UiStyles.Red);
+        }
+    }
+
+    private async Task RefreshSsidsAsync()
+    {
+        try
+        {
+            var ssids = await Task.Run(ScanSsids);
+            if (ssids.Count > 0) PostToUi(() => settingsView.Usb.SetSsids(ssids, null));
+        }
+        catch { /* SSID scanning is a best-effort convenience. */ }
+    }
+
+    private static IReadOnlyList<string> ScanSsids()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("netsh", "wlan show networks")
+            {
+                RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true,
+            });
+            if (process is null) return [];
+            var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(4000);
+            return output.Split('\n')
+                .Where(line => line.TrimStart().StartsWith("SSID ", StringComparison.OrdinalIgnoreCase) && line.Contains(':'))
+                .Select(line => line[(line.IndexOf(':') + 1)..].Trim())
+                .Where(ssid => ssid.Length > 0)
+                .Distinct()
+                .ToArray();
+        }
+        catch { return []; }
+    }
+
+    // ---- Group -------------------------------------------------------------
+
+    private async Task ApplyGroupChangeAsync()
+    {
+        if (node is null) return;
+        var targetGroup = settingsView.Group.NewGroupId;
+        if (!Protocol.IsValidMeshId(targetGroup)) return;
+        var targets = settingsView.Group.ApplyToActiveDevices
+            ? node.SnapshotActivePeers().Where(peer => peer.ProtocolVersion is >= 2).ToArray()
+            : [];
+        foreach (var peer in targets)
+        {
+            try
+            {
+                var current = (await node.RequestConfigurationAsync(peer)).Configuration;
+                await node.SetConfigurationAsync(peer, current with { MeshId = targetGroup });
+                RecordActivity($"Group update queued for {peer.Alias}.");
+            }
+            catch (Exception exception) when (exception is SocketException or TimeoutException or InvalidOperationException)
+            {
+                RecordActivity($"Group update failed for {peer.Alias}: {exception.Message}");
+            }
+        }
+        if (settingsView.Group.ApplyToCompanion)
+        {
+            node.SetMeshId(targetGroup);
+            settings.MeshId = targetGroup;
+            talkView.SetBroadcastScope(settings.MeshId);
+        }
+        settingsView.Group.Reset();
+        RefreshPeers();
+    }
+
+    // ---- OTA ---------------------------------------------------------------
+
+    private void ChooseOtaPackage()
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "Choose signed Wi-Fi Intercom OTA manifest",
-            Filter = "OTA manifests (*.ota.json;*.json)|*.ota.json;*.json|All files (*.*)|*.*",
+            Title = "Choose signed Wi-Fi Intercom OTA package",
+            Filter = "OTA packages (*.ota.json;*.json)|*.ota.json;*.json|All files (*.*)|*.*",
             CheckFileExists = true,
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try
         {
-            var package = OtaPackage.Load(dialog.FileName);
-            otaManifest.Text = package.ManifestPath;
-            otaStatus.Text = $"Verified {package.Version}: {Path.GetFileName(package.ImagePath)} ({package.Size / 1024.0:0.0} KiB).";
-            otaPackageName.Text = package.Version;
-            otaPackageSummary.Text = $"{Path.GetFileName(package.ManifestPath)} · {package.Size / 1024.0:0.0} KiB · signature verified";
-            if (startOtaQueue is not null) startOtaQueue.Enabled = true;
+            otaPackage = OtaPackage.Load(dialog.FileName);
+            settingsView.Firmware.SetPackage($"wifi_intercom {otaPackage.Version}",
+                $"{Path.GetFileName(otaPackage.ManifestPath)} · {otaPackage.Size / 1024.0:0.0} KiB · signature verified");
+            settingsView.Firmware.SetStatus("Package verified. Add compatible devices and start the queue.", UiStyles.Green);
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
         {
-            otaManifest.Clear();
-            otaPackageName.Text = "No package selected";
-            otaPackageSummary.Text = "Package could not be verified.";
-            otaStatus.Text = $"OTA package rejected: {exception.Message}";
-            if (startOtaQueue is not null) startOtaQueue.Enabled = false;
+            otaPackage = null;
+            settingsView.Firmware.SetPackage(null, null);
+            settingsView.Firmware.SetStatus($"OTA package rejected: {exception.Message}", UiStyles.Red);
         }
-        UpdateSelectedDeviceActions();
+        RefreshOtaQueue();
     }
 
-    private void ShowOtaStatus(OtaStatusReceivedEventArgs eventArgs)
+    private void RefreshOtaQueue()
     {
-        var status = eventArgs.Status;
-        otaStatus.Text = $"OTA {eventArgs.NodeId:x8}: {status.State} {status.Progress}% — {status.Message}";
+        var version = otaPackage?.Version ?? "selected package";
+        var rows = new List<FirmwarePage.QueueRow>();
+        foreach (var nodeId in queuedOtaDevices.OrderBy(id => displayPeers.FirstOrDefault(peer => peer.NodeId == id)?.Alias ?? "￿"))
+        {
+            var peer = displayPeers.FirstOrDefault(peer => peer.NodeId == nodeId);
+            if (peer is not null && peer.SupportsOta)
+            {
+                if (!otaProgress.TryGetValue(nodeId, out var progress))
+                    progress = ("Queued", UiStyles.Muted, 0, "Waiting for earlier devices.");
+                rows.Add(new FirmwarePage.QueueRow(nodeId, peer.Alias, $"{peer.FirmwareVersion}  →  {version}",
+                    progress.State, progress.Color, progress.Progress, "Remove", progress.Detail, true));
+            }
+            else
+            {
+                var alias = knownDevices.Devices.FirstOrDefault(device => device.NodeId == nodeId)?.Alias ?? $"{nodeId:x8}";
+                rows.Add(new FirmwarePage.QueueRow(nodeId, alias, $"unknown  →  {version}", "Not eligible", UiStyles.Red, 0, "Remove",
+                    "Not currently announcing, or without the OTA capability. It rejoins when it announces.", true));
+            }
+        }
+        settingsView.Firmware.SetQueue(rows);
+    }
+
+    private void OnOtaStatus(OtaStatusReceivedEventArgs args)
+    {
+        var status = args.Status;
         var failed = status.State is "failed" or "rejected";
-        otaStatus.ForeColor = failed ? Color.Firebrick : status.State == "rebooting" ? Color.FromArgb(46, 125, 50) : Color.DarkGoldenrod;
-        if (failed)
-            MessageBox.Show(this, $"Firmware update for {eventArgs.NodeId:x8} was not started or did not complete.\n\n{status.Message}",
-                "Firmware update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        var color = failed ? UiStyles.Red : status.State == "rebooting" ? UiStyles.Green : UiStyles.Amber;
+        otaProgress[args.NodeId] = ($"{status.State} {status.Progress}%", color, status.Progress, status.Message);
+        if (settingsView.Firmware.Visible) RefreshOtaQueue();
     }
 
-    private async Task StartOtaUpdateAsync(bool updateAll)
+    private async Task RunOtaQueueAsync()
     {
-        if (node is null || string.IsNullOrWhiteSpace(otaManifest.Text)) return;
+        if (node is null || otaPackage is null)
+        {
+            settingsView.Firmware.SetStatus("Choose a signed package before starting the queue.", UiStyles.Red);
+            return;
+        }
         if (receiveSession?.State != IntercomState.Idle)
         {
-            otaStatus.Text = "Release the local PTT floor before starting an update.";
+            settingsView.Firmware.SetStatus("Release the local PTT floor before starting an update.", UiStyles.Red);
             return;
         }
-        OtaPackage package;
-        try { package = OtaPackage.Load(otaManifest.Text); }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or CryptographicException)
+        var targets = displayPeers.Where(peer => queuedOtaDevices.Contains(peer.NodeId) && peer.SupportsOta)
+            .OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (targets.Length == 0)
         {
-            otaStatus.Text = $"OTA package rejected: {exception.Message}";
+            settingsView.Firmware.SetStatus("Add at least one active, protocol p2-compatible device to the queue.", UiStyles.Red);
             return;
         }
-        var targets = otaTargetsOverride ?? (updateAll
-            ? node.SnapshotActivePeers().Where(peer => peer.SupportsOta).ToArray()
-            : new[] { SelectedPeer }.OfType<Peer>().ToArray());
-        if (targets.Count == 0)
-        {
-            otaStatus.Text = "Choose an active device first.";
-            return;
-        }
-        if (!ConfirmOtaUpdate(package, targets)) return;
+
+        var package = otaPackage;
+        var summary = $"{Path.GetFileName(package.ManifestPath)} · {package.Size / 1024.0:0.0} KiB · signature verified";
+        var confirmTargets = targets.Select(peer => new ConfirmFirmwareUpdateDialog.Target(peer.Alias, peer.NodeId, peer.FirmwareVersion, package.Version)).ToArray();
+        if (!ConfirmFirmwareUpdateDialog.Confirm(this, package.Version, summary, confirmTargets)) return;
 
         otaUpdating = true;
-        broadcast.Enabled = reply.Enabled = replySurface.Enabled = selected.Enabled = false;
-        localMute.Enabled = false;
-        UpdateSelectedDeviceActions();
+        talkView.Broadcast.Enabled = talkView.Reply.Enabled = false;
+        RefreshPeers();
         try
         {
             await using var server = new OtaArtifactServer(node.DiscoveryInterface, package);
             foreach (var peer in targets)
             {
-                otaStatus.Text = $"Offering {package.Version} to {peer.Alias} ({peer.Endpoint.Address})…";
+                otaProgress[peer.NodeId] = ("Offering", UiStyles.Amber, 5, $"Offering {package.Version} to {peer.Alias} ({peer.Endpoint.Address})…");
+                RefreshOtaQueue();
+                settingsView.Firmware.SetStatus($"Offering {package.Version} to {peer.Alias}…", UiStyles.Secondary);
                 var update = node.RequestOtaUpdateAsync(peer, package, server, otaStopping.Token);
-                var request = server.WaitForFirstRequestAsync(otaStopping.Token)
-                    .WaitAsync(TimeSpan.FromSeconds(15), otaStopping.Token);
+                var request = server.WaitForFirstRequestAsync(otaStopping.Token).WaitAsync(TimeSpan.FromSeconds(15), otaStopping.Token);
                 try
                 {
-                    if (await Task.WhenAny(update, request) == update)
-                        await update; // Preserve a device-reported rejection/failure.
-                    var requester = await request;
-                    otaStatus.Text = $"{peer.Alias} connected from {requester}; writing firmware…";
+                    if (await Task.WhenAny(update, request) == update) await update;
+                    await request;
                 }
                 catch (TimeoutException)
                 {
-                    throw new TimeoutException($"{peer.Alias} accepted the update but could not reach the companion's temporary firmware server. Check the Private-network firewall prompt and retry.");
+                    throw new TimeoutException($"{peer.Alias} accepted the update but could not reach the companion's firmware server. Check the private-network firewall prompt and retry.");
                 }
                 await update;
-                otaStatus.Text = $"{peer.Alias} is rebooting; waiting for its {package.Version} discovery announcement…";
+                settingsView.Firmware.SetStatus($"{peer.Alias} is rebooting; waiting for its {package.Version} announcement…", UiStyles.Secondary);
                 if (!await WaitForUpdatedPeerAsync(peer.NodeId, package.Version, otaStopping.Token))
                     throw new TimeoutException($"{peer.Alias} did not report {package.Version} after reboot.");
-                otaStatus.Text = $"{peer.Alias} confirmed {package.Version}.";
+                otaProgress[peer.NodeId] = ("Confirmed", UiStyles.Green, 100, $"Confirmed {package.Version}.");
+                RefreshOtaQueue();
             }
-            otaStatus.Text = $"OTA completed: {targets.Count} device(s) confirmed on {package.Version}.";
+            settingsView.Firmware.SetStatus($"OTA completed: {targets.Length} confirmed on {package.Version}.", UiStyles.Green);
         }
-        catch (OperationCanceledException) { otaStatus.Text = "OTA stopped while the companion was closing."; }
+        catch (OperationCanceledException) { settingsView.Firmware.SetStatus("OTA stopped while the companion was closing.", UiStyles.Secondary); }
         catch (Exception exception) when (exception is SocketException or TimeoutException or IOException or InvalidOperationException or InvalidDataException)
         {
-            otaStatus.Text = $"OTA stopped: {exception.Message}";
+            settingsView.Firmware.SetStatus($"OTA stopped: {exception.Message}", UiStyles.Red);
         }
         finally
         {
             otaUpdating = false;
-            broadcast.Enabled = reply.Enabled = replySurface.Enabled = true;
-            localMute.Enabled = true;
-            UpdateSelectedDeviceActions();
+            talkView.Broadcast.Enabled = talkView.Reply.Enabled = true;
+            RefreshPeers();
         }
     }
 
@@ -473,225 +797,163 @@ internal sealed partial class MainForm : Form
         return false;
     }
 
-    private void PostToUi(Action action)
+    // ---- Diagnostics -------------------------------------------------------
+
+    private void UpdateDiagnostics()
     {
-        if (!IsDisposed && IsHandleCreated)
-            BeginInvoke(action);
+        var stats = receiveSession?.Statistics;
+        settingsView.Diagnostics.SetCounters(
+            $"{stats?.AudioPackets ?? 0:n0}",
+            $"{stats?.DecodedFrames ?? 0:n0}",
+            $"{stats?.ConcealedFrames ?? 0:n0}",
+            $"{audio?.BufferedMilliseconds ?? 0} ms");
+        statusBar.SetMessage($"Discovery: listening on 239.255.42.99:45678 · audio 16 kHz mono ADPCM · UDP {stats?.AudioPackets ?? 0:n0} · PLC {stats?.ConcealedFrames ?? 0:n0} · buffer {audio?.BufferedMilliseconds ?? 0} ms");
+
+        // The log is the expensive part: reading and recolouring the whole file
+        // every second blocked the UI. Re-render only when the page is visible and
+        // the file has actually grown, and do the read off the UI thread.
+        if (!settingsView.Diagnostics.Visible) return;
+        long length;
+        try { length = new FileInfo(DiagnosticLogPath).Length; } catch { return; }
+        if (length == lastLogLength) return;
+        lastLogLength = length;
+        _ = RefreshDiagnosticLogAsync();
     }
 
-    private void ShowIntercomState(IntercomState sessionState)
+    private async Task RefreshDiagnosticLogAsync()
     {
-        (statusLabel.Text, statusLabel.ForeColor, nowKicker.Text) = sessionState switch
+        IReadOnlyList<(string, Color)> lines;
+        try { lines = await Task.Run(() => FormatDiagnosticLog(ReadDiagnosticLogTail())); }
+        catch { return; }
+        if (!IsDisposed && settingsView.Diagnostics.Visible) settingsView.Diagnostics.SetLogLines(lines);
+    }
+
+    private static IReadOnlyList<(string, Color)> FormatDiagnosticLog(string source)
+    {
+        var lines = new List<(string, Color)>();
+        var rows = source.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        // Only the most recent lines are worth rendering; the visible area holds a
+        // handful and unbounded recolouring is what made the page slow.
+        const int maxRows = 200;
+        foreach (var raw in rows.Length > maxRows ? rows[^maxRows..] : rows)
         {
-            IntercomState.Claiming => ("Claiming floor", UiStyles.Amber, "CLAIMING"),
-            IntercomState.Talking => ("Talking", UiStyles.Purple, "TALKING"),
-            IntercomState.Receiving => ("Receiving", Color.FromArgb(21, 101, 192), "RECEIVING"),
-            IntercomState.WaitingForFloor => ("Floor occupied", UiStyles.Amber, "FLOOR OCCUPIED"),
-            _ => ("Idle", UiStyles.Green, "IDLE"),
-        };
-        nowDetail.Text = sessionState == IntercomState.Receiving && receiveSession?.LastTalker is { } talker
-            ? $"{talker.Alias} is speaking · output buffer {audio?.BufferedMilliseconds ?? 0} ms"
-            : sessionState == IntercomState.Idle ? $"nothing on the floor · output buffer {audio?.BufferedMilliseconds ?? 0} ms" : statusLabel.Text;
-        nowTitle.Text = statusLabel.Text;
-        nowTitle.ForeColor = statusLabel.ForeColor;
-        UpdateNowBarAppearance();
-        RecordActivity(statusLabel.Text);
-    }
-
-    private void BindPtt(Button button, Action press)
-    {
-        button.MouseDown += (_, eventArgs) =>
-        {
-            if (eventArgs.Button != MouseButtons.Left) return;
-            button.Capture = true;
-            press();
-        };
-        button.MouseUp += (_, eventArgs) =>
-        {
-            if (eventArgs.Button == MouseButtons.Left) receiveSession?.ReleasePtt();
-        };
-        button.MouseCaptureChanged += (_, _) =>
-        {
-            if (!button.Capture) receiveSession?.ReleasePtt();
-        };
-    }
-
-    private void OnKeyDown(object? sender, KeyEventArgs eventArgs)
-    {
-        if (eventArgs.KeyCode != Keys.Space || spaceHeld) return;
-        spaceHeld = true;
-        receiveSession?.PressBroadcast();
-        eventArgs.Handled = true;
-    }
-
-    private void OnKeyUp(object? sender, KeyEventArgs eventArgs)
-    {
-        if (eventArgs.KeyCode != Keys.Space) return;
-        spaceHeld = false;
-        receiveSession?.ReleasePtt();
-        eventArgs.Handled = true;
-    }
-
-    private void SaveCompanionAlias()
-    {
-        if (node is null) return;
-        node.SetAlias(companionAlias.Text);
-        companionAlias.Text = node.Alias;
-        UpdateIdentityPresentation();
-    }
-
-    private void PopulateAudioDevices()
-    {
-        recordingDevice.Items.Clear();
-        recordingDevice.Items.AddRange(AudioEngine.RecordingDevices().Cast<object>().ToArray());
-        recordingDevice.SelectedItem = recordingDevice.Items.Cast<RecordingDevice>()
-            .FirstOrDefault(device => device.Name == settings.RecordingDeviceName) ?? recordingDevice.Items.Cast<RecordingDevice>().FirstOrDefault();
-
-        playbackDevice.Items.Clear();
-        playbackDevice.Items.AddRange(AudioEngine.PlaybackDevices().Cast<object>().ToArray());
-        playbackDevice.SelectedItem = playbackDevice.Items.Cast<PlaybackDevice>()
-            .FirstOrDefault(device => device.Id == settings.PlaybackDeviceId) ?? playbackDevice.Items.Cast<PlaybackDevice>().FirstOrDefault();
-    }
-
-    private void StartAudioEngine()
-    {
-        audio = new AudioEngine(settings.RecordingDeviceName, settings.PlaybackDeviceId);
-        audio.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
-        audio.StartPlayback();
-        receiveSession = new ReceiveSession(node!, audio);
-        receiveSession.StateChanged += sessionState => PostToUi(() => ShowIntercomState(sessionState));
-        receiveSession.Diagnostic += message => PostToUi(() => statusLabel.Text = message);
-        receiveSession.Start();
-    }
-
-    private void ApplyAudioDeviceSelection()
-    {
-        var recorder = recordingDevice.SelectedItem as RecordingDevice;
-        var playback = playbackDevice.SelectedItem as PlaybackDevice;
-        if (recorder is null || playback is null) return;
-        if (receiveSession?.State != IntercomState.Idle)
-        {
-            statusLabel.Text = "Release the floor before changing audio devices.";
-            return;
+            var timestamp = raw.Length >= 19 && DateTimeOffset.TryParse(raw[..Math.Min(raw.Length, 34)], out var parsed)
+                ? parsed.ToLocalTime().ToString("HH:mm:ss") : DateTime.Now.ToString("HH:mm:ss");
+            var detail = raw.Length >= 34 && raw[10] == 'T' ? raw[34..].TrimStart() : raw;
+            var color = detail.Contains("error", StringComparison.OrdinalIgnoreCase) || detail.Contains("failed", StringComparison.OrdinalIgnoreCase) || detail.Contains("expire", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(239, 154, 154)
+                : detail.Contains("audio", StringComparison.OrdinalIgnoreCase) || detail.Contains("claim", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(100, 181, 246)
+                : detail.Contains("busy", StringComparison.OrdinalIgnoreCase) || detail.Contains("mute", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(255, 213, 79)
+                : UiStyles.Disabled;
+            lines.Add(($"{timestamp}  {detail.ToUpperInvariant()}", color));
         }
-        receiveSession?.Stop();
-        audio?.Dispose();
-        settings.RecordingDeviceName = recorder.Name;
-        settings.PlaybackDeviceId = playback.Id;
-        settings.Save();
+        return lines;
+    }
+
+    private static string DiagnosticLogPath => Path.Combine(CompanionSettings.AppDataDirectory, "diagnostics.log");
+
+    private static string ReadDiagnosticLog()
+    {
         try
         {
-            StartAudioEngine();
-            statusLabel.Text = $"Audio devices applied: {recorder.Name} → {playback.Name}";
-            UpdateIdentityPresentation();
+            using var stream = new FileStream(DiagnosticLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
         }
-        catch (Exception exception)
-        {
-            statusLabel.Text = $"Audio device change failed: {exception.Message}";
-            statusLabel.ForeColor = Color.Firebrick;
-        }
+        catch (IOException) { return "No diagnostic log is available."; }
     }
 
-    private void RefreshUsbPorts()
+    /// <summary>Reads only the last 64 KB of the log, sharing access with the
+    /// writer and dropping the leading partial line, so the diagnostics page can
+    /// render without loading a multi-megabyte file.</summary>
+    private static string ReadDiagnosticLogTail()
     {
-        var current = usbPort.SelectedItem as string;
-        var ports = UsbConfigurationClient.GetPortNames();
-        usbPort.Items.Clear();
-        usbPort.Items.AddRange(ports.Cast<object>().ToArray());
-        usbPort.SelectedItem = ports.Contains(current, StringComparer.OrdinalIgnoreCase) ? current : ports.FirstOrDefault();
-        usbStatus.Text = ports.Count == 0
-            ? "USB provisioning: no serial ports found."
-            : "USB provisioning: password stays on this PC and is never saved by the companion.";
-    }
-
-    private async Task ReadUsbConfigurationAsync()
-    {
-        var port = usbPort.SelectedItem as string;
-        if (string.IsNullOrWhiteSpace(port))
-        {
-            usbStatus.Text = "Choose the device's USB serial port first.";
-            return;
-        }
-        SetUsbControlsEnabled(false);
-        usbStatus.Text = $"Reading configuration from {port}…";
         try
         {
-            var configuration = await UsbConfigurationClient.GetConfigurationAsync(port);
-            usbSsid.Text = configuration.Ssid == "YOUR_WIFI_SSID" ? "" : configuration.Ssid;
-            usbAlias.Text = configuration.Alias;
-            usbDeviceIdentity.Text = $"{configuration.Alias} · {configuration.DeviceId:x8}";
-            usbPassword.Clear();
-            usbStatus.Text = $"Read {port}: {configuration.Alias} ({configuration.DeviceId:x8}). Passwords are never read back.";
+            using var stream = new FileStream(DiagnosticLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            const int tail = 64 * 1024;
+            var seeked = stream.Length > tail;
+            if (seeked) stream.Seek(-tail, SeekOrigin.End);
+            using var reader = new StreamReader(stream);
+            var text = reader.ReadToEnd();
+            if (seeked)
+            {
+                var newline = text.IndexOf('\n');
+                if (newline >= 0) text = text[(newline + 1)..];
+            }
+            return text;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TimeoutException)
-        {
-            usbStatus.Text = $"USB read failed: {exception.Message}";
-        }
-        finally
-        {
-            SetUsbControlsEnabled(true);
-        }
+        catch (IOException) { return "No diagnostic log is available."; }
     }
 
-    private async Task ApplyUsbWifiAsync()
+    private void SaveDiagnosticLog()
     {
-        var port = usbPort.SelectedItem as string;
-        var ssid = usbSsid.Text.Trim();
-        if (string.IsNullOrWhiteSpace(port) || string.IsNullOrWhiteSpace(ssid))
-        {
-            usbStatus.Text = "Choose a USB port and enter the Wi-Fi SSID.";
-            return;
-        }
-        SetUsbControlsEnabled(false);
-        usbStatus.Text = $"Writing Wi-Fi configuration to {port}…";
-        try
-        {
-            var configuration = await UsbConfigurationClient.SetWifiAsync(port, ssid, usbPassword.Text, usbAlias.Text.Trim());
-            usbPassword.Clear();
-            usbStatus.Text = $"Wi-Fi saved for {configuration.Alias}. The device is rebooting onto the network…";
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TimeoutException)
-        {
-            usbStatus.Text = $"USB update failed: {exception.Message}";
-        }
-        finally
-        {
-            SetUsbControlsEnabled(true);
-        }
+        using var dialog = new SaveFileDialog { Filter = "Text files (*.txt)|*.txt", FileName = "wifi-intercom-diagnostics.txt" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try { File.WriteAllText(dialog.FileName, ReadDiagnosticLog()); }
+        catch (IOException exception) { MessageBox.Show(this, exception.Message, "Could not save log", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
-    private void SetUsbControlsEnabled(bool enabled)
+    // ---- Activity / recordings --------------------------------------------
+
+    private void RecordActivity(string text) => talkView.Activity.Add(text);
+
+    private static void OpenRecordingsFolder()
     {
-        usbPort.Enabled = refreshUsbPorts.Enabled = usbSsid.Enabled = usbPassword.Enabled = usbAlias.Enabled =
-            getUsbConfig.Enabled = applyUsbWifi.Enabled = enabled;
+        try { Process.Start(new ProcessStartInfo(CompanionSettings.RecordingsDirectory) { UseShellExecute = true }); } catch { }
     }
 
-    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    // ---- Tray --------------------------------------------------------------
+
+    private void EnableTray()
     {
-        if (KeepRunningInTray(e)) return;
-        refreshTimer.Stop();
-        otaStopping.Cancel();
-        globalHotkeys?.Dispose();
-        globalHotkeys = null;
-        // Never wait for a timer/socket/audio worker from the UI close path.
-        // Cancellation is enough; process shutdown cleans up background tasks.
-        receiveSession?.Stop();
-        audio?.Dispose();
-        node?.Stop();
+        if (trayIcon is not null) return;
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Show", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
+        menu.Items.Add("Exit", null, (_, _) => { allowExit = true; Close(); });
+        trayIcon = new NotifyIcon
+        {
+            Text = "Intercom Companion",
+            Icon = BrandAssets.AppIconAt(SystemInformation.SmallIconSize.Width),
+            ContextMenuStrip = menu,
+            Visible = true,
+        };
+        trayIcon.DoubleClick += (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); };
     }
 
-    private static Button CreatePttButton(string text, Color color) => new()
+    private bool KeepRunningInTray(FormClosingEventArgs e)
     {
-        Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-        BackColor = color, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
-        Font = new Font("Segoe UI", 10, FontStyle.Bold), Margin = new Padding(0, 0, 8, 0),
-        Padding = new Padding(12, 8, 12, 8), UseVisualStyleBackColor = false,
-    };
-
-    private static void AddConfigField(TableLayoutPanel panel, string label, Control field)
-    {
-        panel.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left }, 0, panel.RowCount);
-        field.Dock = DockStyle.Fill;
-        panel.Controls.Add(field, 1, panel.RowCount++);
+        if (!allowExit && e.CloseReason == CloseReason.UserClosing && settings.RunInNotificationArea)
+        {
+            e.Cancel = true;
+            Hide();
+            trayIcon?.ShowBalloonTip(1000, "Wi-Fi Intercom", "Still running in the notification area; hotkeys remain active.", ToolTipIcon.Info);
+            return true;
+        }
+        if (trayIcon is not null) { trayIcon.Visible = false; trayIcon.Dispose(); trayIcon = null; }
+        return false;
     }
+
+    // ---- Helpers -----------------------------------------------------------
+
+    private static string TrimDeviceName(string value)
+    {
+        value = value.Replace("Microphone (", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("Headset Earphone (", "", StringComparison.OrdinalIgnoreCase).TrimEnd(')');
+        return value.Length <= 23 ? value : $"{value[..20]}…";
+    }
+}
+
+/// <summary>Flat colour table for the card overflow menu — white, 1 px grey
+/// border, no gradient, hover <c>#F2F4F5</c>.</summary>
+internal sealed class FlatMenuColors : ProfessionalColorTable
+{
+    public override Color MenuBorder => UiStyles.Border;
+    public override Color MenuItemBorder => UiStyles.Border;
+    public override Color MenuItemSelected => Color.FromArgb(242, 244, 245);
+    public override Color MenuItemSelectedGradientBegin => Color.FromArgb(242, 244, 245);
+    public override Color MenuItemSelectedGradientEnd => Color.FromArgb(242, 244, 245);
+    public override Color ToolStripDropDownBackground => UiStyles.White;
+    public override Color ImageMarginGradientBegin => UiStyles.White;
+    public override Color ImageMarginGradientMiddle => UiStyles.White;
+    public override Color ImageMarginGradientEnd => UiStyles.White;
 }

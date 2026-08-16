@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #e9ebee; font-family: "Segoe UI", "Open Sans", sans-serif; color: #17191c; }
+  @keyframes speakPulse {
+    0%, 100% { border-color: #dcdfe3; box-shadow: 0 0 0 0 rgba(21,101,192,0); }
+    50%      { border-color: #1565c0; box-shadow: 0 0 0 3px rgba(21,101,192,0.22); }
+  }
+  a { color: #1565c0; text-decoration: none; } a:hover { color: #0d47a1; text-decoration: underline; }
+</style>
+</helmet>
+<div style="padding:32px 32px 56px 32px;">
+
+  <div style="display:flex; align-items:baseline; gap:16px; margin-bottom:6px;">
+    <div style="font-size:20px; font-weight:700;">Wi-Fi Intercom Companion — redesign</div>
+    <div style="font-size:13px; color:#63676d;">1280 × 820, resizable. Segoe UI, flat WinForms panels, palette taken from MainForm.cs.</div>
+  </div>
+  <div style="display:flex; gap:6px; margin:14px 0 18px 0; flex-wrap:wrap;">
+    <sc-for list="{{ screens }}" as="tab" hint-placeholder-count="5">
+      <button onClick="{{ tab.go }}" style="font:600 13px 'Segoe UI',sans-serif; padding:8px 14px; border:1px solid {{ tab.border }}; background:{{ tab.bg }}; color:{{ tab.fg }}; cursor:pointer;">{{ tab.label }}</button>
+    </sc-for>
+  </div>
+
+  <div style="width:1280px; background:#f5f6f7; border:1px solid #c8ccd1; box-shadow:0 4px 20px rgba(0,0,0,0.13);">
+
+    <div style="display:flex; align-items:center; height:34px; background:#ffffff; border-bottom:1px solid #e6e8ea;">
+      <div style="display:flex; align-items:center; gap:8px; padding-left:12px; font-size:12px;">
+        <svg width="16" height="16" viewBox="0 0 512 512" role="img" aria-label="Intercom Companion">
+          <circle cx="256" cy="256" r="200" fill="#a9c6e2"></circle>
+          <circle cx="256" cy="256" r="140" fill="#ffffff"></circle>
+          <g transform="translate(246 257) scale(0.8) translate(-246 -257)">
+            <path d="M246 185A14 14 0 0 0 232 171A90 90 0 0 0 232 343A14 14 0 0 0 246 329Z" fill="#1E6FD0"></path>
+          </g>
+          <path d="M266 185A14 14 0 0 1 280 171A90 90 0 0 1 280 343A14 14 0 0 1 266 329Z" fill="#12A06B"></path>
+        </svg>
+        <span>Wi-Fi Intercom Companion</span>
+      </div>
+      <div style="margin-left:auto; display:flex;">
+        <div style="width:46px; height:34px; display:grid; place-items:center; color:#333; font-size:12px;">—</div>
+        <div style="width:46px; height:34px; display:grid; place-items:center; color:#333; font-size:11px;">▢</div>
+        <div style="width:46px; height:34px; display:grid; place-items:center; color:#333; font-size:13px;">✕</div>
+      </div>
+    </div>
+
+    <div style="display:flex; align-items:center; gap:20px; height:56px; padding:0 20px; background:#ffffff; border-bottom:1px solid #dcdfe3;">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div style="width:9px; height:9px; border-radius:50%; background:#2e7d32;"></div>
+        <div style="line-height:1.25;">
+          <div style="font-size:14px; font-weight:600;">SUNRISEROG</div>
+          <div style="font-size:11px; color:#63676d;">ID a9d5b153 · group MESH · 16 of 16 devices</div>
+        </div>
+      </div>
+      <div style="width:1px; height:28px; background:#e6e8ea;"></div>
+      <div style="display:flex; align-items:center; gap:22px; font-size:12px; color:#3d4147;">
+        <div>
+          <div style="font-size:10px; letter-spacing:0.08em; color:#83878d; text-transform:uppercase;">Mic</div>
+          <div>FIFINE Microphone</div>
+        </div>
+        <div>
+          <div style="font-size:10px; letter-spacing:0.08em; color:#83878d; text-transform:uppercase;">Speaker</div>
+          <div>CORSAIR VIRTUOSO SE</div>
+        </div>
+        <a href="#" style="font-size:12px;">Change…</a>
+      </div>
+      <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+        <button style="font:12px 'Segoe UI',sans-serif; padding:6px 12px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Mute my speaker</button>
+        <button onClick="{{ openSettings }}" style="font:12px 'Segoe UI',sans-serif; padding:6px 12px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Settings…</button>
+      </div>
+    </div>
+
+    <sc-if value="{{ isTalk }}" hint-placeholder-val="{{ true }}">
+      <div>
+        <div style="display:flex; align-items:center; gap:16px; height:76px; padding:0 20px; background:{{ nowBg }}; border-bottom:1px solid #dcdfe3;">
+          <div style="width:4px; height:44px; background:{{ nowAccent }};"></div>
+          <div>
+            <div style="font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:#63676d;">{{ nowKicker }}</div>
+            <div style="font-size:26px; font-weight:700; color:{{ nowAccent }}; line-height:1.15;">{{ nowTitle }}</div>
+          </div>
+          <div style="margin-left:auto; font-size:12px; color:#63676d; text-align:right; line-height:1.5;">{{ nowMeta }}</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 336px; align-items:start;">
+
+          <div style="padding:18px 20px 22px 20px;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+              <div style="font-size:14px; font-weight:700; flex:none;">Devices</div>
+              <div style="font-size:12px; color:#63676d; white-space:nowrap; flex:none;">16 of 16 in group MESH</div>
+              <div style="margin-left:auto; display:flex; align-items:center; gap:6px; flex:none;">
+                <div style="height:26px; width:150px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 8px; font-size:12px; color:#83878d; white-space:nowrap; flex:none;">Alias or ID</div>
+                <sc-for list="{{ filters }}" as="f" hint-placeholder-count="5">
+                  <div style="height:26px; display:flex; align-items:center; gap:5px; padding:0 9px; font-size:12px; background:{{ f.bg }}; color:{{ f.fg }}; border:1px solid {{ f.border }}; white-space:nowrap; flex:none; cursor:pointer;">
+                    <span>{{ f.label }}</span><span style="color:{{ f.countFg }}; font-variant-numeric:tabular-nums;">{{ f.count }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px;">
+              <sc-for list="{{ devices }}" as="d" hint-placeholder-count="16">
+                <div style="background:#ffffff; border:1px solid #dcdfe3; border-left:3px solid {{ d.accent }}; padding:10px 12px; animation:{{ d.pulse }};">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <div style="font-size:14px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.alias }}</div>
+                    <div style="margin-left:auto; font-size:9px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#ffffff; background:{{ d.accent }}; padding:2px 6px; white-space:nowrap;">{{ d.state }}</div>
+                  </div>
+                  <div style="font-size:10px; color:#83878d; margin-top:3px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.meta }}</div>
+                  <div style="display:flex; align-items:center; gap:5px; margin-top:5px;">
+                    <span style="width:6px; height:6px; background:{{ d.muteDot }}; flex:none;"></span>
+                    <span style="font-size:10px; color:{{ d.muteFg }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.muteNote }}</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:5px; margin-top:9px;">
+                    <button style="flex:1; font:700 12px 'Segoe UI',sans-serif; color:#ffffff; background:{{ d.talkBg }}; border:1px solid {{ d.talkBg }}; padding:7px 6px; cursor:pointer;">Hold to talk</button>
+                    <button style="font:11px 'Segoe UI',sans-serif; padding:7px 8px; background:{{ d.silenceBg }}; color:{{ d.silenceFg }}; border:1px solid #adb2b8; cursor:pointer;">{{ d.silenceLabel }}</button>
+                    <button onClick="{{ openConfigure }}" style="font:12px 'Segoe UI',sans-serif; width:26px; height:27px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">⋯</button>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:8px; margin-top:9px; padding-top:8px; border-top:1px solid #edeff1;">
+                    <span style="font-size:10px; color:#83878d;">Vol</span>
+                    <div style="flex:1; height:3px; background:#e2e5e8; position:relative;">
+                      <div style="position:absolute; left:0; top:0; bottom:0; width:{{ d.volumePct }}; background:{{ d.accent }};"></div>
+                      <div style="position:absolute; left:{{ d.volumePct }}; top:-5px; width:9px; height:13px; margin-left:-4px; background:#ffffff; border:1px solid #7a7f85;"></div>
+                    </div>
+                    <span style="font-size:10px; color:#3d4147; width:34px; text-align:right; font-variant-numeric:tabular-nums;">{{ d.volumeLabel }}</span>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:16px; background:#ffffff; border:1px solid #dcdfe3;">
+              <div style="display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid #edeff1;">
+                <div style="font-size:13px; font-weight:700;">Known, not responding</div>
+                <div style="font-size:12px; color:#63676d;">3 devices kept from earlier sessions — they return to the grid as soon as they announce</div>
+                <button onClick="{{ openRemove }}" style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:6px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Remove all three…</button>
+              </div>
+              <sc-for list="{{ offline }}" as="o" hint-placeholder-count="3">
+                <div style="display:flex; align-items:center; gap:12px; padding:9px 14px; border-bottom:1px solid #f2f4f5; font-size:12px;">
+                  <span style="width:6px; height:6px; background:#c9ccd0;"></span>
+                  <span style="font-weight:600; width:150px;">{{ o.alias }}</span>
+                  <span style="color:#63676d; width:210px; font-variant-numeric:tabular-nums;">{{ o.meta }}</span>
+                  <span style="color:#83878d;">{{ o.seen }}</span>
+                  <button onClick="{{ openRemove }}" style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:5px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Remove…</button>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:12px; font-size:11px; color:#83878d; max-width:900px; text-wrap:pretty;">
+              Up to 16 devices per group. Cards are one row high and the grid scrolls, so about nine are visible at 1280 × 820 and all sixteen at full screen; ring, buttons and orientation live in each device's Configure dialog. Silence is a soft mute on the device: it stops that device playing received audio while it stays in discovery and floor control. A device whose physical mute slider is on reports that state and its Silence control is unavailable.
+            </div>
+          </div>
+
+          <div style="padding:18px 20px 22px 0;">
+            <div style="background:#ffffff; border:1px solid #dcdfe3; padding:16px;">
+              <button style="width:100%; font:700 17px 'Segoe UI',sans-serif; color:#ffffff; background:#2e7d32; border:1px solid #2e7d32; padding:22px 0; cursor:pointer;">Hold to broadcast</button>
+              <div style="display:flex; justify-content:space-between; font-size:11px; color:#63676d; margin-top:8px;">
+                <span>Everyone in group MESH</span><span>Space, or Ctrl+Alt+B anywhere</span>
+              </div>
+              <button style="width:100%; font:700 14px 'Segoe UI',sans-serif; color:#ffffff; background:#1565c0; border:1px solid #1565c0; padding:14px 0; margin-top:12px; cursor:pointer;">Hold to reply</button>
+              <div style="display:flex; justify-content:space-between; font-size:11px; color:#63676d; margin-top:8px;">
+                <span>Last sender: Intercom</span><span>Ctrl+Alt+R</span>
+              </div>
+            </div>
+
+            <div style="background:#ffffff; border:1px solid #dcdfe3; margin-top:12px;">
+              <div style="display:flex; align-items:center; padding:12px 16px; border-bottom:1px solid #edeff1;">
+                <div style="font-size:13px; font-weight:700;">Activity</div>
+                <a href="#" style="margin-left:auto; font-size:12px;">Open recordings folder</a>
+              </div>
+              <sc-for list="{{ activity }}" as="a" hint-placeholder-count="6">
+                <div style="display:flex; gap:10px; padding:9px 16px; border-bottom:1px solid #f2f4f5; font-size:12px;">
+                  <span style="color:#83878d; width:46px; font-variant-numeric:tabular-nums;">{{ a.time }}</span>
+                  <span style="width:8px; height:8px; margin-top:5px; background:{{ a.color }};"></span>
+                  <span style="color:#3d4147;">{{ a.text }}</span>
+                </div>
+              </sc-for>
+              <div style="padding:10px 16px;">
+                <a href="#" onClick="{{ openDiagnostics }}" style="font-size:12px;">Diagnostics…</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:0;">
+        <div style="display:grid; grid-template-columns:236px 1fr; min-height:640px;">
+          <div style="background:#eef0f2; border-right:1px solid #dcdfe3; padding:12px 0;">
+            <div onClick="{{ backToTalk }}" style="display:flex; align-items:center; gap:8px; padding:9px 18px 9px 15px; font-size:13px; color:#1565c0; cursor:pointer;" style-hover="background:#e4e7ea;"><span style="font-size:14px; line-height:1;">←</span><span>Back to Talk</span><span style="margin-left:auto; font-size:11px; color:#83878d;">Esc</span></div>
+            <div style="height:1px; background:#dcdfe3; margin:10px 0 12px 0;"></div>
+            <div style="font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:#83878d; padding:0 18px 10px 18px;">Settings</div>
+            <sc-for list="{{ settingsNav }}" as="n" hint-placeholder-count="4">
+              <div onClick="{{ n.go }}" style="display:flex; align-items:center; padding:11px 18px; font-size:13px; font-weight:{{ n.weight }}; color:{{ n.fg }}; background:{{ n.bg }}; border-left:3px solid {{ n.mark }}; cursor:pointer;">{{ n.label }}</div>
+            </sc-for>
+            <div style="padding:18px; margin-top:14px; font-size:11px; color:#83878d; line-height:1.6;">Settings are rare. Nothing here blocks discovery, talking or the device list.</div>
+          </div>
+
+          <div style="padding:24px 28px;">
+            <sc-if value="{{ isUsb }}" hint-placeholder-val="{{ false }}">
+              <div style="max-width:720px;">
+                <div style="font-size:20px; font-weight:700;">Set up a device over USB</div>
+                <div style="font-size:13px; color:#63676d; margin-top:6px; text-wrap:pretty;">Connect the device by USB, give it your Wi-Fi credentials, and it reboots onto the network. The password stays on this PC and is never saved by the companion.</div>
+
+                <div style="display:flex; gap:0; margin-top:22px;">
+                  <sc-for list="{{ wizardSteps }}" as="s" hint-placeholder-count="3">
+                    <div style="flex:1; padding:12px 14px; background:{{ s.bg }}; border:1px solid #dcdfe3; border-right:0;">
+                      <div style="font-size:11px; letter-spacing:0.08em; text-transform:uppercase; color:{{ s.kickerFg }};">{{ s.kicker }}</div>
+                      <div style="font-size:13px; font-weight:600; color:{{ s.fg }}; margin-top:4px;">{{ s.label }}</div>
+                    </div>
+                  </sc-for>
+                  <div style="width:1px; background:#dcdfe3;"></div>
+                </div>
+
+                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:20px; margin-top:18px;">
+                  <div style="display:grid; grid-template-columns:150px 1fr; gap:14px 16px; align-items:center;">
+                    <span style="font-size:13px;">USB port</span>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                      <div style="width:280px; height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; gap:6px; padding:0 6px; font-size:13px; box-sizing:border-box;"><span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">COM3 — Intercom (90b77b2c)</span><span style="margin-left:auto; font-size:9px;">▼</span></div>
+                      <button style="font:12px 'Segoe UI',sans-serif; padding:6px 12px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Rescan</button>
+                      <span style="font-size:12px; color:#2e7d32;">Device identified over USB</span>
+                    </div>
+                    <span style="font-size:13px;">Wi-Fi network</span>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                      <div style="width:240px; height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 6px; font-size:13px;">Sunrise_2G<span style="margin-left:auto; font-size:9px;">▼</span></div>
+                      <span style="font-size:12px; color:#63676d;">2.4 GHz only</span>
+                    </div>
+                    <span style="font-size:13px;">Password</span>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                      <input type="password" value="hunter22" style="width:240px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box;">
+                      <button style="font:12px 'Segoe UI',sans-serif; padding:6px 12px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Show</button>
+                    </div>
+                    <span style="font-size:13px;">Device alias</span>
+                    <input value="Reception" style="width:240px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box;">
+                  </div>
+                  <div style="display:flex; align-items:center; gap:12px; margin-top:20px; padding-top:16px; border-top:1px solid #edeff1;">
+                    <button style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#1565c0; border:1px solid #1565c0; padding:10px 18px; cursor:pointer;">Send to device and reboot</button>
+                    <span style="font-size:12px; color:#63676d;">The device restarts and should appear in Devices within a few seconds.</span>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ isFirmware }}" hint-placeholder-val="{{ false }}">
+              <div style="max-width:820px;">
+                <div style="font-size:20px; font-weight:700;">Firmware</div>
+                <div style="font-size:13px; color:#63676d; margin-top:6px; text-wrap:pretty;">Signed packages only. Updates go to the inactive slot; a device that does not report healthy rolls itself back.</div>
+
+                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:18px 20px; margin-top:18px;">
+                  <div style="display:flex; align-items:center; gap:14px;">
+                    <div>
+                      <div style="font-size:15px; font-weight:700;">wifi_intercom 0.7.9</div>
+                      <div style="font-size:12px; color:#63676d; margin-top:3px;">wifi_intercom-0.7.9.ota.json · 812.4 KiB · signature verified</div>
+                    </div>
+                    <button style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:8px 14px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Choose another package…</button>
+                  </div>
+                </div>
+
+                <div style="background:#ffffff; border:1px solid #dcdfe3; margin-top:14px;">
+                  <div style="display:flex; align-items:center; padding:14px 20px; border-bottom:1px solid #edeff1;">
+                    <div style="font-size:13px; font-weight:700;">Update queue</div>
+                    <div style="font-size:12px; color:#63676d; margin-left:10px;">sequential, one device at a time</div>
+                    <button style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:7px 12px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Add all compatible</button>
+                    <button onClick="{{ openOtaConfirm }}" style="margin-left:8px; font:700 12px 'Segoe UI',sans-serif; color:#ffffff; background:#1565c0; border:1px solid #1565c0; padding:7px 14px; cursor:pointer;">Start queue…</button>
+                  </div>
+                  <sc-for list="{{ otaQueue }}" as="q" hint-placeholder-count="3">
+                    <div style="padding:14px 20px; border-bottom:1px solid #f2f4f5;">
+                      <div style="display:flex; align-items:center; gap:10px;">
+                        <div style="font-size:14px; font-weight:600; width:150px;">{{ q.alias }}</div>
+                        <div style="font-size:12px; color:#63676d; width:170px;">{{ q.version }}</div>
+                        <div style="font-size:12px; font-weight:600; color:{{ q.color }};">{{ q.state }}</div>
+                        <button style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:6px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">{{ q.action }}</button>
+                      </div>
+                      <div style="height:6px; background:#e9ebee; margin-top:10px;">
+                        <div style="height:6px; width:{{ q.progress }}; background:{{ q.color }};"></div>
+                      </div>
+                      <div style="font-size:11px; color:#83878d; margin-top:6px;">{{ q.detail }}</div>
+                    </div>
+                  </sc-for>
+                  <div style="padding:14px 20px; font-size:12px; color:#63676d;">Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.</div>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ isDiagnostics }}" hint-placeholder-val="{{ false }}">
+              <div style="max-width:860px;">
+                <div style="font-size:20px; font-weight:700;">Diagnostics</div>
+                <div style="font-size:13px; color:#63676d; margin-top:6px;">Live counters and the discovery/session log. Copy this when reporting a fault.</div>
+
+                <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-top:18px;">
+                  <sc-for list="{{ stats }}" as="s" hint-placeholder-count="4">
+                    <div style="background:#ffffff; border:1px solid #dcdfe3; padding:14px 16px;">
+                      <div style="font-size:11px; letter-spacing:0.08em; text-transform:uppercase; color:#83878d;">{{ s.label }}</div>
+                      <div style="font-size:22px; font-weight:700; margin-top:6px; font-variant-numeric:tabular-nums;">{{ s.value }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+
+                <div style="background:#1c1f23; border:1px solid #101215; margin-top:16px; padding:14px 16px; height:300px; overflow:hidden;">
+                  <sc-for list="{{ logLines }}" as="l" hint-placeholder-count="8">
+                    <div style="font:12px/1.7 Consolas, 'Courier New', monospace; color:{{ l.color }};">{{ l.text }}</div>
+                  </sc-for>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:12px;">
+                  <button style="font:12px 'Segoe UI',sans-serif; padding:8px 14px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Copy log</button>
+                  <button style="font:12px 'Segoe UI',sans-serif; padding:8px 14px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Save log to file…</button>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ isGroup }}" hint-placeholder-val="{{ false }}">
+              <div style="max-width:760px;">
+                <div style="font-size:20px; font-weight:700;">Group and device IDs</div>
+                <div style="font-size:13px; color:#63676d; margin-top:6px; text-wrap:pretty;">A group is an intercom channel, not a radio network. Every device and companion that should hear each other must carry the same group ID on the same 2.4 GHz LAN. A group holds up to 16 devices.</div>
+
+                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:18px 20px; margin-top:18px;">
+                  <div style="display:grid; grid-template-columns:170px 1fr; gap:14px 16px; align-items:center;">
+                    <span style="font-size:13px;">Current group</span>
+                    <span style="font-size:13px; font-weight:600; font-variant-numeric:tabular-nums;">MESH · 16 devices, 1 companion</span>
+                    <span style="font-size:13px;">This companion's ID</span>
+                    <span style="font-size:13px; color:#63676d; font-variant-numeric:tabular-nums;">a9d5b153 · generated once, unique on this PC</span>
+                  </div>
+                </div>
+
+                <div style="border:1px solid #b22222; border-left:4px solid #b22222; background:#fdf3f3; margin-top:18px;">
+                  <div style="padding:14px 18px; border-bottom:1px solid #f2d6d6;">
+                    <div style="font-size:15px; font-weight:700; color:#8e1a1a;">Change the group ID</div>
+                    <div style="font-size:12px; color:#7a2020; margin-top:4px;">This breaks the intercom until every node carries the new ID.</div>
+                  </div>
+                  <div style="padding:16px 18px;">
+                    <div style="font-size:13px; color:#3d4147; line-height:1.8;">
+                      <div>· Devices still on <strong>MESH</strong> disappear from this companion and can no longer hear it.</div>
+                      <div>· Each device must be changed separately, over USB or with a configuration write, and each one reboots.</div>
+                      <div>· A device you cannot reach right now keeps the old group until you get to it physically.</div>
+                      <div>· Two groups on the same LAN never mix, so a half-finished change leaves two isolated intercoms.</div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:170px 1fr; gap:14px 16px; align-items:center; margin-top:18px;">
+                      <span style="font-size:13px;">New group ID</span>
+                      <div style="display:flex; align-items:center; gap:10px;">
+                        <input value="WARD" style="width:140px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box; letter-spacing:0.14em;">
+                        <span style="font-size:12px; color:#63676d;">exactly 4 characters, A–Z and 0–9</span>
+                      </div>
+                      <span style="font-size:13px;">Type MESH to confirm</span>
+                      <input placeholder="MESH" style="width:140px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box; letter-spacing:0.14em;">
+                      <span style="font-size:13px;">Apply to</span>
+                      <div style="font-size:13px; display:flex; flex-direction:column; gap:8px;">
+                        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" checked>This companion</label>
+                        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox">All 16 active devices, one at a time (each reboots)</label>
+                      </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:12px; margin-top:18px;">
+                      <button disabled style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#d08a8a; border:1px solid #d08a8a; padding:10px 18px;">Change group ID</button>
+                      <span style="font-size:12px; color:#7a2020;">Enabled once the confirmation matches.</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:16px 20px; margin-top:16px;">
+                  <div style="font-size:13px; font-weight:700;">Device IDs</div>
+                  <div style="font-size:12px; color:#63676d; margin-top:6px; text-wrap:pretty;">A device ID identifies one unit inside the group and must be unique. Change it from that device's Configure dialog; the companion refuses an ID already held by another device it can see.</div>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ isIdentity }}" hint-placeholder-val="{{ false }}">
+              <div style="max-width:720px;">
+                <div style="font-size:20px; font-weight:700;">Identity, audio and shortcuts</div>
+                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:20px; margin-top:18px;">
+                  <div style="display:grid; grid-template-columns:170px 1fr; gap:14px 16px; align-items:center;">
+                    <span style="font-size:13px;">Companion alias</span>
+                    <input value="SUNRISEROG" style="width:260px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box;">
+                    <span style="font-size:13px;">Companion ID</span>
+                    <span style="font-size:13px; color:#63676d; font-variant-numeric:tabular-nums;">a9d5b153 · fixed for this PC</span>
+                    <span style="font-size:13px;">Microphone</span>
+                    <div style="width:320px; height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 6px; font-size:13px;">Microphone (FIFINE Microphone)<span style="margin-left:auto; font-size:9px;">▼</span></div>
+                    <span style="font-size:13px;">Speaker</span>
+                    <div style="width:320px; height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 6px; font-size:13px;">Headset Earphone (CORSAIR VIRTUOSO SE)<span style="margin-left:auto; font-size:9px;">▼</span></div>
+                    <span style="font-size:13px;">Broadcast hotkey</span>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                      <div style="height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 10px; font-size:13px;">Ctrl + Alt + B</div>
+                      <span style="font-size:12px; color:#63676d;">works when the window is not focused</span>
+                    </div>
+                    <span style="font-size:13px;">Reply hotkey</span>
+                    <div style="height:26px; width:130px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 10px; font-size:13px;">Ctrl + Alt + R</div>
+                    <span style="font-size:13px;">Window</span>
+                    <div style="display:flex; flex-direction:column; gap:8px; font-size:13px;">
+                      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" checked>Keep running in the notification area when closed</label>
+                      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" checked>Start with Windows</label>
+                    </div>
+                  </div>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:16px;">
+                  <button style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#1565c0; border:1px solid #1565c0; padding:10px 18px; cursor:pointer;">Save</button>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isConfigure }}" hint-placeholder-val="{{ false }}">
+      <div style="position:relative; min-height:640px; background:#f5f6f7;">
+        <div style="position:absolute; inset:0; background:rgba(23,25,28,0.32);"></div>
+        <div style="position:absolute; left:50%; top:56px; margin-left:-260px; width:520px; background:#ffffff; border:1px solid #adb2b8; box-shadow:0 10px 34px rgba(0,0,0,0.28);">
+          <div style="display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid #edeff1;">
+            <div style="font-size:15px; font-weight:700;">Configure Intercom</div>
+            <div style="font-size:12px; color:#63676d; margin-left:10px;">90b77b2c · 192.168.0.122</div>
+            <div style="margin-left:auto; font-size:13px; color:#63676d; cursor:pointer;">✕</div>
+          </div>
+          <div style="padding:18px;">
+            <div style="display:flex; align-items:center; gap:10px; padding:9px 12px; background:#eef4fb; border:1px solid #cfe0f3; font-size:12px; color:#0d47a1;">
+              <span>Read from the device 4 s ago. Your edits are not overwritten by discovery.</span>
+              <button style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:5px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Re-read</button>
+            </div>
+            <div style="display:grid; grid-template-columns:150px 1fr; gap:16px; align-items:center; margin-top:18px;">
+              <span style="font-size:13px;">Alias</span>
+              <input value="Intercom" style="height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box;">
+              <span style="font-size:13px;">Speaker volume</span>
+              <div style="display:flex; align-items:center; gap:12px;">
+                <div style="flex:1; height:4px; background:#e2e5e8; position:relative;">
+                  <div style="position:absolute; left:0; top:0; bottom:0; width:52%; background:#1565c0;"></div>
+                  <div style="position:absolute; left:52%; top:-5px; width:10px; height:14px; margin-left:-5px; background:#fff; border:1px solid #7a7f85;"></div>
+                </div>
+                <span style="font-size:12px; width:96px; text-align:right; font-variant-numeric:tabular-nums;">560 / 1024</span>
+              </div>
+              <span style="font-size:13px;">Ring brightness</span>
+              <div style="display:flex; align-items:center; gap:12px;">
+                <div style="flex:1; height:4px; background:#e2e5e8; position:relative;">
+                  <div style="position:absolute; left:0; top:0; bottom:0; width:19%; background:#9aa0a6;"></div>
+                  <div style="position:absolute; left:19%; top:-5px; width:10px; height:14px; margin-left:-5px; background:#fff; border:1px solid #7a7f85;"></div>
+                </div>
+                <span style="font-size:12px; width:96px; text-align:right; font-variant-numeric:tabular-nums;">48 / 255</span>
+              </div>
+              <span style="font-size:13px;">Playback</span>
+              <div>
+                <div style="display:flex; gap:0;">
+                  <div style="padding:8px 14px; font-size:13px; background:#1565c0; color:#fff; border:1px solid #1565c0;">Plays received audio</div>
+                  <div style="padding:8px 14px; font-size:13px; background:#fff; border:1px solid #adb2b8; border-left:0;">Soft muted</div>
+                </div>
+                <div style="font-size:11px; color:#63676d; margin-top:6px;">Device reports its mute slider off. Soft mute stops playback only; discovery and sending continue.</div>
+              </div>
+              <span style="font-size:13px;">Buttons</span>
+              <div style="display:flex; gap:0;">
+                <div style="padding:8px 14px; font-size:13px; background:#1565c0; color:#fff; border:1px solid #1565c0;">Standard</div>
+                <div style="padding:8px 14px; font-size:13px; background:#fff; border:1px solid #adb2b8; border-left:0;">Swapped</div>
+              </div>
+              <span style="font-size:13px;">Ring centre</span>
+              <div style="display:flex; gap:0;">
+                <div style="padding:8px 14px; font-size:13px; background:#1565c0; color:#fff; border:1px solid #1565c0;">0°</div>
+                <div style="padding:8px 14px; font-size:13px; background:#fff; border:1px solid #adb2b8; border-left:0;">180°</div>
+              </div>
+            </div>
+            <div style="margin-top:16px; padding:10px 12px; background:#fdf6e3; border:1px solid #e8d9a8; font-size:12px; color:#6b5300; text-wrap:pretty;">
+              Wi-Fi credentials, ring brightness, button mapping and ring centre make the device restart after it acknowledges. Alias and volume apply immediately.
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; padding:14px 18px; border-top:1px solid #edeff1; background:#f7f8f9;">
+            <button style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#1565c0; border:1px solid #1565c0; padding:9px 18px; cursor:pointer;">Apply to device</button>
+            <button onClick="{{ backToTalk }}" style="font:13px 'Segoe UI',sans-serif; padding:9px 18px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Cancel</button>
+            <span style="margin-left:auto; font-size:12px; color:#63676d; padding-top:9px;">Nothing is sent until you apply.</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isRemove }}" hint-placeholder-val="{{ false }}">
+      <div style="position:relative; min-height:640px; background:#f5f6f7;">
+        <div style="position:absolute; inset:0; background:rgba(23,25,28,0.32);"></div>
+        <div style="position:absolute; left:50%; top:96px; margin-left:-235px; width:470px; background:#ffffff; border:1px solid #adb2b8; box-shadow:0 10px 34px rgba(0,0,0,0.28);">
+          <div style="padding:16px 20px; border-bottom:1px solid #edeff1; font-size:15px; font-weight:700;">Remove Old bench board from this companion?</div>
+          <div style="padding:18px 20px; font-size:13px; color:#3d4147; line-height:1.7;">
+            <div>Removing forgets the device's alias, last-known volume and ring settings on this PC. It does not change the device itself, and it stays in group MESH.</div>
+            <div style="margin-top:10px; color:#63676d;">If it powers back on, it reappears in Devices with the settings stored on the device.</div>
+          </div>
+          <div style="display:flex; gap:8px; padding:14px 20px; border-top:1px solid #edeff1; background:#f7f8f9;">
+            <button style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#b22222; border:1px solid #b22222; padding:9px 18px; cursor:pointer;">Remove</button>
+            <button onClick="{{ backToTalk }}" style="font:13px 'Segoe UI',sans-serif; padding:9px 18px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isOtaConfirm }}" hint-placeholder-val="{{ false }}">
+      <div style="position:relative; min-height:640px; background:#f5f6f7;">
+        <div style="position:absolute; inset:0; background:rgba(23,25,28,0.32);"></div>
+        <div style="position:absolute; left:50%; top:64px; margin-left:-270px; width:540px; background:#ffffff; border:1px solid #adb2b8; box-shadow:0 10px 34px rgba(0,0,0,0.28);">
+          <div style="padding:16px 20px; border-bottom:1px solid #edeff1;">
+            <div style="font-size:15px; font-weight:700;">Update 2 devices to 0.7.9?</div>
+            <div style="font-size:12px; color:#63676d; margin-top:4px;">wifi_intercom-0.7.9.ota.json · 812.4 KiB · signature verified</div>
+          </div>
+          <div style="padding:18px 20px;">
+            <div style="border:1px solid #e8d9a8; border-left:4px solid #f9a825; background:#fdf6e3; padding:12px 14px; font-size:13px; color:#6b5300; line-height:1.7;">
+              <div>· Devices update one at a time and reboot; each is unavailable for about a minute.</div>
+              <div>· The companion must stay open and awake for the whole queue.</div>
+              <div>· Windows may ask once to allow the temporary local firmware server on a private network.</div>
+              <div>· A device that does not report healthy rolls back to its current firmware by itself.</div>
+            </div>
+            <div style="margin-top:16px; font-size:12px; color:#63676d;">In order:</div>
+            <div style="margin-top:8px; font-size:13px; line-height:1.9;">
+              <div><strong>Intercom</strong> <span style="color:#63676d;">90b77b2c · 0.7.8 → 0.7.9</span></div>
+              <div><strong>Test unit</strong> <span style="color:#63676d;">90688edc · 0.7.8 → 0.7.9</span></div>
+            </div>
+            <label style="display:flex; gap:8px; align-items:center; margin-top:16px; font-size:13px;"><input type="checkbox">I understand the devices will reboot and be unavailable</label>
+          </div>
+          <div style="display:flex; gap:8px; padding:14px 20px; border-top:1px solid #edeff1; background:#f7f8f9;">
+            <button disabled style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#8fb3d9; border:1px solid #8fb3d9; padding:9px 18px;">Start update</button>
+            <button onClick="{{ openFirmware }}" style="font:13px 'Segoe UI',sans-serif; padding:9px 18px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Cancel</button>
+            <span style="margin-left:auto; font-size:12px; color:#63676d; padding-top:9px;">Local PTT is disabled while a queue runs.</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <div style="display:flex; align-items:center; gap:16px; height:30px; padding:0 16px; background:#eef0f2; border-top:1px solid #dcdfe3; font-size:11px; color:#63676d;">
+      <span>Discovery: listening on 239.255.42.99:45678</span>
+      <span>·</span>
+      <span>{{ statusStats }}</span>
+      <span style="margin-left:auto;">Running in the notification area · Ctrl+Alt+B to broadcast</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1360,&quot;height&quot;:1000}}">
+class Component extends DCLogic {
+  state = { screen: "talk", settings: "usb" };
+
+  go(screen, settings) {
+    return () => this.setState(settings ? { screen, settings } : { screen });
+  }
+
+  renderVals() {
+    const s = this.state.screen;
+    const tabs = [
+      ["talk", "Talk — full group of 16"],
+      ["configure", "Configure device"],
+      ["remove", "Remove offline device"],
+      ["settings-usb", "Settings · USB setup"],
+      ["settings-group", "Settings · Group & device IDs"],
+      ["settings-firmware", "Settings · Firmware queue"],
+      ["ota-confirm", "Confirm firmware update"],
+      ["settings-diagnostics", "Settings · Diagnostics"],
+      ["settings-identity", "Settings · Identity & audio"],
+    ];
+    const current = s === "settings" ? "settings-" + this.state.settings : s;
+    const screens = tabs.map(([key, label]) => {
+      const active = key === current;
+      const isSet = key.startsWith("settings-");
+      return {
+        label,
+        bg: active ? "#17191c" : "#ffffff",
+        fg: active ? "#ffffff" : "#3d4147",
+        border: active ? "#17191c" : "#c8ccd1",
+        go: isSet ? this.go("settings", key.slice(9)) : this.go(key),
+      };
+    });
+
+    const navItems = [
+      ["usb", "Set up a device (USB)"],
+      ["group", "Group and device IDs"],
+      ["firmware", "Firmware"],
+      ["identity", "Identity, audio, shortcuts"],
+      ["diagnostics", "Diagnostics"],
+    ];
+    const settingsNav = navItems.map(([key, label]) => {
+      const active = this.state.settings === key;
+      return {
+        label,
+        weight: active ? 700 : 400,
+        fg: active ? "#17191c" : "#3d4147",
+        bg: active ? "#ffffff" : "transparent",
+        mark: active ? "#1565c0" : "transparent",
+        go: this.go("settings", key),
+      };
+    });
+
+    const raw = [
+      ["Intercom", "90b77b2c", "122", "speaking", 560, "0.7.8"],
+      ["Test unit", "90688edc", "224", "soft", 128, "0.7.8"],
+      ["Workshop", "9061aa04", "171", "hardmute", 392],
+      ["Reception", "90b8f2e1", "104", "idle", 640],
+      ["Kitchen", "90c41b77", "108", "idle", 512],
+      ["Loading bay", "90d20f19", "111", "idle", 768],
+      ["Office 1", "90aa5c30", "115", "idle", 448],
+      ["Office 2", "90aa5c31", "116", "soft", 448],
+      ["Gate", "907e13b8", "119", "idle", 896],
+      ["Stockroom", "9033c9a2", "127", "idle", 320],
+      ["Paint shop", "90f4e7d1", "133", "hardmute", 512],
+      ["Yard east", "9012bb45", "140", "idle", 704],
+      ["Yard west", "9012bb46", "141", "idle", 704],
+      ["Cold store", "90ce9911", "148", "idle", 256],
+      ["Van 1", "9077ab03", "152", "idle", 640],
+      ["Spare unit", "90ff2210", "160", "legacy", 384],
+    ];
+    const devices = raw.map(([alias, id, host, mode, vol, fw]) => {
+      const pct = Math.round(((vol - 64) / (1024 - 64)) * 100) + "%";
+      const base = {
+        alias, talkBg: "#6a1b9a", volumePct: pct, volumeLabel: String(vol),
+        meta: id + " · 192.168.0." + host + " · " + (fw || "0.7.9") + " · p2",
+        silenceLabel: "Silence", silenceBg: "#ffffff", silenceFg: "#3d4147",
+        muteNote: "Playing received audio", muteDot: "#2e7d32", muteFg: "#83878d",
+        state: "Idle", accent: "#2e7d32", pulse: "none",
+      };
+      if (mode === "speaking") return { ...base, state: "Speaking", accent: "#1565c0",
+        pulse: "speakPulse 2.2s ease-in-out infinite" };
+      if (mode === "soft") return { ...base, silenceLabel: "Silenced", silenceBg: "#3d4147", silenceFg: "#ffffff",
+        state: "Soft muted", accent: "#3d4147", muteNote: "Soft muted from here", muteDot: "#3d4147", muteFg: "#3d4147" };
+      if (mode === "hardmute") return { ...base, state: "Muted", accent: "#f9a825",
+        silenceBg: "#f2f4f5", silenceFg: "#9aa0a6",
+        muteNote: "Mute slider on at the device", muteDot: "#f9a825", muteFg: "#6b5300" };
+      if (mode === "legacy") return { ...base, state: "Legacy", accent: "#f9a825", talkBg: "#9aa0a6",
+        meta: id + " · 192.168.0." + host + " · 0.6.1 · legacy",
+        volumeLabel: "—", volumePct: "0%", silenceBg: "#f2f4f5", silenceFg: "#9aa0a6",
+        muteNote: "No mute reporting before p2", muteDot: "#c9ccd0", muteFg: "#83878d" };
+      return base;
+    });
+
+    const offline = [
+      { alias: "Old bench board", meta: "90b8f2ff · last at 192.168.0.191", seen: "not heard for 3 days" },
+      { alias: "Bench test", meta: "901f77aa · last at 192.168.0.198", seen: "not heard for 11 days" },
+      { alias: "Van 2", meta: "9077ab04 · last at 192.168.0.153", seen: "not heard for 26 days" },
+    ];
+
+    const filterDefs = [["All", "16", true], ["Speaking", "1", false], ["Muted", "2", false], ["Silenced", "2", false], ["Legacy", "1", false]];
+    const filters = filterDefs.map(([label, count, active]) => ({
+      label, count,
+      bg: active ? "#17191c" : "#ffffff",
+      fg: active ? "#ffffff" : "#3d4147",
+      countFg: active ? "#9aa0a6" : "#83878d",
+      border: active ? "#17191c" : "#adb2b8",
+    }));
+
+    return {
+      screens, settingsNav, devices, offline, filters,
+      isTalk: s === "talk",
+      isSettings: s === "settings",
+      isConfigure: s === "configure",
+      isRemove: s === "remove",
+      isOtaConfirm: s === "ota-confirm",
+      isGroup: s === "settings" && this.state.settings === "group",
+      openConfigure: this.go("configure"),
+      openRemove: this.go("remove"),
+      openOtaConfirm: this.go("ota-confirm"),
+      openFirmware: this.go("settings", "firmware"),
+      isUsb: s === "settings" && this.state.settings === "usb",
+      isFirmware: s === "settings" && this.state.settings === "firmware",
+      isDiagnostics: s === "settings" && this.state.settings === "diagnostics",
+      isIdentity: s === "settings" && this.state.settings === "identity",
+      openSettings: this.go("settings", "usb"),
+      openDiagnostics: this.go("settings", "diagnostics"),
+      backToTalk: this.go("talk"),
+
+      nowKicker: "Receiving",
+      nowTitle: "Intercom is speaking",
+      nowAccent: "#1565c0",
+      nowBg: "#eef4fb",
+      nowMeta: "broadcast to the group · 3.2 s · output buffer 96 ms",
+
+      activity: [
+        { time: "14:22", color: "#1565c0", text: "Intercom — broadcast, 3.2 s" },
+        { time: "14:19", color: "#2e7d32", text: "You — broadcast, 6.0 s" },
+        { time: "14:18", color: "#1565c0", text: "Test unit — direct to you, 2.1 s" },
+        { time: "14:11", color: "#f9a825", text: "Floor busy — your press was dropped" },
+        { time: "14:04", color: "#9aa0a6", text: "Workshop joined the group" },
+        { time: "13:58", color: "#b22222", text: "Reception stopped announcing" },
+      ],
+
+      wizardSteps: [
+        { kicker: "Step 1", label: "Connect by USB", bg: "#ffffff", fg: "#17191c", kickerFg: "#2e7d32" },
+        { kicker: "Step 2", label: "Enter Wi-Fi credentials", bg: "#eef4fb", fg: "#0d47a1", kickerFg: "#1565c0" },
+        { kicker: "Step 3", label: "Device reboots and appears", bg: "#f5f6f7", fg: "#83878d", kickerFg: "#9aa0a6" },
+      ],
+
+      otaQueue: [
+        { alias: "Intercom", version: "0.7.8 → 0.7.9", state: "Writing 62%", color: "#f9a825", progress: "62%", action: "Cancel", detail: "Connected from 192.168.0.122; amber ring animation on the device." },
+        { alias: "Test unit", version: "0.7.8 → 0.7.9", state: "Queued", color: "#9aa0a6", progress: "0%", action: "Remove", detail: "Starts when the device above confirms 0.7.9." },
+        { alias: "Old bench board", version: "unknown → 0.7.9", state: "Not eligible", color: "#b22222", progress: "0%", action: "Why?", detail: "Not heard for 3 days. It rejoins the queue when it announces again." },
+      ],
+
+      stats: [
+        { label: "UDP audio", value: "18 421" },
+        { label: "Decoded", value: "18 402" },
+        { label: "PLC frames", value: "12" },
+        { label: "Output buffer", value: "96 ms" },
+      ],
+
+      logLines: [
+        { color: "#9aa0a6", text: "14:22:03  HELLO  90b77b2c  Intercom  0.7.8  p1  OTA  192.168.0.122" },
+        { color: "#9aa0a6", text: "14:22:03  HELLO  90688edc  Test unit 0.7.8  p1  OTA  192.168.0.224" },
+        { color: "#64b5f6", text: "14:22:05  CLAIM  from 90b77b2c  session 0x51ad3c  won floor" },
+        { color: "#64b5f6", text: "14:22:05  AUDIO  seq 1..160  gaps 0  concealed 0" },
+        { color: "#ffd54f", text: "14:22:08  END    90b77b2c  drained 4 frames" },
+        { color: "#ffd54f", text: "14:23:11  BUSY   local press retained 500 ms then dropped" },
+        { color: "#ef9a9a", text: "14:24:40  EXPIRE 90b8f2e1  Reception  no HELLO for 10 s" },
+        { color: "#9aa0a6", text: "14:25:02  CONFIG_REPLY 90b77b2c  volume 560  brightness 48  mute off" },
+        { color: "#ffd54f", text: "14:25:19  HELLO  9061aa04  Workshop  mute slider on (hardware)" },
+        { color: "#64b5f6", text: "14:25:24  CONFIG_SET 90688edc  soft_mute true  → ack" },
+      ],
+
+      statusStats: "audio 16 kHz mono ADPCM · UDP 18 421 · PLC 12 · buffer 96 ms",
+    };
+  }
+}
+</script>
+</body>
+</html>

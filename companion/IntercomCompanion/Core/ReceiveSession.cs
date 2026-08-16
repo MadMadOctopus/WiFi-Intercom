@@ -83,6 +83,12 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     public IntercomState State { get { lock (gate) return state; } }
     public Peer? LastTalker { get; private set; }
+    /// <summary>Whether the current reception's CLAIM was flagged directed. A
+    /// directed transmission is aimed at one node, so if no audio reaches this
+    /// companion (see <see cref="ReceptionHasAudio"/>) it is talk between two
+    /// other devices that this companion is not playing.</summary>
+    public bool ReceptionDirected { get; private set; }
+    public bool ReceptionHasAudio => Interlocked.Read(ref audioPacketCount) > 0;
     public ReceiveStatistics Statistics => new(Interlocked.Read(ref audioPacketCount),
         Interlocked.Read(ref decodedFrameCount), Interlocked.Read(ref playedFrameCount),
         Interlocked.Read(ref concealedFrameCount), Interlocked.Read(ref sequenceGapCount));
@@ -416,6 +422,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         CancelTransmitLocked();
         senderId = packet.SenderId;
         sessionId = packet.SessionId;
+        ReceptionDirected = (packet.Flags & Protocol.DirectedFlag) != 0;
         lastAudioAt = DateTimeOffset.UtcNow;
         ending = false;
         drainFrames = 0;

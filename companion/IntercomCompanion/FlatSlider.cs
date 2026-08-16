@@ -36,10 +36,12 @@ internal sealed class FlatSlider : Control
             if (this.value == next) return;
             this.value = next;
             Invalidate();
+            ValueChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 
     public event EventHandler? ValueCommitted;
+    public event EventHandler? ValueChanged;
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {

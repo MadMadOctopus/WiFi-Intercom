@@ -83,6 +83,12 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     public IntercomState State { get { lock (gate) return state; } }
     public Peer? LastTalker { get; private set; }
+    /// <summary>Whether the current reception's CLAIM was flagged directed. A
+    /// directed transmission is aimed at one node, so if no audio reaches this
+    /// companion (see <see cref="ReceptionHasAudio"/>) it is talk between two
+    /// other devices that this companion is not playing.</summary>
+    public bool ReceptionDirected { get; private set; }
+    public bool ReceptionHasAudio => Interlocked.Read(ref audioPacketCount) > 0;
     public ReceiveStatistics Statistics => new(Interlocked.Read(ref audioPacketCount),
         Interlocked.Read(ref decodedFrameCount), Interlocked.Read(ref playedFrameCount),
         Interlocked.Read(ref concealedFrameCount), Interlocked.Read(ref sequenceGapCount));
@@ -360,7 +366,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
             await foreach (var eventArgs in audioPackets.Reader.ReadAllAsync(stopping.Token))
             {
                 var packet = eventArgs.Packet;
-                short[] pcm;
+                short[]? pcm;
                 if (!ImaAdpcm.TryDecode(packet.Payload, out pcm) || pcm is null) continue;
                 Interlocked.Increment(ref decodedFrameCount);
                 lock (gate)
@@ -416,6 +422,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         CancelTransmitLocked();
         senderId = packet.SenderId;
         sessionId = packet.SessionId;
+        ReceptionDirected = (packet.Flags & Protocol.DirectedFlag) != 0;
         lastAudioAt = DateTimeOffset.UtcNow;
         ending = false;
         drainFrames = 0;
@@ -431,7 +438,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         // playout ends, just as the hardware does for its reply button.
         var discovered = node.Peers.FirstOrDefault(peer => peer.NodeId == packet.SenderId);
         LastTalker = discovered is null
-            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, DateTimeOffset.UtcNow)
+            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, 0, DateTimeOffset.UtcNow)
             : discovered with { Endpoint = endpoint, LastSeen = DateTimeOffset.UtcNow };
         SetStateLocked(IntercomState.Receiving);
         DiagnosticLog.Write($"rx begin sender={senderId:x8} session={sessionId:x8}");

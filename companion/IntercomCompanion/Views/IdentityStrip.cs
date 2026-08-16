@@ -1,0 +1,120 @@
+namespace IntercomCompanion.Views;
+
+/// <summary>Top 56 px identity band: state dot, companion identity, mic/speaker
+/// names with a Change… link, and the local-mute and Settings… actions.</summary>
+internal sealed class IdentityStrip : UserControl
+{
+    private readonly CircleDot dot = new(9) { Anchor = AnchorStyles.Left };
+    private readonly Label alias = new()
+    {
+        AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.CardAlias,
+        ForeColor = UiStyles.Ink, TextAlign = ContentAlignment.BottomLeft, Margin = Padding.Empty,
+    };
+    private readonly Label meta = new()
+    {
+        AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.Hint,
+        ForeColor = UiStyles.Secondary, TextAlign = ContentAlignment.TopLeft, Margin = Padding.Empty,
+    };
+    private readonly Label micName = new()
+    {
+        AutoSize = false, Dock = DockStyle.Fill, AutoEllipsis = true, Font = UiStyles.SecondaryFont,
+        ForeColor = UiStyles.Body, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty,
+    };
+    private readonly Label speakerName = new()
+    {
+        AutoSize = false, Dock = DockStyle.Fill, AutoEllipsis = true, Font = UiStyles.SecondaryFont,
+        ForeColor = UiStyles.Body, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty,
+    };
+    private readonly CheckBox localMute = new()
+    {
+        Text = "Mute my speaker", Appearance = Appearance.Button, AutoSize = false,
+        Width = 122, Height = 29, TextAlign = ContentAlignment.MiddleCenter, Font = UiStyles.SecondaryFont,
+        FlatStyle = FlatStyle.Flat, BackColor = UiStyles.White, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 8, 0),
+    };
+
+    public IdentityStrip()
+    {
+        Dock = DockStyle.Fill;
+        BackColor = UiStyles.White;
+        Padding = new Padding(20, 0, 20, 0);
+
+        localMute.FlatAppearance.BorderColor = UiStyles.ControlBorder;
+        localMute.FlatAppearance.CheckedBackColor = Color.FromArgb(242, 244, 245);
+        localMute.CheckedChanged += (_, _) => LocalMuteToggled?.Invoke(this, localMute.Checked);
+
+        var changeLink = new LinkLabel
+        {
+            Text = "Change…", AutoSize = true, Anchor = AnchorStyles.Left, Font = UiStyles.SecondaryFont,
+            LinkColor = UiStyles.Blue, ActiveLinkColor = UiStyles.DeepBlue, Margin = new Padding(0, 0, 0, 0),
+        };
+        changeLink.LinkClicked += (_, _) => ChangeAudioClicked?.Invoke(this, EventArgs.Empty);
+        var settingsButton = UiKit.PlainButton("Settings…");
+        settingsButton.Anchor = AnchorStyles.Left;
+        settingsButton.Margin = Padding.Empty;
+        settingsButton.Click += (_, _) => SettingsClicked?.Invoke(this, EventArgs.Empty);
+
+        var identityBlock = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(10, 0, 0, 0) };
+        identityBlock.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        identityBlock.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        identityBlock.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        identityBlock.Controls.Add(alias, 0, 0);
+        identityBlock.Controls.Add(meta, 0, 1);
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 9, RowCount = 1, Margin = Padding.Empty };
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 9));   // dot
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250)); // identity block
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // divider
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170)); // mic
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190)); // speaker
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // change link
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // spacer
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // mute
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // settings
+
+        root.Controls.Add(dot, 0, 0);
+        root.Controls.Add(identityBlock, 1, 0);
+        root.Controls.Add(new VDivider(14, 11), 2, 0);
+        root.Controls.Add(LabeledBlock("Mic", micName), 3, 0);
+        root.Controls.Add(LabeledBlock("Speaker", speakerName), 4, 0);
+        root.Controls.Add(changeLink, 5, 0);
+        root.Controls.Add(localMute, 7, 0);
+        root.Controls.Add(settingsButton, 8, 0);
+        Controls.Add(root);
+    }
+
+    public event EventHandler? ChangeAudioClicked;
+    public event EventHandler? SettingsClicked;
+    public event EventHandler<bool>? LocalMuteToggled;
+
+    private static TableLayoutPanel LabeledBlock(string kicker, Label value)
+    {
+        var block = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0, 0, 22, 0) };
+        block.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        block.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        block.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        block.Controls.Add(new Label
+        {
+            Text = kicker.ToUpperInvariant(), AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.Meta,
+            ForeColor = UiStyles.Muted, TextAlign = ContentAlignment.BottomLeft, Margin = Padding.Empty,
+        }, 0, 0);
+        block.Controls.Add(value, 0, 1);
+        return block;
+    }
+
+    public void Update(string aliasText, uint nodeId, string meshId, int deviceCount, string micText, string speakerText, Color stateColor)
+    {
+        alias.Text = aliasText.ToUpperInvariant();
+        meta.Text = $"ID {nodeId:x8} · group {meshId} · {deviceCount} of 16 devices";
+        micName.Text = micText;
+        speakerName.Text = speakerText;
+        dot.DotColor = stateColor;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using var pen = new Pen(UiStyles.Border);
+        e.Graphics.DrawLine(pen, 0, Height - 1, Width, Height - 1);
+    }
+}

@@ -4,14 +4,6 @@ firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
 
-# Local companion-app artefacts
-pc_app/.venv/
-pc_app/build/
-pc_app/dist/
-pc_app/*.spec
-pc_app/recordings/
-pc_app/__pycache__/
-
 # IDE and OS files
 .vs/
 .vscode/

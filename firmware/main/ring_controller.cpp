@@ -171,7 +171,10 @@ extern "C" void ring_controller_set(ring_mode_t mode) {
     case RING_TALK_BROADCAST: animation->startTalk(voicering::TalkColour::GrassGreen, 0, now); break;
     case RING_TALK_REPLY: animation->startTalk(voicering::TalkColour::Blue, 0, now); break;
     case RING_SPEAKING: animation->startSpeaking(0, now); break;
+    /* Hardware mute is red; a companion-requested soft mute is intentionally
+     * purple so it remains visually distinct from the physical switch. */
     case RING_MUTE: animation->startMute(0, now); break;
+    case RING_SOFT_MUTE: animation->startMute({160, 48, 255}, 0, now); break;
     case RING_ERROR: animation->startError(now); break;
     /* OTA is deliberately a restrained static amber state. It must not look
      * like live speech, and static output minimises shared-rail switching. */

@@ -8,6 +8,8 @@
 #include "driver/usb_serial_jtag.h"
 #include "cJSON.h"
 #include "esp_system.h"
+#include "driver/gpio.h"
+#include "config.h"
 
 #ifndef INTERCOM_USB_RAW_MIC_CAPTURE
 #define INTERCOM_USB_RAW_MIC_CAPTURE 0
@@ -25,17 +27,18 @@ bool usb_control_process(device_config_t *config, const char *request,
     cJSON *command = root ? cJSON_GetObjectItemCaseSensitive(root, "cmd") : NULL;
     bool get = cJSON_IsString(command) && strcmp(command->valuestring, "get") == 0;
     cJSON_Delete(root);
-    if (get) return device_config_to_json(config, response, response_size) != 0;
+    bool hw_muted = gpio_get_level(MUTE_SWITCH_GPIO) == 0;
+    if (get) return device_config_to_json(config, hw_muted, response, response_size) != 0;
     if (!device_config_apply_json(config, request, restart_required)) {
         snprintf(response, response_size, "{\"type\":\"error\",\"message\":\"invalid configuration\"}");
         return false;
     }
-    return device_config_to_json(config, response, response_size) != 0;
+    return device_config_to_json(config, hw_muted, response, response_size) != 0;
 }
 
 static void usb_task(void *arg)
 {
-    char line[256] = {0};
+    char line[384] = {0};
     size_t used = 0;
     const char hello[] = "{\"type\":\"intercom-usb\",\"version\":1}\n";
     usb_serial_jtag_write_bytes(hello, sizeof(hello) - 1, pdMS_TO_TICKS(20));
@@ -50,7 +53,7 @@ static void usb_task(void *arg)
             }
             if (used == 0) continue;
             line[used] = '\0';
-            char response[256] = {0};
+            char response[384] = {0};
             bool restart_required = false;
             xSemaphoreTake(s_lock, portMAX_DELAY);
             usb_control_process(s_config, line, response, sizeof(response), &restart_required);

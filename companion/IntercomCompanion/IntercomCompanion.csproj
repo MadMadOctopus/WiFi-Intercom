@@ -6,12 +6,20 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.7.3</Version>
-    <AssemblyVersion>0.7.2.0</AssemblyVersion>
-    <FileVersion>0.7.2.0</FileVersion>
+    <ApplicationIcon>Assets\Brand\app.ico</ApplicationIcon>
+    <Version>0.8.0</Version>
+    <AssemblyVersion>0.8.0.0</AssemblyVersion>
+    <FileVersion>0.8.0.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="System.IO.Ports" Version="10.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="Assets\Brand\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Assets\Brand\app.ico" LogicalName="IntercomCompanion.app.ico" />
+    <EmbeddedResource Include="Assets\Brand\app-dark.ico" LogicalName="IntercomCompanion.app-dark.ico" />
+    <EmbeddedResource Include="Assets\Brand\png\logo-lockup-1280.png" LogicalName="IntercomCompanion.logo-lockup.png" />
+    <EmbeddedResource Include="Assets\Brand\png\logo-mark-256.png" LogicalName="IntercomCompanion.logo-mark-256.png" />
   </ItemGroup>
 </Project>

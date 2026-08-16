@@ -2,7 +2,7 @@
  * protocol.h - UDP wire protocol for the intercom.
  *
  * Fixed 32-byte header, network byte order, packed explicitly (never a raw C
- * struct on the wire).  Identical layout to pc_app/app.py.
+ * struct on the wire).  Identical layout to companion/IntercomCompanion/Core/Protocol.cs.
  */
 #ifndef INTERCOM_PROTOCOL_H
 #define INTERCOM_PROTOCOL_H

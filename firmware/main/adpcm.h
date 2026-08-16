@@ -1,7 +1,8 @@
 /*
  * adpcm.h - Packet-independent IMA ADPCM codec.
  *
- * Byte-for-byte compatible with the Python implementation in pc_app/app.py.
+ * Byte-for-byte compatible with the companion implementation in
+ * companion/IntercomCompanion/Audio/ImaAdpcm.cs.
  * Each frame is self-contained: it carries the predictor and step index that
  * were in effect BEFORE its first sample, so a single lost packet never
  * corrupts the decoding of later packets.

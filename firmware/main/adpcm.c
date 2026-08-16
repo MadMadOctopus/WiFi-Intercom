@@ -1,5 +1,5 @@
 /*
- * adpcm.c - IMA ADPCM codec.  Mirrors pc_app/app.py exactly.
+ * adpcm.c - IMA ADPCM codec.  Mirrors companion/IntercomCompanion/Audio/ImaAdpcm.cs exactly.
  */
 #include "adpcm.h"
 

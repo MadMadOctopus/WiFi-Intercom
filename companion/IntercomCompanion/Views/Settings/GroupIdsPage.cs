@@ -7,7 +7,7 @@ namespace IntercomCompanion.Views.Settings;
 /// note.</summary>
 internal sealed class GroupIdsPage : SettingsPage
 {
-    private readonly Label currentGroup = new() { AutoSize = true, Font = new Font(UiStyles.BodyFont, FontStyle.Bold), ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 0, 0) };
+    private readonly Label currentGroup = new() { AutoSize = true, Font = UiStyles.BodyBold, ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 0, 0) };
     private readonly TextBox newGroup = new() { MaxLength = 4, CharacterCasing = CharacterCasing.Upper };
     private readonly TextBox confirm = new() { MaxLength = 4, CharacterCasing = CharacterCasing.Upper };
     private readonly CheckBox applyCompanion = new() { Text = "This companion", Checked = true, AutoSize = true, BackColor = UiStyles.RedTint, Font = UiStyles.BodyFont };
@@ -80,9 +80,9 @@ internal sealed class GroupIdsPage : SettingsPage
     {
         var enabled = Protocol.IsValidMeshId(newGroup.Text) && confirm.Text == currentMeshId && (applyCompanion.Checked || applyActive.Checked);
         changeButton.Enabled = enabled;
-        changeButton.BackColor = enabled ? UiStyles.Red : Color.FromArgb(208, 138, 138);
+        changeButton.BackColor = enabled ? UiStyles.Red : UiStyles.DisabledRed;
         changeButton.ForeColor = UiStyles.White;
-        changeButton.Font = new Font(UiStyles.SecondaryFont, FontStyle.Bold);
+        changeButton.Font = UiStyles.SecondaryBold;
         changeButton.Padding = new Padding(14, 7, 14, 7);
         changeButton.FlatAppearance.BorderColor = changeButton.BackColor;
     }
@@ -110,8 +110,8 @@ internal sealed class GroupIdsPage : SettingsPage
 
         var header = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 758, Padding = new Padding(18, 14, 18, 14), Margin = Padding.Empty, BackColor = UiStyles.RedTint };
         header.Controls.Add(new Label { Text = "Change the group ID", AutoSize = true, Font = UiStyles.PanelHeading, ForeColor = UiStyles.DarkRed, Margin = Padding.Empty });
-        header.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(122, 32, 32), Margin = new Padding(0, 4, 0, 0) });
-        header.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(242, 214, 214)); e.Graphics.DrawLine(pen, 0, header.Height - 1, header.Width, header.Height - 1); };
+        header.Controls.Add(new Label { Text = "This breaks the intercom until every node carries the new ID.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.RedInk, Margin = new Padding(0, 4, 0, 0) });
+        header.Paint += (_, e) => { using var pen = new Pen(UiStyles.RedRule); e.Graphics.DrawLine(pen, 0, header.Height - 1, header.Width, header.Height - 1); };
 
         var body = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 758, Padding = new Padding(18, 16, 18, 16), Margin = Padding.Empty, BackColor = UiStyles.RedTint };
         firstConsequence.Text = "· Devices still on MESH disappear from this companion and can no longer hear it.";
@@ -153,7 +153,7 @@ internal sealed class GroupIdsPage : SettingsPage
         var action = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0, 12, 0, 0), BackColor = UiStyles.RedTint };
         changeButton.Margin = Padding.Empty;
         action.Controls.Add(changeButton);
-        action.Controls.Add(new Label { Text = "Enabled once the confirmation matches.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(122, 32, 32), Margin = new Padding(12, 9, 0, 0) });
+        action.Controls.Add(new Label { Text = "Enabled once the confirmation matches.", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.RedInk, Margin = new Padding(12, 9, 0, 0) });
 
         body.Controls.Add(fields);
         body.Controls.Add(action);

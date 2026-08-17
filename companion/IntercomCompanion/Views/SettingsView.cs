@@ -67,7 +67,7 @@ internal sealed class SettingsView : UserControl
             var selected = key == page;
             item.BackColor = selected ? UiStyles.White : Color.Transparent;
             item.ForeColor = selected ? UiStyles.Ink : UiStyles.Body;
-            item.Font = new Font(UiStyles.BodyFont, selected ? FontStyle.Bold : FontStyle.Regular);
+            item.Font = selected ? UiStyles.BodyBold : UiStyles.BodyFont;
             item.Invalidate();
         }
         PageShown?.Invoke(page);
@@ -88,7 +88,7 @@ internal sealed class SettingsView : UserControl
         nav.Controls.Add(new Panel { Height = 1, Dock = DockStyle.Top, BackColor = UiStyles.Border, Margin = new Padding(0, 10, 0, 12) }, 0, row++);
 
         nav.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        nav.Controls.Add(new Label { Text = "SETTINGS", AutoSize = false, Height = 26, Dock = DockStyle.Top, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Padding = new Padding(18, 0, 18, 10), TextAlign = ContentAlignment.BottomLeft, Margin = Padding.Empty }, 0, row++);
+        nav.Controls.Add(new Label { Text = "SETTINGS", AutoSize = true, Anchor = AnchorStyles.Left, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Padding = new Padding(18, 2, 18, 10), Margin = Padding.Empty }, 0, row++);
 
         for (var i = 0; i < Nav.Length; i++)
         {

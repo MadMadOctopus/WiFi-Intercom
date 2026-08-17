@@ -52,7 +52,7 @@ internal sealed class MainForm : Form
         Icon = BrandAssets.AppIcon;
         ShowIcon = true;
         StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Segoe UI", 9f);
+        Font = UiStyles.SecondaryFont;
         AutoScaleMode = AutoScaleMode.Dpi;
         ClientSize = new Size(1280, 820);
         MinimumSize = new Size(1024, 700);
@@ -110,7 +110,7 @@ internal sealed class MainForm : Form
         settingsView.Usb.SendClicked += async (_, _) => await ApplyUsbWifiAsync();
         settingsView.Group.ApplyClicked += async (_, _) => await ApplyGroupChangeAsync();
         settingsView.Firmware.ChoosePackageClicked += (_, _) => ChooseOtaPackage();
-        settingsView.Firmware.AddAllClicked += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
+        settingsView.Firmware.AddAllClicked += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.IsOtaEligible)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
         settingsView.Firmware.StartQueueClicked += async (_, _) => await RunOtaQueueAsync();
         settingsView.Firmware.RowActionClicked += nodeId => { if (!otaUpdating) { queuedOtaDevices.Remove(nodeId); otaProgress.Remove(nodeId); RefreshOtaQueue(); } };
         settingsView.Identity.SaveClicked += (_, _) => SaveIdentitySettings();
@@ -136,7 +136,7 @@ internal sealed class MainForm : Form
             node.Diagnostic += message => PostToUi(() => statusBar.SetMessage($"Discovery: {message}"));
             node.OtaStatusReceived += (_, args) => PostToUi(() => OnOtaStatus(args));
             node.Start();
-            statusBar.SetMessage("Discovery: listening on 239.255.42.99:45678");
+            statusBar.SetMessage($"Discovery: listening on {DiscoveryEndpoint}");
             try
             {
                 globalHotkeys = new GlobalPttHotkeys();
@@ -689,7 +689,7 @@ internal sealed class MainForm : Form
         foreach (var nodeId in queuedOtaDevices.OrderBy(id => displayPeers.FirstOrDefault(peer => peer.NodeId == id)?.Alias ?? "￿"))
         {
             var peer = displayPeers.FirstOrDefault(peer => peer.NodeId == nodeId);
-            if (peer is not null && peer.SupportsOta)
+            if (peer is not null && peer.IsOtaEligible)
             {
                 if (!otaProgress.TryGetValue(nodeId, out var progress))
                     progress = ("Queued", UiStyles.Muted, 0, "Waiting for earlier devices.");
@@ -727,7 +727,7 @@ internal sealed class MainForm : Form
             settingsView.Firmware.SetStatus("Release the local PTT floor before starting an update.", UiStyles.Red);
             return;
         }
-        var targets = displayPeers.Where(peer => queuedOtaDevices.Contains(peer.NodeId) && peer.SupportsOta)
+        var targets = displayPeers.Where(peer => queuedOtaDevices.Contains(peer.NodeId) && peer.IsOtaEligible)
             .OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
         if (targets.Length == 0)
         {
@@ -807,7 +807,7 @@ internal sealed class MainForm : Form
             $"{stats?.DecodedFrames ?? 0:n0}",
             $"{stats?.ConcealedFrames ?? 0:n0}",
             $"{audio?.BufferedMilliseconds ?? 0} ms");
-        statusBar.SetMessage($"Discovery: listening on 239.255.42.99:45678 · audio 16 kHz mono ADPCM · UDP {stats?.AudioPackets ?? 0:n0} · PLC {stats?.ConcealedFrames ?? 0:n0} · buffer {audio?.BufferedMilliseconds ?? 0} ms");
+        statusBar.SetMessage($"Discovery: listening on {DiscoveryEndpoint} · audio 16 kHz mono ADPCM · UDP {stats?.AudioPackets ?? 0:n0} · PLC {stats?.ConcealedFrames ?? 0:n0} · buffer {audio?.BufferedMilliseconds ?? 0} ms");
 
         // The log is the expensive part: reading and recolouring the whole file
         // every second blocked the UI. Re-render only when the page is visible and
@@ -840,9 +840,9 @@ internal sealed class MainForm : Form
             var timestamp = raw.Length >= 19 && DateTimeOffset.TryParse(raw[..Math.Min(raw.Length, 34)], out var parsed)
                 ? parsed.ToLocalTime().ToString("HH:mm:ss") : DateTime.Now.ToString("HH:mm:ss");
             var detail = raw.Length >= 34 && raw[10] == 'T' ? raw[34..].TrimStart() : raw;
-            var color = detail.Contains("error", StringComparison.OrdinalIgnoreCase) || detail.Contains("failed", StringComparison.OrdinalIgnoreCase) || detail.Contains("expire", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(239, 154, 154)
-                : detail.Contains("audio", StringComparison.OrdinalIgnoreCase) || detail.Contains("claim", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(100, 181, 246)
-                : detail.Contains("busy", StringComparison.OrdinalIgnoreCase) || detail.Contains("mute", StringComparison.OrdinalIgnoreCase) ? Color.FromArgb(255, 213, 79)
+            var color = detail.Contains("error", StringComparison.OrdinalIgnoreCase) || detail.Contains("failed", StringComparison.OrdinalIgnoreCase) || detail.Contains("expire", StringComparison.OrdinalIgnoreCase) ? UiStyles.LogError
+                : detail.Contains("audio", StringComparison.OrdinalIgnoreCase) || detail.Contains("claim", StringComparison.OrdinalIgnoreCase) ? UiStyles.LogInfo
+                : detail.Contains("busy", StringComparison.OrdinalIgnoreCase) || detail.Contains("mute", StringComparison.OrdinalIgnoreCase) ? UiStyles.LogWarning
                 : UiStyles.Disabled;
             lines.Add(($"{timestamp}  {detail.ToUpperInvariant()}", color));
         }
@@ -935,6 +935,8 @@ internal sealed class MainForm : Form
 
     // ---- Helpers -----------------------------------------------------------
 
+    private static string DiscoveryEndpoint => $"{IntercomNode.MulticastGroup}:{Protocol.Port}";
+
     private static string TrimDeviceName(string value)
     {
         value = value.Replace("Microphone (", "", StringComparison.OrdinalIgnoreCase)
@@ -949,9 +951,9 @@ internal sealed class FlatMenuColors : ProfessionalColorTable
 {
     public override Color MenuBorder => UiStyles.Border;
     public override Color MenuItemBorder => UiStyles.Border;
-    public override Color MenuItemSelected => Color.FromArgb(242, 244, 245);
-    public override Color MenuItemSelectedGradientBegin => Color.FromArgb(242, 244, 245);
-    public override Color MenuItemSelectedGradientEnd => Color.FromArgb(242, 244, 245);
+    public override Color MenuItemSelected => UiStyles.HairRule;
+    public override Color MenuItemSelectedGradientBegin => UiStyles.HairRule;
+    public override Color MenuItemSelectedGradientEnd => UiStyles.HairRule;
     public override Color ToolStripDropDownBackground => UiStyles.White;
     public override Color ImageMarginGradientBegin => UiStyles.White;
     public override Color ImageMarginGradientMiddle => UiStyles.White;

@@ -31,14 +31,34 @@ internal static class UiStyles
     public static readonly Color PurpleTint = Color.FromArgb(243, 236, 247);
     public static readonly Color AmberTint = Color.FromArgb(253, 246, 227);
     public static readonly Color RedTint = Color.FromArgb(253, 243, 243);
+    public static readonly Color AmberInk = Color.FromArgb(107, 83, 0);
+    public static readonly Color AmberBorder = Color.FromArgb(232, 217, 168);
+    public static readonly Color BlueBorder = Color.FromArgb(207, 224, 243);
+    public static readonly Color RedInk = Color.FromArgb(122, 32, 32);
+    public static readonly Color RedRule = Color.FromArgb(242, 214, 214);
+    public static readonly Color DisabledRed = Color.FromArgb(208, 138, 138);
+    public static readonly Color OfflineDot = Color.FromArgb(201, 204, 208);
+    public static readonly Color SliderTrack = Color.FromArgb(226, 229, 232);
+    public static readonly Color ProgressTrack = Color.FromArgb(233, 235, 238);
+    public static readonly Color DialogFooter = Color.FromArgb(247, 248, 249);
+    public static readonly Color TalkingHalo = Color.FromArgb(70, Blue);
+    public static readonly Color LogBackground = Color.FromArgb(28, 31, 35);
+    public static readonly Color LogBorder = Color.FromArgb(16, 18, 21);
+    public static readonly Color LogError = Color.FromArgb(239, 154, 154);
+    public static readonly Color LogInfo = Color.FromArgb(100, 181, 246);
+    public static readonly Color LogWarning = Color.FromArgb(255, 213, 79);
 
     public static readonly Font NowTitle = new("Segoe UI", 19.5f, FontStyle.Bold);
+    public static readonly Font CounterValue = new("Segoe UI", 16.5f, FontStyle.Bold);
     public static readonly Font PageHeading = new("Segoe UI", 15f, FontStyle.Bold);
     public static readonly Font Broadcast = new("Segoe UI", 12.75f, FontStyle.Bold);
+    public static readonly Font CardOverflow = new("Segoe UI", 12f);
     public static readonly Font PanelHeading = new("Segoe UI", 11.25f, FontStyle.Bold);
     public static readonly Font CardAlias = new("Segoe UI", 10.5f, FontStyle.Bold);
     public static readonly Font BodyFont = new("Segoe UI", 9.75f);
+    public static readonly Font BodyBold = new(BodyFont, FontStyle.Bold);
     public static readonly Font SecondaryFont = new("Segoe UI", 9f);
+    public static readonly Font SecondaryBold = new(SecondaryFont, FontStyle.Bold);
     public static readonly Font Hint = new("Segoe UI", 8.25f);
     public static readonly Font Meta = new("Segoe UI", 7.5f);
     public static readonly Font Badge = new("Segoe UI", 6.75f, FontStyle.Bold);
@@ -56,8 +76,8 @@ internal static class UiStyles
         button.Padding = padding;
         button.Margin = Padding.Empty;
         button.FlatAppearance.BorderColor = ControlBorder;
-        button.FlatAppearance.MouseOverBackColor = Color.FromArgb(242, 244, 245);
-        button.FlatAppearance.MouseDownBackColor = Color.FromArgb(237, 239, 241);
+        button.FlatAppearance.MouseOverBackColor = HairRule;
+        button.FlatAppearance.MouseDownBackColor = RowRule;
     }
 
     public static void StylePrimary(Button button, Color? accent = null)
@@ -66,7 +86,7 @@ internal static class UiStyles
         StyleButton(button, new Padding(14, 7, 14, 7));
         button.BackColor = color;
         button.ForeColor = White;
-        button.Font = new Font(SecondaryFont, FontStyle.Bold);
+        button.Font = SecondaryBold;
         button.FlatAppearance.BorderColor = color;
         button.FlatAppearance.MouseOverBackColor = color;
         button.FlatAppearance.MouseDownBackColor = color;
@@ -121,7 +141,7 @@ internal static class UiStyles
 internal sealed class DisabledTintButton : Button
 {
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Color DisabledTint { get; set; } = Color.FromArgb(208, 138, 138);
+    public Color DisabledTint { get; set; } = UiStyles.DisabledRed;
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {

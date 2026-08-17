@@ -31,7 +31,7 @@ internal static class RemoveDeviceDialog
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
             BackColor = UiStyles.White,
-            Font = new Font("Segoe UI", 9f),
+            Font = UiStyles.SecondaryFont,
             AutoScaleMode = AutoScaleMode.Dpi,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -45,7 +45,7 @@ internal static class RemoveDeviceDialog
         header.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, header.Height - 1, header.Width, header.Height - 1); };
         var text = new Label { Text = body, AutoSize = true, MaximumSize = new Size(430, 0), Font = UiStyles.BodyFont, ForeColor = UiStyles.Body, Padding = new Padding(20, 18, 20, 18), Margin = Padding.Empty };
 
-        var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, RowCount = 1, Width = 470, Height = 60, BackColor = Color.FromArgb(247, 248, 249), Padding = new Padding(20, 0, 20, 0), Margin = Padding.Empty };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, RowCount = 1, Width = 470, Height = 60, BackColor = UiStyles.DialogFooter, Padding = new Padding(20, 0, 20, 0), Margin = Padding.Empty };
         footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));

@@ -4,14 +4,11 @@ namespace IntercomCompanion.Views.Settings;
 /// log inside a dark wrapper whose scrollbar sits outside the visual padding.</summary>
 internal sealed class DiagnosticsPage : SettingsPage
 {
-    private static readonly Color LogBack = Color.FromArgb(28, 31, 35);
-    private static readonly Color LogBorder = Color.FromArgb(16, 18, 21);
-
     private readonly Label[] values = new Label[4];
     private readonly RichTextBox log = new()
     {
         Dock = DockStyle.Fill, ReadOnly = true, DetectUrls = false, BorderStyle = BorderStyle.None,
-        BackColor = LogBack, ForeColor = UiStyles.Disabled, Font = UiStyles.Log,
+        BackColor = UiStyles.LogBackground, ForeColor = UiStyles.Disabled, Font = UiStyles.Log,
         ScrollBars = RichTextBoxScrollBars.Vertical, Margin = Padding.Empty,
     };
 
@@ -22,8 +19,8 @@ internal sealed class DiagnosticsPage : SettingsPage
     {
         Stack.Controls.Add(BuildStatCards());
 
-        var wrapper = new Panel { Width = 820, Height = 300, BackColor = LogBack, Padding = new Padding(16, 14, 0, 14), Margin = new Padding(0, 16, 0, 0) };
-        wrapper.Paint += (_, e) => UiStyles.DrawBorder(e, wrapper, LogBorder);
+        var wrapper = new Panel { Width = 820, Height = 300, BackColor = UiStyles.LogBackground, Padding = new Padding(16, 14, 0, 14), Margin = new Padding(0, 16, 0, 0) };
+        wrapper.Paint += (_, e) => UiStyles.DrawBorder(e, wrapper, UiStyles.LogBorder);
         wrapper.Controls.Add(log);
         Stack.Controls.Add(wrapper);
 
@@ -76,7 +73,7 @@ internal sealed class DiagnosticsPage : SettingsPage
             card.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             card.Paint += (_, e) => UiStyles.DrawBorder(e, card);
             card.Controls.Add(new Label { Text = labels[i].ToUpperInvariant(), AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Anchor = AnchorStyles.Left, Margin = Padding.Empty }, 0, 0);
-            values[i] = new Label { Text = "—", AutoSize = true, Font = new Font("Segoe UI", 16.5f, FontStyle.Bold), ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 0, 0) };
+            values[i] = new Label { Text = "—", AutoSize = true, Font = UiStyles.CounterValue, ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 0, 0) };
             card.Controls.Add(values[i], 0, 1);
             grid.Controls.Add(card, i, 0);
         }

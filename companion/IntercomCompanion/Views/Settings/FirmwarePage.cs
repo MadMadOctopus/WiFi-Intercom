@@ -66,8 +66,8 @@ internal sealed class FirmwarePage : SettingsPage
             queueRows.Controls.Add(new Label
             {
                 Text = "No devices queued. Add compatible active devices to update them sequentially.",
-                AutoSize = false, Width = 818, Height = 48, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary,
-                TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(20, 0, 20, 0), Margin = Padding.Empty,
+                AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary,
+                Padding = new Padding(20, 16, 20, 16), Margin = Padding.Empty,
             });
             queueRows.ResumeLayout();
             return;
@@ -91,15 +91,15 @@ internal sealed class FirmwarePage : SettingsPage
         head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 200));
         head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         head.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        head.Controls.Add(new Label { Text = model.Alias, AutoEllipsis = true, AutoSize = false, Dock = DockStyle.Fill, Font = new Font(UiStyles.BodyFont, FontStyle.Bold), ForeColor = UiStyles.Ink, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        head.Controls.Add(new Label { Text = model.Alias, AutoEllipsis = true, AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.BodyBold, ForeColor = UiStyles.Ink, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         head.Controls.Add(new Label { Text = model.Version, AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, TextAlign = ContentAlignment.MiddleLeft }, 1, 0);
-        head.Controls.Add(new Label { Text = model.State, AutoSize = false, Dock = DockStyle.Fill, Font = new Font(UiStyles.SecondaryFont, FontStyle.Bold), ForeColor = model.StateColor, TextAlign = ContentAlignment.MiddleLeft }, 2, 0);
+        head.Controls.Add(new Label { Text = model.State, AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.SecondaryBold, ForeColor = model.StateColor, TextAlign = ContentAlignment.MiddleLeft }, 2, 0);
         var action = UiKit.PlainButton(model.Action);
         action.Anchor = AnchorStyles.Right;
         action.Click += (_, _) => RowActionClicked?.Invoke(model.NodeId);
         head.Controls.Add(action, 3, 0);
 
-        var progressTrack = new Panel { Dock = DockStyle.Fill, Height = 6, BackColor = Color.FromArgb(233, 235, 238), Margin = new Padding(0, 10, 0, 0) };
+        var progressTrack = new Panel { Dock = DockStyle.Fill, Height = 6, BackColor = UiStyles.ProgressTrack, Margin = new Padding(0, 10, 0, 0) };
         var progressFill = new Panel { Height = 6, BackColor = model.StateColor, Width = 0, Anchor = AnchorStyles.Top | AnchorStyles.Left };
         progressTrack.Controls.Add(progressFill);
         progressTrack.SizeChanged += (_, _) => progressFill.Width = (int)(progressTrack.Width * Math.Clamp(model.Progress, 0, 100) / 100.0);
@@ -139,7 +139,7 @@ internal sealed class FirmwarePage : SettingsPage
         header.Controls.Add(startQueue, 3, 0);
         header.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, header.Height - 1, header.Width, header.Height - 1); };
 
-        var footer = new Label { Text = "Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.", AutoSize = false, Width = 818, Height = 44, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(20, 0, 20, 0), TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
+        var footer = new Label { Text = "Keep the companion open. Windows may ask once to allow the temporary local firmware server on a private network.", AutoSize = true, Dock = DockStyle.Top, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Padding = new Padding(20, 14, 20, 14), Margin = Padding.Empty };
         footer.Paint += (_, e) => { using var pen = new Pen(UiStyles.RowRule); e.Graphics.DrawLine(pen, 0, 0, footer.Width, 0); };
 
         panel.Controls.Add(header, 0, 0);

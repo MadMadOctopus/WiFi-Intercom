@@ -118,7 +118,7 @@ internal sealed class DeviceGridView : UserControl
             "Speaking" => peer.IsTalking,
             "Muted" => peer.HardwareMuted,
             "Silenced" => peer.SoftMuted,
-            "Legacy" => peer.ProtocolVersion is null or 1,
+            "Legacy" => peer.IsLegacy,
             _ => true,
         };
         return searchOk && filterOk;
@@ -165,7 +165,7 @@ internal sealed class DeviceGridView : UserControl
         chips["Speaking"].Count = peers.Count(peer => peer.IsTalking);
         chips["Muted"].Count = peers.Count(peer => peer.HardwareMuted);
         chips["Silenced"].Count = peers.Count(peer => peer.SoftMuted);
-        chips["Legacy"].Count = peers.Count(peer => peer.ProtocolVersion is null or 1);
+        chips["Legacy"].Count = peers.Count(peer => peer.IsLegacy);
     }
 
     private void UpdateChipStates()

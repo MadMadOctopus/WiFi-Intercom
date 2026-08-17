@@ -53,7 +53,7 @@ internal sealed class TalkView : UserControl
 
     private Control BuildRightColumn()
     {
-        Broadcast = PttButton("Hold to broadcast", UiStyles.Green, new Font("Segoe UI", 12.75f, FontStyle.Bold));
+        Broadcast = PttButton("Hold to broadcast", UiStyles.Green, UiStyles.Broadcast);
         Reply = PttButton("Hold to reply", UiStyles.Blue, UiStyles.CardAlias);
 
         var ptt = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 1, RowCount = 5, BackColor = UiStyles.White, Padding = new Padding(16), Margin = new Padding(0, 0, 0, 12), Height = 210 };

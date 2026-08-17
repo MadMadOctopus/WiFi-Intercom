@@ -13,6 +13,7 @@ internal sealed class TalkView : UserControl
         BackColor = UiStyles.Surface;
 
         Grid = new DeviceGridView { Margin = new Padding(0, 0, 12, 0) };
+        OtherGroups = new OtherGroupsView();
         KnownDevices = new KnownDevicesView { Margin = new Padding(0, 16, 12, 0) };
         Activity = new ActivityPanel();
 
@@ -22,14 +23,16 @@ internal sealed class TalkView : UserControl
             AutoSize = true, MaximumSize = new Size(900, 0), Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Margin = new Padding(0, 16, 12, 0),
         };
 
-        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = UiStyles.Surface, Margin = Padding.Empty };
+        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = UiStyles.Surface, Margin = Padding.Empty };
         left.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.Controls.Add(Grid, 0, 0);
-        left.Controls.Add(KnownDevices, 0, 1);
-        left.Controls.Add(footnote, 0, 2);
+        left.Controls.Add(OtherGroups, 0, 1);
+        left.Controls.Add(KnownDevices, 0, 2);
+        left.Controls.Add(footnote, 0, 3);
 
         var right = BuildRightColumn();
 
@@ -43,13 +46,14 @@ internal sealed class TalkView : UserControl
     }
 
     public DeviceGridView Grid { get; }
+    public OtherGroupsView OtherGroups { get; }
     public KnownDevicesView KnownDevices { get; }
     public ActivityPanel Activity { get; }
     public Button Broadcast { get; private set; } = null!;
     public Button Reply { get; private set; } = null!;
 
-    public void SetBroadcastScope(string meshId) => broadcastScope.Text = $"Everyone in group {meshId}";
-    public void SetLastSender(string? sender) => lastSender.Text = $"Last sender: {sender ?? "none"}";
+    public void SetBroadcastScope(string groupLabel) => broadcastScope.Text = $"Everyone in {groupLabel}";
+    public void SetLastSender(string text) => lastSender.Text = text;
 
     private Control BuildRightColumn()
     {

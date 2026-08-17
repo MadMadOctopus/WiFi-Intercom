@@ -3,19 +3,22 @@ using IntercomCompanion.Core;
 namespace IntercomCompanion.Views;
 
 /// <summary>The device grid: header (title, count, filter box, chips) and a
-/// three-column scrolling card grid. The card table is the only container in the
-/// app that rebuilds its own children on refresh.</summary>
+/// scrolling body of one 3-column card grid per joined group. With a single
+/// joined group there is no heading and it reads exactly as the single-group
+/// design; with several, each group gets a heading and a broadcast-target chip.</summary>
 internal sealed class DeviceGridView : UserControl
 {
     private readonly Label title = new() { Text = "Devices", AutoSize = true, Font = UiStyles.CardAlias, ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) };
     private readonly Label count = new() { AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) };
     private readonly TextBox filter = new() { PlaceholderText = "Alias or ID" };
-    private readonly TableLayoutPanel grid = new() { Dock = DockStyle.Fill, AutoScroll = true, ColumnCount = 3, BackColor = UiStyles.Surface, Margin = Padding.Empty, Padding = Padding.Empty };
+    private readonly Panel bodyScroll = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = UiStyles.Surface, Margin = Padding.Empty, Padding = Padding.Empty };
+    private readonly FlowLayoutPanel sectionStack = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UiStyles.Surface, Margin = Padding.Empty, Padding = Padding.Empty };
     private readonly Dictionary<uint, DeviceCard> cards = [];
     private readonly Dictionary<string, Chip> chips = [];
     private readonly System.Windows.Forms.Timer pulse = new() { Interval = 60 };
 
     private IReadOnlyList<Peer> peers = [];
+    private CompanionSettings settings = null!;
     private Func<uint, int> volumeFor = _ => 512;
     private bool pttDisabled;
     private string activeFilter = "All";
@@ -52,12 +55,15 @@ internal sealed class DeviceGridView : UserControl
         header.Controls.Add(count, 1, 0);
         header.Controls.Add(filters, 3, 0);
 
+        bodyScroll.Controls.Add(sectionStack);
+        bodyScroll.Resize += (_, _) => FitStack();
+
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty, BackColor = UiStyles.Surface };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.Controls.Add(header, 0, 0);
-        root.Controls.Add(grid, 0, 1);
+        root.Controls.Add(bodyScroll, 0, 1);
         Controls.Add(root);
 
         pulse.Tick += (_, _) => StepPulse();
@@ -68,13 +74,19 @@ internal sealed class DeviceGridView : UserControl
     public event Action<Peer>? SilenceClicked;
     public event Action<Control, Peer>? MoreClicked;
     public event Action<Peer, int>? VolumeCommitted;
+    public event Action<string>? BroadcastTargetClicked;
 
-    public void Update(IReadOnlyList<Peer> latest, string meshId, Func<uint, int> volumeLookup, bool disablePtt)
+    public void Update(IReadOnlyList<Peer> latest, CompanionSettings companionSettings, Func<uint, int> volumeLookup, bool disablePtt)
     {
-        peers = latest;
+        settings = companionSettings;
+        peers = latest.Where(peer => settings.IsJoined(peer.GroupCode)).ToArray();
         volumeFor = volumeLookup;
         pttDisabled = disablePtt;
-        count.Text = $"{peers.Count} of 16 in group {meshId}";
+
+        var groups = settings.JoinedGroups;
+        count.Text = groups.Count == 1
+            ? $"{peers.Count} of 16 in group {settings.GroupLabel(groups[0].Code)}"
+            : $"{peers.Count} devices across {groups.Count} joined groups";
 
         var activeIds = peers.Select(peer => peer.NodeId).ToHashSet();
         foreach (var peer in peers)
@@ -126,37 +138,89 @@ internal sealed class DeviceGridView : UserControl
 
     private void Refilter()
     {
-        var visiblePeers = peers
-            .Where(Matches)
-            .OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        if (settings is null) return;
+        var groups = settings.JoinedGroups;
+        var multi = groups.Count > 1;
 
-        // Only rebuild the card table when the visible set or its order actually
-        // changes. Refreshing card data in place every second must not re-add
-        // controls, or the grid flickers (spec 4.2/11).
-        var key = string.Join(",", visiblePeers.Select(peer => peer.NodeId.ToString("x8")));
+        // Rebuild only when the visible partition, order, or target changes.
+        var key = settings.BroadcastTargetCode + "#" + string.Join("|", groups.Select(group =>
+            group.Code + ":" + string.Join(",", peers
+                .Where(peer => peer.GroupCode == group.Code && Matches(peer))
+                .OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase)
+                .Select(peer => peer.NodeId.ToString("x8")))));
         if (key == layoutKey) return;
         layoutKey = key;
 
-        var visible = visiblePeers.Select(peer => cards[peer.NodeId]).ToArray();
-        grid.SuspendLayout();
-        grid.Controls.Clear();
-        grid.ColumnStyles.Clear();
-        grid.RowStyles.Clear();
+        sectionStack.SuspendLayout();
+        sectionStack.Controls.Clear();
+        foreach (var group in groups)
+        {
+            var groupHasDevices = peers.Any(peer => peer.GroupCode == group.Code);
+            if (!groupHasDevices) continue;
+            if (multi) sectionStack.Controls.Add(BuildHeading(group.Code));
+            var visible = peers
+                .Where(peer => peer.GroupCode == group.Code && Matches(peer))
+                .OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase)
+                .Select(peer => cards[peer.NodeId])
+                .ToArray();
+            sectionStack.Controls.Add(BuildGrid(visible));
+        }
+        sectionStack.ResumeLayout();
+        FitStack();
+    }
+
+    private Control BuildHeading(string code)
+    {
+        var isTarget = code == settings.BroadcastTargetCode;
+        var heading = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 1, Margin = new Padding(0, sectionStack.Controls.Count == 0 ? 0 : 18, 0, 8), BackColor = UiStyles.Surface };
+        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        heading.Controls.Add(new Panel { Width = 3, Height = 15, BackColor = isTarget ? UiStyles.Blue : Color.FromArgb(201, 204, 208), Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) }, 0, 0);
+        heading.Controls.Add(new Label { Text = settings.GroupLabel(code), AutoSize = true, Font = UiStyles.CardAlias, ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) }, 1, 0);
+        heading.Controls.Add(new Label { Text = $"{peers.Count(peer => peer.GroupCode == code)} of 16 devices", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Left }, 2, 0);
+
+        if (isTarget)
+        {
+            // Clicking the current target toggles broadcasting back to all groups.
+            var chip = new Label { Text = "BROADCAST TARGET", AutoSize = true, Font = new Font(UiStyles.Hint, FontStyle.Bold), ForeColor = UiStyles.White, BackColor = UiStyles.Ink, Padding = new Padding(8, 3, 8, 3), Anchor = AnchorStyles.Right, Cursor = Cursors.Hand };
+            chip.Click += (_, _) => BroadcastTargetClicked?.Invoke("");
+            heading.Controls.Add(chip, 3, 0);
+        }
+        else
+        {
+            var here = new LinkLabel { Text = "Broadcast here", AutoSize = true, Font = UiStyles.Hint, LinkColor = UiStyles.Blue, ActiveLinkColor = UiStyles.DeepBlue, Anchor = AnchorStyles.Right };
+            here.LinkClicked += (_, _) => BroadcastTargetClicked?.Invoke(code);
+            heading.Controls.Add(here, 3, 0);
+        }
+        return heading;
+    }
+
+    private TableLayoutPanel BuildGrid(DeviceCard[] visible)
+    {
+        // Explicit height + a width set by FitStack. AutoSize on a TableLayoutPanel
+        // would shrink it to content and collapse the percent columns, which is
+        // what narrowed the cards; the columns must divide the full row width.
+        var rows = Math.Max(1, (visible.Length + 2) / 3);
+        var grid = new TableLayoutPanel { ColumnCount = 3, RowCount = rows, AutoSize = false, Height = rows * 148, Margin = Padding.Empty, BackColor = UiStyles.Surface };
         for (var column = 0; column < 3; column++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
-        var cardRows = Math.Max(1, (visible.Length + 2) / 3);
-        // A trailing filler row absorbs spare height so the card rows stay a fixed
-        // height instead of the sole row stretching when only a few cards show.
-        grid.RowCount = cardRows + 1;
-        for (var row = 0; row < cardRows; row++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));
-        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        for (var row = 0; row < rows; row++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));
         for (var i = 0; i < visible.Length; i++)
         {
             visible[i].Dock = DockStyle.Fill;
             visible[i].Margin = new Padding(5);
             grid.Controls.Add(visible[i], i % 3, i / 3);
         }
-        grid.ResumeLayout();
+        return grid;
+    }
+
+    private void FitStack()
+    {
+        var width = bodyScroll.ClientSize.Width;
+        sectionStack.Width = width;
+        foreach (Control child in sectionStack.Controls) child.Width = width;
     }
 
     private void UpdateChipCounts()

@@ -7,8 +7,15 @@ namespace IntercomCompanion.Dialogs;
 /// and a local-until-Apply contract.</summary>
 internal sealed class ConfigureDeviceDialog : Form
 {
+    public sealed record GroupChoice(string Code, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
     private readonly Peer peer;
     private readonly Func<uint, bool> isDuplicateId;
+    private readonly bool focusGroup;
+    private readonly ComboBox groupCombo = new();
 
     private readonly TextBox aliasBox = new() { MaxLength = 24 };
     private readonly FlatSlider volume = new() { Minimum = 64, Maximum = 1024, Width = 230, AccentColor = UiStyles.Blue };
@@ -22,11 +29,17 @@ internal sealed class ConfigureDeviceDialog : Form
 
     private DeviceConfiguration current;
 
-    public ConfigureDeviceDialog(Peer peer, DeviceConfiguration configuration, Func<uint, bool> isDuplicateId)
+    public ConfigureDeviceDialog(Peer peer, DeviceConfiguration configuration, Func<uint, bool> isDuplicateId,
+        IReadOnlyList<GroupChoice> groupChoices, bool focusGroup = false)
     {
         this.peer = peer;
         this.isDuplicateId = isDuplicateId;
+        this.focusGroup = focusGroup;
         current = configuration;
+
+        UiKit.StyleCombo(groupCombo, 220);
+        foreach (var choice in groupChoices) groupCombo.Items.Add(choice);
+        groupCombo.SelectedItem = groupChoices.FirstOrDefault(choice => choice.Code == configuration.MeshId) ?? groupChoices.FirstOrDefault();
 
         Text = $"Configure {peer.Alias}";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -59,6 +72,7 @@ internal sealed class ConfigureDeviceDialog : Form
         Controls.Add(root);
 
         Populate(configuration);
+        if (this.focusGroup) Shown += (_, _) => groupCombo.Focus();
     }
 
     public DeviceConfiguration? Result { get; private set; }
@@ -90,6 +104,7 @@ internal sealed class ConfigureDeviceDialog : Form
 
         var form = UiKit.FormGrid(150);
         UiKit.AddField(form, "Alias", aliasBox);
+        UiKit.AddField(form, "Group", groupCombo, new Label { Text = "moving restarts the device", AutoSize = true, Font = UiStyles.Hint, ForeColor = UiStyles.Muted, Anchor = AnchorStyles.Left, Padding = new Padding(0, 7, 0, 0) });
 
         volume.ValueChanged += (_, _) => volumeValue.Text = $"{volume.Value} / 1024";
         UiKit.AddField(form, "Speaker volume", volume, volumeValue);
@@ -177,6 +192,7 @@ internal sealed class ConfigureDeviceDialog : Form
             ButtonsSwapped = buttons.SelectedIndex == 1,
             RingOrientation = ringCentre.SelectedIndex == 1 ? 180 : 0,
             DeviceId = requestedId,
+            MeshId = (groupCombo.SelectedItem as GroupChoice)?.Code ?? current.MeshId,
         };
         DialogResult = DialogResult.OK;
         Close();

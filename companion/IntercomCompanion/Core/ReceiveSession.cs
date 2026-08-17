@@ -46,6 +46,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     // receive session
     private uint senderId;
     private uint sessionId;
+    private string receivingGroup = "MESH";
     private DateTimeOffset lastAudioAt;
     private bool ending;
     private int drainFrames;
@@ -60,6 +61,10 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private bool transmitDirected;
     private Peer? transmitTarget;
     private IReadOnlyList<Peer> transmitPeers = [];
+    // The groups this transmit reaches: one for a directed/single-group send,
+    // every joined group for an all-groups broadcast. Used to arbitrate the floor
+    // per group and to know which claimers to answer.
+    private readonly HashSet<string> transmitGroups = [];
     private PttKind heldKind;
     private Peer? heldTarget;
     private DateTimeOffset heldSince;
@@ -171,9 +176,25 @@ internal sealed class ReceiveSession : IAsyncDisposable
         // recipient. Previously CLAIM/HEARTBEAT/END went to every peer while
         // RTP went to one peer, leaving unrelated devices in a silent receive
         // state and making direct PTT behaviour depend on the device chosen.
-        transmitPeers = target is null
-            ? node.SnapshotActivePeers()
-            : [target];
+        // A directed session uses the target device's group. A broadcast goes to
+        // the broadcast-target group, or — when no single target is set — to every
+        // joined group at once. Floor control is per group.
+        transmitGroups.Clear();
+        if (target is not null)
+        {
+            transmitGroups.Add(target.GroupCode);
+            transmitPeers = [target];
+        }
+        else if (node.BroadcastTargetCode is { Length: > 0 } single)
+        {
+            transmitGroups.Add(single);
+            transmitPeers = node.SnapshotGroupPeers(single);
+        }
+        else
+        {
+            foreach (var code in node.JoinedGroupCodes) transmitGroups.Add(code);
+            transmitPeers = node.SnapshotJoinedPeers();
+        }
         transmitDirected = kind is not PttKind.Broadcast;
         transmitTarget = target;
         transmitSession = IntercomNode.NewSessionId();
@@ -314,19 +335,25 @@ internal sealed class ReceiveSession : IAsyncDisposable
         var packet = eventArgs.Packet;
         if (packet.Type == PacketType.Claim)
         {
+            // Floor arbitration is per group: only contend with, or send Busy to,
+            // a claimer in the same group as our current transmit/receive. A CLAIM
+            // in a different joined group is that group's floor and is left alone;
+            // we simply cannot play two at once.
+            var claimGroup = Protocol.MeshIdToText(packet.MeshId);
             var sendBusy = false;
             lock (gate)
             {
                 if (state is IntercomState.Claiming or IntercomState.Talking)
                 {
-                    if (RemoteWins(packet)) { CancelTransmitLocked(); BeginReceivingLocked(packet, eventArgs.Endpoint); }
+                    if (!transmitGroups.Contains(claimGroup)) { /* another group's floor */ }
+                    else if (RemoteWins(packet)) { CancelTransmitLocked(); BeginReceivingLocked(packet, eventArgs.Endpoint); }
                     else sendBusy = true;
                 }
                 else if (state == IntercomState.Idle) BeginReceivingLocked(packet, eventArgs.Endpoint);
-                else if (packet.SessionId != sessionId) sendBusy = true;
+                else if (packet.SessionId != sessionId && claimGroup == receivingGroup) sendBusy = true;
             }
             if (sendBusy)
-                _ = node.SendToEndpointAsync(PacketType.Busy, sessionId, 0, [], eventArgs.Endpoint);
+                _ = node.SendToEndpointAsync(PacketType.Busy, sessionId, 0, [], eventArgs.Endpoint, claimGroup);
             return;
         }
         lock (gate)
@@ -422,6 +449,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         CancelTransmitLocked();
         senderId = packet.SenderId;
         sessionId = packet.SessionId;
+        receivingGroup = Protocol.MeshIdToText(packet.MeshId);
         ReceptionDirected = (packet.Flags & Protocol.DirectedFlag) != 0;
         lastAudioAt = DateTimeOffset.UtcNow;
         ending = false;
@@ -438,7 +466,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         // playout ends, just as the hardware does for its reply button.
         var discovered = node.Peers.FirstOrDefault(peer => peer.NodeId == packet.SenderId);
         LastTalker = discovered is null
-            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, 0, DateTimeOffset.UtcNow)
+            ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, 0, DateTimeOffset.UtcNow, receivingGroup)
             : discovered with { Endpoint = endpoint, LastSeen = DateTimeOffset.UtcNow };
         SetStateLocked(IntercomState.Receiving);
         DiagnosticLog.Write($"rx begin sender={senderId:x8} session={sessionId:x8}");

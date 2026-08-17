@@ -68,7 +68,7 @@ internal sealed class KnownDevicesView : UserControl
         header.Controls.Add(new Label { Text = "Known, not responding", AutoSize = true, Font = UiStyles.CardAlias, ForeColor = UiStyles.Ink, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) }, 0, 0);
         header.Controls.Add(new Label
         {
-            Text = $"{offlineCount} {Pluralize(offlineCount, "device", "devices")} kept from earlier sessions — they return to the grid as soon as they announce",
+            Text = $"{offlineCount} {Pluralize(offlineCount, "device", "devices")} kept from earlier sessions, silent on every group — they return to the grid as soon as they announce",
             AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Anchor = AnchorStyles.Left,
         }, 1, 0);
         var removeAll = UiKit.PlainButton($"Remove all {CountWord(offlineCount)}…");

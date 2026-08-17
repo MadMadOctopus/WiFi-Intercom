@@ -20,6 +20,7 @@ internal static class UiStyles
     public static readonly Color Divider = Color.FromArgb(230, 232, 234);
     public static readonly Color HairRule = Color.FromArgb(242, 244, 245);
     public static readonly Color NavHover = Color.FromArgb(228, 231, 234);
+    public static readonly Color WarnText = Color.FromArgb(122, 82, 0);
     public static readonly Color Green = Color.FromArgb(46, 125, 50);
     public static readonly Color Blue = Color.FromArgb(21, 101, 192);
     public static readonly Color DeepBlue = Color.FromArgb(13, 71, 161);

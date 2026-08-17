@@ -72,12 +72,12 @@ internal sealed class MainForm : Form
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
 
-        talkView.SetBroadcastScope(settings.MeshId);
+        talkView.SetBroadcastScope(settings.BroadcastTargetLabel);
         settingsView.Group.SetCompanionId(settings.NodeId);
         settingsView.Identity.SetCompanionId(settings.NodeId);
         settingsView.Identity.SetAlias(settings.Alias);
         settingsView.Identity.SetWindowOptions(settings.RunInNotificationArea, settings.StartWithWindows);
-        settingsView.Group.SetContext(settings.MeshId, 0);
+        RefreshGroupPage();
         UpdateIdentityStrip();
         UpdateNowBar();
     }
@@ -89,6 +89,8 @@ internal sealed class MainForm : Form
         identityStrip.ChangeAudioClicked += (_, _) => OpenSettings("Identity");
         identityStrip.SettingsClicked += (_, _) => OpenSettings("USB");
         identityStrip.LocalMuteToggled += (_, muted) => audio?.SetLocalPlaybackMuted(muted);
+        identityStrip.BroadcastTargetSelected += ChangeBroadcastTarget;
+        identityStrip.GroupSettingsClicked += (_, _) => OpenSettings("Group");
 
         BindPtt(talkView.Broadcast, () => receiveSession?.PressBroadcast());
         BindPtt(talkView.Reply, () => receiveSession?.PressReply());
@@ -98,6 +100,8 @@ internal sealed class MainForm : Form
         talkView.Grid.SilenceClicked += async peer => await ToggleSoftMuteAsync(peer);
         talkView.Grid.MoreClicked += ShowDeviceMenu;
         talkView.Grid.VolumeCommitted += async (peer, value) => await CommitVolumeAsync(peer, value);
+        talkView.Grid.BroadcastTargetClicked += ChangeBroadcastTarget;
+        talkView.OtherGroups.JoinClicked += code => { node?.JoinGroup(code); RefreshPeers(); };
 
         talkView.KnownDevices.RemoveClicked += RemoveKnownDevice;
         talkView.KnownDevices.RemoveAllClicked += RemoveAllOffline;
@@ -108,7 +112,11 @@ internal sealed class MainForm : Form
         settingsView.BackToTalkClicked += () => shell.ShowTalk();
         settingsView.Usb.RescanClicked += async (_, _) => await RescanUsbAsync();
         settingsView.Usb.SendClicked += async (_, _) => await ApplyUsbWifiAsync();
-        settingsView.Group.ApplyClicked += async (_, _) => await ApplyGroupChangeAsync();
+        settingsView.Group.SetTargetClicked += ChangeBroadcastTarget;
+        settingsView.Group.JoinClicked += (code, name) => { node?.JoinGroup(code, name); RefreshPeers(); };
+        settingsView.Group.LeaveClicked += code => { node?.LeaveGroup(code); RefreshPeers(); };
+        settingsView.Group.RenameClicked += RenameGroup;
+        settingsView.Group.MoveClicked += async () => await MoveDevicesAsync();
         settingsView.Firmware.ChoosePackageClicked += (_, _) => ChooseOtaPackage();
         settingsView.Firmware.AddAllClicked += (_, _) => { foreach (var peer in displayPeers.Where(peer => peer.SupportsOta)) queuedOtaDevices.Add(peer.NodeId); RefreshOtaQueue(); };
         settingsView.Firmware.StartQueueClicked += async (_, _) => await RunOtaQueueAsync();
@@ -225,19 +233,39 @@ internal sealed class MainForm : Form
             }
         }
 
-        talkView.Grid.Update(peers, settings.MeshId, VolumeFor, otaUpdating);
+        talkView.Grid.Update(peers, settings, VolumeFor, otaUpdating);
+        talkView.OtherGroups.Update(BuildOtherGroups(peers));
 
+        // Known-devices holds only records that are silent on every group; a
+        // device announcing on a foreign group is in activeIds and excluded here.
         var activeIds = peers.Select(peer => peer.NodeId).ToHashSet();
         var offline = knownDevices.Devices.Where(device => !activeIds.Contains(device.NodeId)).ToArray();
         talkView.KnownDevices.Update(offline);
 
-        settingsView.Group.SetContext(settings.MeshId, peers.Length);
+        if (settingsView.Group.Visible) RefreshGroupPage();
         if (settingsView.Firmware.Visible) RefreshOtaQueue();
 
-        talkView.SetLastSender(receiveSession?.LastTalker?.Alias);
+        talkView.SetBroadcastScope(settings.BroadcastTargetLabel);
+        UpdateLastSender();
         UpdateIdentityStrip();
         UpdateNowBar();
         UpdateDiagnostics();
+    }
+
+    private void UpdateLastSender()
+    {
+        var talker = receiveSession?.LastTalker;
+        if (talker is null)
+        {
+            talkView.SetLastSender("Last sender: none");
+            if (receiveSession is not null && !otaUpdating) talkView.Reply.Enabled = true;
+            return;
+        }
+        var multi = settings.JoinedGroups.Count > 1;
+        var joined = settings.IsJoined(talker.GroupCode);
+        var suffix = !multi && joined ? "" : $" · {settings.GroupLabel(talker.GroupCode)}{(joined ? "" : " — not joined")}";
+        talkView.SetLastSender($"Last sender: {talker.Alias}{suffix}");
+        talkView.Reply.Enabled = receiveSession is not null && !otaUpdating && joined;
     }
 
     private int VolumeFor(uint nodeId) => configurations.GetValueOrDefault(nodeId)?.SpeakerVolume
@@ -248,7 +276,27 @@ internal sealed class MainForm : Form
     {
         var mic = TrimDeviceName((settingsView.Identity.MicCombo.SelectedItem as RecordingDevice)?.Name ?? "Not selected");
         var speaker = TrimDeviceName((settingsView.Identity.SpeakerCombo.SelectedItem as PlaybackDevice)?.Name ?? "Not selected");
-        identityStrip.Update(settings.Alias, settings.NodeId, settings.MeshId, displayPeers.Count, mic, speaker, StateColor());
+        identityStrip.Update(settings, mic, speaker, StateColor());
+    }
+
+    /// <summary>Rows for "Other groups on this network": peers announcing on a
+    /// group this companion has not joined, grouped by code.</summary>
+    private IReadOnlyList<OtherGroupsView.Row> BuildOtherGroups(IReadOnlyList<Peer> peers)
+    {
+        return peers
+            .Where(peer => !settings.IsJoined(peer.GroupCode))
+            .GroupBy(peer => peer.GroupCode)
+            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var aliases = group.OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase).Select(peer => peer.Alias).ToArray();
+                var known = group.FirstOrDefault(peer => knownDevices.Devices.Any(device => device.NodeId == peer.NodeId));
+                var (note, color) = known is not null
+                    ? ($"you know {known.Alias} — it moved to this group", UiStyles.WarnText)
+                    : ("no name set on this PC", UiStyles.Muted);
+                return new OtherGroupsView.Row(group.Key, settings.GroupLabel(group.Key), aliases.Length, string.Join(", ", aliases), note, color);
+            })
+            .ToArray();
     }
 
     private Color StateColor() => degraded switch
@@ -280,6 +328,10 @@ internal sealed class MainForm : Form
         var receivingTitle = directedElsewhere ? $"{talker} is speaking to another device"
             : directedToUs ? $"{talker} is replying to you"
             : $"{talker} is speaking";
+        // When several groups are joined, the detail line leads with the sender's
+        // group so it is clear which one is on the floor.
+        var groupPrefix = settings.JoinedGroups.Count > 1 && receiveSession?.LastTalker is { } lt
+            ? $"{settings.GroupLabel(lt.GroupCode)} · " : "";
         var (kicker, title, color, background) = state switch
         {
             IntercomState.Claiming => ("CLAIMING", "Claiming", UiStyles.Amber, UiStyles.AmberTint),
@@ -291,8 +343,8 @@ internal sealed class MainForm : Form
         };
         var detail = state switch
         {
-            IntercomState.Receiving when directedElsewhere => $"directed to another device · not played here · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s",
-            IntercomState.Receiving => $"{talker} · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s · output buffer {buffer} ms",
+            IntercomState.Receiving when directedElsewhere => $"{groupPrefix}directed to another device · not played here · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s",
+            IntercomState.Receiving => $"{groupPrefix}{talker} · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s · output buffer {buffer} ms",
             IntercomState.Talking => $"talking to the group · output buffer {buffer} ms",
             IntercomState.Claiming => $"claiming the floor · output buffer {buffer} ms",
             IntercomState.WaitingForFloor => $"another device holds the floor · output buffer {buffer} ms",
@@ -316,12 +368,16 @@ internal sealed class MainForm : Form
         UpdateNowBar();
         UpdateIdentityStrip();
         var talker = receiveSession?.LastTalker?.Alias ?? "A device";
+        // Name the group on a received line when it is not the broadcast target,
+        // so activity across several joined groups stays legible.
+        var groupSuffix = receiveSession?.LastTalker is { } lt && lt.GroupCode != settings.BroadcastTargetCode
+            ? $" · {settings.GroupLabel(lt.GroupCode)}" : "";
         RecordActivity(state switch
         {
             IntercomState.Claiming => "Claiming floor",
             IntercomState.Talking => "You — talking",
-            IntercomState.Receiving when receiveSession?.ReceptionDirected == true => $"{talker} is speaking to another device",
-            IntercomState.Receiving => $"{talker} is speaking",
+            IntercomState.Receiving when receiveSession?.ReceptionDirected == true => $"{talker} is speaking to another device{groupSuffix}",
+            IntercomState.Receiving => $"{talker} is speaking{groupSuffix}",
             IntercomState.WaitingForFloor => "Floor busy — your press was dropped",
             _ => "Idle",
         });
@@ -394,6 +450,7 @@ internal sealed class MainForm : Form
         menu.Font = UiStyles.BodyFont;
         menu.Items.Add("Configure…", null, async (_, _) => await ConfigurePeerAsync(peer));
         menu.Items.Add("Get configuration", null, async (_, _) => await GetPeerConfigurationAsync(peer));
+        menu.Items.Add("Move to another group…", null, async (_, _) => await ConfigurePeerAsync(peer, focusGroup: true));
         menu.Items.Add("Update firmware…", null, (_, _) => { queuedOtaDevices.Add(peer.NodeId); OpenSettings("Firmware"); RefreshOtaQueue(); });
         menu.Items.Add("Remove", null, (_, _) => RemoveKnownDevice(ToKnownDevice(peer)));
         menu.Show(card, new Point(card.Width - 28, 65));
@@ -415,7 +472,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task ConfigurePeerAsync(Peer peer)
+    private async Task ConfigurePeerAsync(Peer peer, bool focusGroup = false)
     {
         if (node is null) return;
         try
@@ -423,7 +480,8 @@ internal sealed class MainForm : Form
             var current = (await node.RequestConfigurationAsync(peer)).Configuration;
             configurations[peer.NodeId] = current;
             using var dialog = new ConfigureDeviceDialog(peer, current,
-                requestedId => node.Peers.Any(other => other.NodeId != peer.NodeId && other.NodeId == requestedId));
+                requestedId => node.Peers.Any(other => other.NodeId != peer.NodeId && other.NodeId == requestedId),
+                GroupChoices(current.MeshId), focusGroup);
             if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result is not { } next) return;
             var reply = await node.SetConfigurationAsync(peer, next);
             configurations[peer.NodeId] = reply.Configuration;
@@ -434,6 +492,14 @@ internal sealed class MainForm : Form
         {
             statusBar.SetMessage($"Configuration update failed: {exception.Message}");
         }
+    }
+
+    private IReadOnlyList<ConfigureDeviceDialog.GroupChoice> GroupChoices(string currentCode)
+    {
+        var choices = settings.JoinedGroups.Select(group => new ConfigureDeviceDialog.GroupChoice(group.Code, group.Label)).ToList();
+        if (!settings.IsJoined(currentCode) && Protocol.IsValidMeshId(currentCode))
+            choices.Insert(0, new ConfigureDeviceDialog.GroupChoice(currentCode, currentCode));
+        return choices;
     }
 
     private void RemoveKnownDevice(KnownDevice device)
@@ -462,7 +528,7 @@ internal sealed class MainForm : Form
         {
             case "Firmware": RefreshOtaQueue(); break;
             case "Diagnostics": lastLogLength = -1; UpdateDiagnostics(); break;
-            case "Group": settingsView.Group.SetContext(settings.MeshId, displayPeers.Count); break;
+            case "Group": RefreshGroupPage(); break;
         }
     }
 
@@ -624,34 +690,137 @@ internal sealed class MainForm : Form
 
     // ---- Group -------------------------------------------------------------
 
-    private async Task ApplyGroupChangeAsync()
+    private void RefreshGroupPage()
+    {
+        settingsView.Group.SetCompanionId(settings.NodeId);
+        var all = settings.BroadcastsToAll;
+        var rows = settings.JoinedGroups.Select(group =>
+        {
+            var isTarget = !all && group.Code == settings.BroadcastTargetCode;
+            var note = all ? "receiving + broadcast" : isTarget ? "broadcast target" : "receiving only";
+            return new GroupIdsPage.GroupRow(group.Code, group.Label,
+                displayPeers.Count(peer => peer.GroupCode == group.Code), isTarget, note);
+        }).ToArray();
+        settingsView.Group.SetGroups(rows, canLeave: settings.JoinedGroups.Count > 1, broadcastAll: all);
+        settingsView.Group.SetDestinations(settings.JoinedGroups.Select(group => group.Code).ToArray());
+        settingsView.Group.SetMovable(BuildMovable());
+
+        var foreign = displayPeers.Where(peer => !settings.IsJoined(peer.GroupCode))
+            .Select(peer => peer.GroupCode).Distinct().OrderBy(code => code, StringComparer.Ordinal).ToArray();
+        settingsView.Group.SetAnnouncingHint(foreign.Length switch
+        {
+            0 => "",
+            1 => $"{foreign[0]} is announcing nearby",
+            _ => $"{string.Join(", ", foreign[..^1])} and {foreign[^1]} are announcing nearby",
+        });
+    }
+
+    private IReadOnlyList<GroupIdsPage.Movable> BuildMovable()
+    {
+        var list = new List<GroupIdsPage.Movable>();
+        var seen = new HashSet<uint>();
+        foreach (var peer in displayPeers.Where(peer => settings.IsJoined(peer.GroupCode)).OrderBy(peer => peer.Alias, StringComparer.OrdinalIgnoreCase))
+        {
+            seen.Add(peer.NodeId);
+            var legacy = peer.ProtocolVersion is null or 1;
+            var (reach, color, selectable) = legacy
+                ? ("legacy, USB only", UiStyles.WarnText, false)
+                : ("reachable", UiStyles.Green, true);
+            list.Add(new GroupIdsPage.Movable(peer.NodeId, peer.Alias, $"{peer.NodeId:x8}", settings.GroupLabel(peer.GroupCode), reach, color, selectable));
+        }
+        foreach (var device in knownDevices.Devices.Where(device => !seen.Contains(device.NodeId)).OrderBy(device => device.Alias, StringComparer.OrdinalIgnoreCase))
+            list.Add(new GroupIdsPage.Movable(device.NodeId, device.Alias, $"{device.NodeId:x8}", "not responding", "unreachable", UiStyles.Muted, false));
+        return list;
+    }
+
+    private void RenameGroup(string code)
+    {
+        var name = PromptForText($"Name for group {code} on this PC", settings.GroupName(code) ?? "");
+        if (name is null) return;
+        node?.RenameGroup(code, name);
+        talkView.SetBroadcastScope(settings.BroadcastTargetLabel);
+        RefreshPeers();
+    }
+
+    private async Task MoveDevicesAsync()
     {
         if (node is null) return;
-        var targetGroup = settingsView.Group.NewGroupId;
-        if (!Protocol.IsValidMeshId(targetGroup)) return;
-        var targets = settingsView.Group.ApplyToActiveDevices
-            ? node.SnapshotActivePeers().Where(peer => peer.ProtocolVersion is >= 2).ToArray()
-            : [];
+        var destination = settingsView.Group.DestinationCode;
+        if (!Protocol.IsValidMeshId(destination)) return;
+        var ids = settingsView.Group.CheckedDevices.ToHashSet();
+        var targets = displayPeers.Where(peer => ids.Contains(peer.NodeId)).ToArray();
+        if (targets.Length == 0) return;
+
+        if (!settings.IsJoined(destination))
+        {
+            var choice = MessageBox.Show(this,
+                $"You are not in {destination}. Join it as well, so the moved devices stay visible?",
+                "Move devices", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (choice == DialogResult.Cancel) return;
+            if (choice == DialogResult.Yes) node.JoinGroup(destination);
+        }
+
+        var moved = 0;
+        var failures = new List<string>();
         foreach (var peer in targets)
         {
             try
             {
                 var current = (await node.RequestConfigurationAsync(peer)).Configuration;
-                await node.SetConfigurationAsync(peer, current with { MeshId = targetGroup });
-                RecordActivity($"Group update queued for {peer.Alias}.");
+                await node.SetConfigurationAsync(peer, current with { MeshId = destination });
+                moved++;
+                RecordActivity($"{peer.Alias} moving to {settings.GroupLabel(destination)}");
             }
             catch (Exception exception) when (exception is SocketException or TimeoutException or InvalidOperationException)
             {
-                RecordActivity($"Group update failed for {peer.Alias}: {exception.Message}");
+                failures.Add($"{peer.Alias} did not acknowledge");
             }
         }
-        if (settingsView.Group.ApplyToCompanion)
+        settingsView.Group.ResetMove();
+        RefreshPeers();
+        var report = failures.Count == 0
+            ? $"{moved} moved to {destination}."
+            : $"{moved} moved, {failures.Count} failed — {failures[0]}";
+        RecordActivity(report);
+        MessageBox.Show(this, report, "Move devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private string? PromptForText(string prompt, string initial)
+    {
+        using var dialog = new Form
         {
-            node.SetMeshId(targetGroup);
-            settings.MeshId = targetGroup;
-            talkView.SetBroadcastScope(settings.MeshId);
-        }
-        settingsView.Group.Reset();
+            Text = prompt, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false,
+            ShowInTaskbar = false, StartPosition = FormStartPosition.CenterParent, BackColor = UiStyles.White,
+            Font = new Font("Segoe UI", 9f), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+        var box = new TextBox { Text = initial, MaxLength = 24 };
+        UiStyles.StyleInput(box, 320);
+        var ok = UiKit.PrimaryButton("OK");
+        ok.DialogResult = DialogResult.OK;
+        ok.Margin = new Padding(0, 0, 8, 0);
+        var cancel = UiKit.PlainButton("Cancel");
+        cancel.DialogResult = DialogResult.Cancel;
+        var actions = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Anchor = AnchorStyles.Right, Margin = new Padding(0, 12, 0, 0) };
+        actions.Controls.Add(ok);
+        actions.Controls.Add(cancel);
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(20, 20, 20, 16), BackColor = UiStyles.White };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.Controls.Add(box, 0, 0);
+        root.Controls.Add(actions, 0, 1);
+        dialog.Controls.Add(root);
+        dialog.AcceptButton = ok;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(this) == DialogResult.OK ? box.Text.Trim() : null;
+    }
+
+    private void ChangeBroadcastTarget(string code)
+    {
+        if (node is null || code == settings.BroadcastTargetCode) return;
+        node.SetBroadcastTarget(code);
+        talkView.SetBroadcastScope(settings.BroadcastTargetLabel);
+        RecordActivity($"Broadcasting to {settings.BroadcastTargetLabel}");
         RefreshPeers();
     }
 

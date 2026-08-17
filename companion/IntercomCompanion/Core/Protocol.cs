@@ -26,7 +26,8 @@ internal sealed record IntercomPacket(
     uint SessionId,
     uint Sequence,
     uint TimestampMs,
-    byte[] Payload);
+    byte[] Payload,
+    uint MeshId);
 
 /// <summary>Exact big-endian PTT1 datagram codec shared with firmware.</summary>
 internal static class Protocol
@@ -120,15 +121,17 @@ internal static class Protocol
         return datagram;
     }
 
-    public static bool TryParse(ReadOnlySpan<byte> datagram, uint meshId, uint ownNodeId,
-                                out IntercomPacket? packet)
+    /// <summary>Parses any well-formed datagram regardless of group; the caller
+    /// decides membership from <see cref="IntercomPacket.MeshId"/>. Multi-group
+    /// discovery depends on not filtering by group here.</summary>
+    public static bool TryParse(ReadOnlySpan<byte> datagram, uint ownNodeId, out IntercomPacket? packet)
     {
         packet = null;
         if (datagram.Length < HeaderLength || !datagram[..4].SequenceEqual(Magic) ||
-            BinaryPrimitives.ReadUInt16BigEndian(datagram[6..]) != HeaderLength ||
-            BinaryPrimitives.ReadUInt32BigEndian(datagram[8..]) != meshId)
+            BinaryPrimitives.ReadUInt16BigEndian(datagram[6..]) != HeaderLength)
             return false;
 
+        var meshId = BinaryPrimitives.ReadUInt32BigEndian(datagram[8..]);
         var sender = BinaryPrimitives.ReadUInt32BigEndian(datagram[12..]);
         var payloadLength = BinaryPrimitives.ReadUInt16BigEndian(datagram[28..]);
         if (sender == ownNodeId || datagram.Length != HeaderLength + payloadLength)
@@ -139,7 +142,8 @@ internal static class Protocol
             BinaryPrimitives.ReadUInt32BigEndian(datagram[16..]),
             BinaryPrimitives.ReadUInt32BigEndian(datagram[20..]),
             BinaryPrimitives.ReadUInt32BigEndian(datagram[24..]),
-            datagram[HeaderLength..].ToArray());
+            datagram[HeaderLength..].ToArray(),
+            meshId);
         return true;
     }
 

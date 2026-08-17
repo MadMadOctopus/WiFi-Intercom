@@ -193,8 +193,11 @@ horizontal scrollbar appears on Talk. Placeholders fill their cells exactly.
   when nothing speaks. Keep it; a static outline is not acceptable (`R2-15`,
   spec 4.3/19).
 - **`KnownDevicesView`** — inside the left column, appears as soon as a device
-  is known and offline (`R2-18`); humanised last-seen (`not heard for 40
-  minutes`), never a raw `TimeSpan`.
+  is known and **silent on every group** (`R2-18`); humanised last-seen (`not
+  heard for 40 minutes`), never a raw `TimeSpan`. A device announcing on a group
+  the companion has not joined belongs in the *Other groups on this network*
+  panel instead — see `adjustments/02-multi-group.md`, which also adds group
+  sections to the grid and a broadcast-target picker to the identity strip.
 - **`ActivityPanel`** — rebuild from scratch (`R2-8`, review 2 §3c): header
   (`Activity` + `Open recordings folder` link, 1 px `#EDEFF1` bottom rule),
   scrolling rows (time 46 px tabular, 8 × 8 px state square, text), and
@@ -211,14 +214,16 @@ Build each page fresh. The three composites that were empty in the last build
 are specified in full in `companion-ui-review-2.md` §3 — follow those container
 trees literally.
 
-- **Group and device IDs** — the danger block (§3a): header, four consequences,
-  new-group field, confirmation field, two apply-to checkboxes, button. Border
-  painted in `OnPaint`: 1 px `#B22222` rectangle plus a 4 px `#B22222` left bar.
-  **Wire the gate**: `Change group ID` is `Enabled = false` until the
-  confirmation text equals the current group ID exactly (ordinal,
-  case-sensitive); new-group field accepts exactly 4 × `A–Z0–9`, uppercased on
-  input (spec 4.6/26). Use `DisabledTintButton` for the disabled state — it
-  already exists in `UiStyles.cs`.
+- **Group and device IDs** — restructured by `adjustments/02-multi-group.md`
+  (joined-groups panel, per-device moves); read that before building this page.
+  The danger block (§3a) keeps its chrome: header, four consequences, fields,
+  button, border painted in `OnPaint` — 1 px `#B22222` rectangle plus a 4 px
+  `#B22222` left bar.
+  **Wire the gate**: the action button is `Enabled = false` until the
+  confirmation text equals the destination group code exactly (ordinal,
+  case-sensitive) and at least one device is ticked; group codes are exactly
+  4 × `A–Z0–9`, uppercased on input (spec 4.6/26). Use `DisabledTintButton` from
+  `UiStyles.cs`.
 - **Firmware** — the package summary panel (§3b) is the widest panel on the
   page and must never render empty; show the no-package state instead. Queue
   rows per `R2-29`. `Start queue…` opens the confirmation dialog whose
@@ -245,7 +250,8 @@ Type a wrong confirmation, then the right one, and watch the button enable.
 
 ### Phase 5 — Dialogs
 
-- **Configure device** (`R2-20`–`R2-24`): one label column 150 px + one control
+- **Configure device** (`R2-20`–`R2-24`, plus the `Group` row from
+  `adjustments/02-multi-group.md`): one label column 150 px + one control
   column; alias 240 px; volume and brightness are `FlatSlider` + a tabular value
   cell (**no `NumericUpDown` anywhere in this app**); `Device ID` a flat digits-
   only `TextBox`, non-zero; a **Playback** row showing plays / soft muted with

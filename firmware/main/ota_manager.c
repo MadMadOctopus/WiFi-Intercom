@@ -52,6 +52,12 @@ typedef struct {
 
 static QueueHandle_t s_queue;
 static ota_status_callback_t s_status;
+static ota_claim_floor_t s_claim_floor;
+/* s_pending guards the staging slot and queue (set from the moment an offer is
+ * admitted until ota_task disposes of it). s_active means an authenticated
+ * update is running and gates PTT; it is set only via ota_manager_set_active()
+ * from the claim callback, after the signature has verified. */
+static volatile bool s_pending;
 static volatile bool s_active;
 static volatile uint32_t s_error_until_ms;
 
@@ -277,8 +283,9 @@ complete:
 
 /* Verification runs here, not in the caller: mbedtls base64, key parsing and
  * signature checking need far more stack than the network receive task owns.
- * s_active is already claimed by ota_manager_offer, so a rejected offer must
- * release it again. */
+ * Only an offer that passes the full parse and signature check may claim the
+ * floor; anything else merely releases the staging slot, so a spray of forged
+ * offers never suppresses PTT. */
 static void ota_task(void *arg)
 {
     ota_request_t request;
@@ -290,16 +297,28 @@ static void ota_task(void *arg)
             if (s_status)
                 s_status(&request.source, request.session, "rejected", 0, reason);
             s_error_until_ms = now_ms() + 1500;
-            s_active = false;
+            s_pending = false;
             continue;
         }
-        run_update(&offer);
+        if (!s_claim_floor || !s_claim_floor()) {
+            /* The floor became busy while the signature was being checked.
+             * The companion's offer is idempotent and retried, so rejecting
+             * here is safe. */
+            if (s_status)
+                s_status(&request.source, request.session, "rejected", 0, "Floor is active");
+            s_error_until_ms = now_ms() + 1500;
+            s_pending = false;
+            continue;
+        }
+        run_update(&offer);   /* returns only when the update failed */
+        s_pending = false;
     }
 }
 
-void ota_manager_init(ota_status_callback_t callback)
+void ota_manager_init(ota_status_callback_t callback, ota_claim_floor_t claim_floor)
 {
     s_status = callback;
+    s_claim_floor = claim_floor;
     s_queue = xQueueCreate(1, sizeof(ota_request_t));
     configASSERT(s_queue);
     xTaskCreate(ota_task, "ota", 7168, NULL, 3, NULL);
@@ -309,27 +328,28 @@ bool ota_manager_offer(const uint8_t *payload, size_t payload_len,
                        const struct sockaddr_in *source, uint32_t session,
                        const char **reject_reason)
 {
-    /* Staging slot rather than a local: s_active makes this function
+    /* Staging slot rather than a local: s_pending makes this function
      * single-entry, and the caller's task stack stays untouched. */
     static ota_request_t staged;
     if (payload_len == 0 || payload_len > OTA_OFFER_MAX) {
         if (reject_reason) *reject_reason = "invalid offer";
         return false;
     }
-    if (s_active) {
+    if (s_pending || s_active) {
         if (reject_reason) *reject_reason = "OTA busy";
         return false;
     }
-    /* Claim the OTA state before handing the offer over, so the caller's idle
-     * check and this claim are one step and no PTT can begin in between. The
-     * signature work then happens on ota_task. */
-    s_active = true;
+    /* Only stage the raw offer here. The PTT-gating s_active flag is claimed
+     * on ota_task after the manifest signature verifies (via the claim
+     * callback): claiming it now would let anyone who knows the cleartext
+     * mesh id mute PTT by spraying bogus offers. */
+    s_pending = true;
     staged.source = *source;
     staged.session = session;
     staged.payload_len = (uint16_t)payload_len;
     memcpy(staged.payload, payload, payload_len);
     if (xQueueSend(s_queue, &staged, 0) != pdTRUE) {
-        s_active = false;
+        s_pending = false;
         if (reject_reason) *reject_reason = "OTA queue busy";
         return false;
     }
@@ -337,6 +357,7 @@ bool ota_manager_offer(const uint8_t *payload, size_t payload_len,
 }
 
 bool ota_manager_is_active(void) { return s_active; }
+void ota_manager_set_active(void) { s_active = true; }
 bool ota_manager_has_recent_error(void)
 {
     return (int32_t)(s_error_until_ms - now_ms()) > 0;

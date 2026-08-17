@@ -232,6 +232,19 @@ static void ota_status_send(const struct sockaddr_in *destination, uint32_t sess
                        (const uint8_t *)json, (uint16_t)length);
 }
 
+/* Called from ota_task once an offer has been fully authenticated. Testing for
+ * an idle floor and activating the OTA slot happen under g_lock as one step,
+ * so a PTT cannot begin between the check and the claim: tx_task tests
+ * ota_manager_is_active() under the same lock before starting a transmission. */
+static bool ota_claim_floor(void)
+{
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    bool idle = g.state == ST_IDLE;
+    if (idle) ota_manager_set_active();
+    xSemaphoreGive(g_lock);
+    return idle;
+}
+
 /* Copies the still-live peers into `out` (room for PEER_CAP entries) and
  * returns how many there are, so senders never hold g_lock while transmitting.
  * Must be called without g_lock held. */
@@ -513,9 +526,13 @@ static void handle_heartbeat(const intercom_pkt_t *p)
         g.rx_last_ms = now_ms();
 }
 
-/* Returns true when the applied configuration needs a reboot. The caller must
- * perform it after releasing g_lock: sleeping or restarting while holding the
- * lock stalls the transmit, playback and ring tasks. */
+/* Returns true when the applied configuration needs a reboot. Runs WITHOUT
+ * g_lock held: JSON parsing, the NVS commit inside device_config_apply_json
+ * and the blocking UDP reply are all far slower than the 20 ms deadlines of
+ * the audio tasks that contend for the lock. The change is applied to a
+ * snapshot and swapped into g_config under the lock afterwards; a concurrent
+ * USB configuration write in that window loses, which matches the existing
+ * whole-struct-replacement semantics of the configuration path. */
 static bool handle_config_packet(const intercom_pkt_t *p,
                                  const struct sockaddr_in *source)
 {
@@ -524,7 +541,19 @@ static bool handle_config_packet(const intercom_pkt_t *p,
     char response[320] = {0};
     memcpy(request, p->payload, p->payload_len);
     bool restart_required = false;
-    usb_control_process(&g_config, request, response, sizeof(response), &restart_required);
+    device_config_t working;
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    working = g_config;
+    xSemaphoreGive(g_lock);
+    usb_control_process(&working, request, response, sizeof(response), &restart_required);
+    if (p->type == PKT_CONFIG_SET) {
+        /* A GET leaves the snapshot untouched; writing it back regardless
+         * would silently revert a legitimate concurrent change (USB console,
+         * ring_task's hardware-mute clear) made inside the unlocked window. */
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        g_config = working;
+        xSemaphoreGive(g_lock);
+    }
     send_packet_to(source, PKT_CONFIG_REPLY, 0, p->session_id, 0,
                    (const uint8_t *)response, (uint16_t)strlen(response));
     return restart_required;
@@ -581,6 +610,8 @@ static void net_rx_task(void *arg)
         if (!protocol_parse(buf, n, MESH_ID, NODE_ID, &pkt)) continue;
 
         bool restart_required = false;
+        bool config_request = false;
+        const char *ota_reject_message = NULL;
         xSemaphoreTake(g_lock, portMAX_DELAY);
         peer_seen(&pkt, &src);
         if (ota_manager_is_active() && pkt.type == PKT_CLAIM) {
@@ -595,21 +626,24 @@ static void net_rx_task(void *arg)
             case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;
             case PKT_CONFIG_GET:
             case PKT_CONFIG_SET:
-                restart_required = handle_config_packet(&pkt, &src);
+                /* Parsing, the NVS commit and the reply run after g_lock is
+                 * released; see handle_config_packet. */
+                config_request = true;
                 break;
             case PKT_OTA_OFFER: {
                 /* Do not interrupt speech. The companion can queue and retry
                  * its small, idempotent offer when the floor becomes idle.
-                 * The idle test and the OTA claim both happen under g_lock, so
-                 * a PTT can no longer slip in between them; the expensive parse
-                 * and signature check run later on ota_task. */
+                 * This idle test is only a fast pre-filter: the authoritative
+                 * floor claim happens on ota_task once the offer's signature
+                 * has verified, under g_lock (see ota_claim_floor), so an
+                 * unauthenticated datagram never gates PTT. */
                 bool idle = g.state == ST_IDLE;
                 const char *reason = NULL;
                 bool accepted = idle && ota_manager_offer(pkt.payload, pkt.payload_len,
                                                           &src, pkt.session_id, &reason);
                 if (!accepted) {
-                    ota_status_send(&src, pkt.session_id, "rejected", 0,
-                                    idle ? (reason ? reason : "OTA rejected") : "Floor is active");
+                    ota_reject_message = idle ? (reason ? reason : "OTA rejected")
+                                              : "Floor is active";
                     g.error_until_ms = now_ms() + 1500;
                 }
                 break;
@@ -618,7 +652,7 @@ static void net_rx_task(void *arg)
                 /* Cancellation is deliberately unsupported after acceptance:
                  * stopping a flash write is less safe than letting it finish
                  * or using automatic rollback on the next boot. */
-                ota_status_send(&src, pkt.session_id, "rejected", 0, "Cancellation unavailable");
+                ota_reject_message = "Cancellation unavailable";
                 break;
             case PKT_BUSY:
                 /* A Busy must plausibly answer our own claim, otherwise a
@@ -641,6 +675,14 @@ static void net_rx_task(void *arg)
             g.have_last_talker = true;
         }
         xSemaphoreGive(g_lock);
+
+        /* Status replies use a blocking sendto and configuration handling
+         * commits NVS, so both must run after g_lock is released: the audio
+         * tasks block on the lock with portMAX_DELAY every ~20 ms. */
+        if (ota_reject_message)
+            ota_status_send(&src, pkt.session_id, "rejected", 0, ota_reject_message);
+        if (config_request)
+            restart_required = handle_config_packet(&pkt, &src);
 
         if (restart_required) {
             ESP_LOGI(TAG, "Configuration change requires restart");
@@ -1129,16 +1171,18 @@ static void ring_task(void *arg)
     while (1) {
         uint32_t t = now_ms();
         bool hardware_muted = button_pressed(MUTE_SWITCH_GPIO);
+        bool save_soft_mute_clear = false;
+        device_config_t saved_config = {0};
         xSemaphoreTake(g_lock, portMAX_DELAY);
         /* The physical switch always wins. Clearing and saving this once on
          * engagement means lifting the switch never leaves playback silently
-         * soft-muted by an earlier companion command. */
+         * soft-muted by an earlier companion command. The NVS commit itself
+         * runs on a snapshot after the lock is released: flash writes take
+         * tens of milliseconds and would stall the audio tasks. */
         if (hardware_muted && g_config.soft_mute) {
             g_config.soft_mute = 0;
-            if (device_config_save(&g_config))
-                ESP_LOGI(TAG, "Hardware mute cleared the soft-mute flag");
-            else
-                ESP_LOGW(TAG, "Hardware mute cleared soft mute only until reboot (NVS save failed)");
+            saved_config = g_config;
+            save_soft_mute_clear = true;
         }
         bool soft_muted = g_config.soft_mute;
         node_state_t state = g.state;
@@ -1146,6 +1190,13 @@ static void ring_task(void *arg)
         bool directed = g.tx_directed;
         bool error = (int32_t)(g.error_until_ms - t) > 0;
         xSemaphoreGive(g_lock);
+
+        if (save_soft_mute_clear) {
+            if (device_config_save(&saved_config))
+                ESP_LOGI(TAG, "Hardware mute cleared the soft-mute flag");
+            else
+                ESP_LOGW(TAG, "Hardware mute cleared soft mute only until reboot (NVS save failed)");
+        }
 
         if (ota_manager_is_active()) ring_controller_set(RING_OTA);
         else if (ota_manager_has_recent_error()) ring_controller_set(RING_ERROR);
@@ -1168,7 +1219,12 @@ static void hello_task(void *arg)
 {
     while (1) {
         uint8_t payload[7 + 31 + DEVICE_ALIAS_MAX];
+        /* The configuration path replaces the whole g_config struct under
+         * g_lock, so build the payload (which copies the alias byte by byte)
+         * under the lock too and only send after releasing it. */
+        xSemaphoreTake(g_lock, portMAX_DELAY);
         uint16_t length = build_hello_payload(payload, sizeof(payload));
+        xSemaphoreGive(g_lock);
         send_packet_to(&g_group, PKT_HELLO, 0, 0, 0, payload, length);
         vTaskDelay(pdMS_TO_TICKS(PEER_HELLO_MS));
     }
@@ -1313,7 +1369,7 @@ void app_main(void)
 
     wifi_init();
     udp_init();
-    ota_manager_init(ota_status_send);
+    ota_manager_init(ota_status_send, ota_claim_floor);
 
 #if INTERCOM_USB_RAW_MIC_CAPTURE
     raw_mic_q = xQueueCreate(16, sizeof(audio_frame_t));

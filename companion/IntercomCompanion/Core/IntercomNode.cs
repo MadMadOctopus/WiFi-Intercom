@@ -18,6 +18,10 @@ internal sealed class IntercomNode : IAsyncDisposable
 
     private readonly CompanionSettings settings;
     private readonly ConcurrentDictionary<uint, Peer> peers = new();
+    // Every group code we have ever heard on this LAN. Discovery keeps probing all
+    // of them, so a device on a group we have left stays visible (it moves to the
+    // "other groups" bucket) instead of expiring to "not responding".
+    private readonly ConcurrentDictionary<string, byte> seenGroupCodes = new();
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<DeviceConfigurationReceivedEventArgs>>
         configurationRequests = new();
     private readonly ConcurrentDictionary<uint, OtaOperation> otaOperations = new();
@@ -62,7 +66,9 @@ internal sealed class IntercomNode : IAsyncDisposable
     }
 
     public uint NodeId => settings.NodeId;
-    public string MeshId => settings.MeshId;
+    public string MeshId => settings.BroadcastTargetCode;
+    public string BroadcastTargetCode => settings.BroadcastTargetCode;
+    public IReadOnlyList<string> JoinedGroupCodes => settings.JoinedGroups.Select(group => group.Code).ToArray();
     public string Alias => settings.Alias;
     public IPAddress DiscoveryInterface => discoveryInterface;
     public IReadOnlyCollection<Peer> Peers => peers.Values.ToArray();
@@ -72,6 +78,22 @@ internal sealed class IntercomNode : IAsyncDisposable
     {
         var expiry = DateTimeOffset.UtcNow - PeerLifetime;
         return peers.Values.Where(peer => peer.LastSeen >= expiry).ToArray();
+    }
+
+    /// <summary>Live peers in one group — the destination set for a broadcast to
+    /// that group.</summary>
+    public IReadOnlyList<Peer> SnapshotGroupPeers(string groupCode)
+    {
+        var expiry = DateTimeOffset.UtcNow - PeerLifetime;
+        return peers.Values.Where(peer => peer.LastSeen >= expiry && peer.GroupCode == groupCode).ToArray();
+    }
+
+    /// <summary>Live peers across every joined group — the destination set for a
+    /// broadcast to all groups.</summary>
+    public IReadOnlyList<Peer> SnapshotJoinedPeers()
+    {
+        var expiry = DateTimeOffset.UtcNow - PeerLifetime;
+        return peers.Values.Where(peer => peer.LastSeen >= expiry && settings.IsJoined(peer.GroupCode)).ToArray();
     }
 
     public event EventHandler? PeersChanged;
@@ -96,15 +118,36 @@ internal sealed class IntercomNode : IAsyncDisposable
         _ = SendHelloAsync(stopping.Token);
     }
 
-    public void SetMeshId(string meshId)
+    public void JoinGroup(string code, string? name = null)
     {
-        if (!Protocol.IsValidMeshId(meshId))
-            throw new ArgumentException("Group ID must be exactly four A–Z or 0–9 characters.", nameof(meshId));
-        settings.MeshId = meshId;
+        if (!settings.JoinGroup(code, name)) return;
         settings.Save();
-        peers.Clear();
         PeersChanged?.Invoke(this, EventArgs.Empty);
         _ = SendHelloAsync(stopping.Token);
+    }
+
+    public void LeaveGroup(string code)
+    {
+        if (!settings.LeaveGroup(code)) return;
+        settings.Save();
+        // Devices in the left group keep announcing; they re-partition into
+        // "other groups", so they are not removed from discovery.
+        PeersChanged?.Invoke(this, EventArgs.Empty);
+        _ = SendHelloAsync(stopping.Token);
+    }
+
+    public void RenameGroup(string code, string? name)
+    {
+        settings.RenameGroup(code, name);
+        settings.Save();
+        PeersChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void SetBroadcastTarget(string code)
+    {
+        if (!settings.SetBroadcastTarget(code)) return;
+        settings.Save();
+        PeersChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public Task<DeviceConfigurationReceivedEventArgs> RequestConfigurationAsync(Peer peer,
@@ -166,7 +209,7 @@ internal sealed class IntercomNode : IAsyncDisposable
             {
                 Diagnostic?.Invoke($"OTA {package.Version} → {peer.Alias} (offer {attempt}/3)");
                 await SendToEndpointAsync(PacketType.OtaOffer, session, 0, payload, peer.Endpoint,
-                    cancellationToken: cancellationToken);
+                    peer.GroupCode, cancellationToken: cancellationToken);
                 var completed = await Task.WhenAny(operation.Admitted.Task,
                     Task.Delay(TimeSpan.FromSeconds(2), cancellationToken));
                 if (completed == operation.Admitted.Task)
@@ -206,7 +249,7 @@ internal sealed class IntercomNode : IAsyncDisposable
                 Diagnostic?.Invoke($"Configuration {type} → {peer.Alias} (attempt {attempt}/3)");
                 DiagnosticLog.Write($"config send type={type} target={peer.NodeId:x8} session={session:x8} attempt={attempt}");
                 await SendToEndpointAsync(type, session, 0, payload, peer.Endpoint,
-                    cancellationToken: cancellationToken);
+                    peer.GroupCode, cancellationToken: cancellationToken);
                 var elapsed = await Task.WhenAny(completion.Task,
                     Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken));
                 if (elapsed == completion.Task) return await completion.Task;
@@ -221,16 +264,18 @@ internal sealed class IntercomNode : IAsyncDisposable
     }
 
     public Task SendToEndpointAsync(PacketType type, uint session, uint sequence, byte[] payload,
-                                    IPEndPoint destination, byte flags = 0,
+                                    IPEndPoint destination, string groupCode, byte flags = 0,
                                     CancellationToken cancellationToken = default) =>
-        SendAsync(type, session, sequence, payload, destination, flags, cancellationToken);
+        SendAsync(type, session, sequence, payload, destination, groupCode, flags, cancellationToken);
 
+    /// <summary>Sends to each destination on its own group, so a broadcast can
+    /// fan out across several joined groups at once.</summary>
     public async Task SendToPeersAsync(PacketType type, uint session, uint sequence, byte[] payload,
                                        IEnumerable<Peer> destinations, byte flags = 0,
                                        CancellationToken cancellationToken = default)
     {
         foreach (var peer in destinations)
-            await SendAsync(type, session, sequence, payload, peer.Endpoint, flags, cancellationToken);
+            await SendAsync(type, session, sequence, payload, peer.Endpoint, peer.GroupCode, flags, cancellationToken);
     }
 
     public Task SendRtpToEndpointAsync(uint session, ushort sequence, uint timestamp, byte[] payload,
@@ -255,11 +300,15 @@ internal sealed class IntercomNode : IAsyncDisposable
             while (!stopping.IsCancellationRequested)
             {
                 var received = await client.ReceiveAsync(stopping.Token);
-                if (!Protocol.TryParse(received.Buffer, Protocol.MeshIdFromText(settings.MeshId), NodeId, out var packet) || packet is null)
+                if (!Protocol.TryParse(received.Buffer, NodeId, out var packet) || packet is null)
                     continue;
 
                 LearnPeer(packet, received.RemoteEndPoint);
-                PacketReceived?.Invoke(this, new IntercomPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+                // Floor/audio traffic is only ours to act on for a group we have
+                // joined; other groups are discovery-only. Config/OTA replies are
+                // keyed by a session we started, so they are handled regardless.
+                if (settings.IsJoined(Protocol.MeshIdToText(packet.MeshId)))
+                    PacketReceived?.Invoke(this, new IntercomPacketReceivedEventArgs(packet, received.RemoteEndPoint));
                 if (packet.Type == PacketType.ConfigReply)
                     ParseConfigurationReply(packet, received.RemoteEndPoint);
                 else if (packet.Type == PacketType.OtaStatus)
@@ -330,15 +379,18 @@ internal sealed class IntercomNode : IAsyncDisposable
             : new HelloAnnouncement(known?.Alias ?? $"Device {packet.SenderId:x8}",
                 known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown", known?.Capabilities ?? 0,
                 known?.HelloFlags ?? 0);
+        var groupCode = Protocol.MeshIdToText(packet.MeshId);
+        seenGroupCodes.TryAdd(groupCode, 0);
         var peer = new Peer(packet.SenderId, source, announcement.Alias,
             announcement.ProtocolVersion, announcement.FirmwareVersion, announcement.Capabilities,
-            announcement.Flags, DateTimeOffset.UtcNow);
+            announcement.Flags, DateTimeOffset.UtcNow, groupCode);
         peers[packet.SenderId] = peer;
         if (known is null)
             DiagnosticLog.Write($"peer discovered sender={packet.SenderId:x8} endpoint={source} alias={peer.Alias} firmware={peer.FirmwareVersion} protocol={peer.ProtocolVersion?.ToString() ?? "legacy"}");
         if (known is null || known.Alias != peer.Alias || !known.Endpoint.Equals(peer.Endpoint) ||
             known.ProtocolVersion != peer.ProtocolVersion || known.FirmwareVersion != peer.FirmwareVersion ||
-            known.Capabilities != peer.Capabilities || known.HelloFlags != peer.HelloFlags)
+            known.Capabilities != peer.Capabilities || known.HelloFlags != peer.HelloFlags ||
+            known.GroupCode != peer.GroupCode)
             PeersChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -435,22 +487,29 @@ internal sealed class IntercomNode : IAsyncDisposable
         try
         {
             var payload = Protocol.BuildHelloPayload(Alias, OwnFirmwareVersion());
-            await SendAsync(PacketType.Hello, 0, 0, payload,
-                new IPEndPoint(MulticastGroup, Protocol.Port), 0, cancellationToken);
-            // Some consumer access points suppress multicast traffic between
-            // Wi-Fi clients. The link-local broadcast carries the same small
-            // HELLO only as discovery fallback; media remains unicast.
-            await SendAsync(PacketType.Hello, 0, 0, payload,
-                new IPEndPoint(IPAddress.Broadcast, Protocol.Port), 0, cancellationToken);
+            // Probe every group we are in or have ever heard. A device carries one
+            // group, and firmware answers a HELLO only on a matching group, so to
+            // keep a group's devices discoverable — including groups we have left,
+            // whose devices belong in "other groups" rather than vanishing — the
+            // beacon must go out once per known group code.
+            var groups = settings.JoinedGroups.Select(group => group.Code)
+                .Concat(seenGroupCodes.Keys).Distinct().ToArray();
+            foreach (var group in groups)
+            {
+                await SendAsync(PacketType.Hello, 0, 0, payload,
+                    new IPEndPoint(MulticastGroup, Protocol.Port), group, 0, cancellationToken);
+                // Some consumer access points suppress multicast traffic between
+                // Wi-Fi clients. The link-local broadcast carries the same small
+                // HELLO only as discovery fallback; media remains unicast.
+                await SendAsync(PacketType.Hello, 0, 0, payload,
+                    new IPEndPoint(IPAddress.Broadcast, Protocol.Port), group, 0, cancellationToken);
+            }
             // Once a peer has answered either discovery beacon, its unicast
-            // endpoint is authoritative. Refresh it directly as well: a few
-            // consumer APs intermittently suppress Wi-Fi multicast/broadcast
-            // between clients, but normal unicast (used by media/config) is
-            // reliable. A peer still expires after PeerLifetime if it stops
-            // answering these probes.
-            var peersToRefresh = SnapshotActivePeers();
-            foreach (var peer in peersToRefresh)
-                await SendAsync(PacketType.Hello, 0, 0, payload, peer.Endpoint, 0, cancellationToken);
+            // endpoint is authoritative. Refresh every known peer directly on its
+            // own group — joined or not — so it keeps the companion as a learned
+            // peer and keeps replying.
+            foreach (var peer in SnapshotActivePeers())
+                await SendAsync(PacketType.Hello, 0, 0, payload, peer.Endpoint, peer.GroupCode, 0, cancellationToken);
 
             // Last-resort peerless discovery for APs which forward neither
             // multicast nor subnet broadcasts between Wi-Fi clients. The
@@ -462,7 +521,8 @@ internal sealed class IntercomNode : IAsyncDisposable
             {
                 nextSubnetProbeAt = now.AddSeconds(12);
                 foreach (var endpoint in LocalSubnetProbeEndpoints())
-                    await SendAsync(PacketType.Hello, 0, 0, payload, endpoint, 0, cancellationToken);
+                    foreach (var group in groups)
+                        await SendAsync(PacketType.Hello, 0, 0, payload, endpoint, group, 0, cancellationToken);
                 DiagnosticLog.Write("discovery unicast subnet probe sent");
             }
         }
@@ -491,10 +551,11 @@ internal sealed class IntercomNode : IAsyncDisposable
     }
 
     private async Task SendAsync(PacketType type, uint session, uint sequence, byte[] payload,
-                                 IPEndPoint destination, byte flags,
+                                 IPEndPoint destination, string groupCode, byte flags,
                                  CancellationToken cancellationToken)
     {
-        var datagram = Protocol.Pack(Protocol.MeshIdFromText(settings.MeshId), NodeId, type, session, sequence, TimestampMs(), payload, flags);
+        var mesh = Protocol.IsValidMeshId(groupCode) ? groupCode : settings.BroadcastTargetCode;
+        var datagram = Protocol.Pack(Protocol.MeshIdFromText(mesh), NodeId, type, session, sequence, TimestampMs(), payload, flags);
         await sendGate.WaitAsync(cancellationToken);
         try { await client.SendAsync(datagram, destination, cancellationToken); }
         finally { sendGate.Release(); }

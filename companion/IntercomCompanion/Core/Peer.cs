@@ -3,7 +3,8 @@ using System.Net;
 namespace IntercomCompanion.Core;
 
 internal sealed record Peer(uint NodeId, IPEndPoint Endpoint, string Alias,
-    byte? ProtocolVersion, string FirmwareVersion, byte Capabilities, byte HelloFlags, DateTimeOffset LastSeen)
+    byte? ProtocolVersion, string FirmwareVersion, byte Capabilities, byte HelloFlags, DateTimeOffset LastSeen,
+    string GroupCode = "MESH")
 {
     public bool IsProtocolCompatible => ProtocolVersion is null || ProtocolVersion is 1 or 2;
     public bool SupportsOta => (Capabilities & Protocol.OtaCapability) != 0;

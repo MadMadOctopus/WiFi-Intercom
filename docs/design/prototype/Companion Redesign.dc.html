@@ -57,7 +57,7 @@
         <div style="width:9px; height:9px; border-radius:50%; background:#2e7d32;"></div>
         <div style="line-height:1.25;">
           <div style="font-size:14px; font-weight:600;">SUNRISEROG</div>
-          <div style="font-size:11px; color:#63676d;">ID a9d5b153 · group MESH · 16 of 16 devices</div>
+          <div style="font-size:11px; color:#63676d; display:flex; align-items:center; gap:5px;"><span>ID a9d5b153 · 2 groups joined · broadcasting to</span><span onClick="{{ openGroups }}" style="color:#1565c0; font-weight:600; cursor:pointer;">Workshop (MESH) ▾</span></div>
         </div>
       </div>
       <div style="width:1px; height:28px; background:#e6e8ea;"></div>
@@ -94,7 +94,7 @@
           <div style="padding:18px 20px 22px 20px;">
             <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
               <div style="font-size:14px; font-weight:700; flex:none;">Devices</div>
-              <div style="font-size:12px; color:#63676d; white-space:nowrap; flex:none;">16 of 16 in group MESH</div>
+              <div style="font-size:12px; color:#63676d; white-space:nowrap; flex:none;">16 devices across 2 joined groups</div>
               <div style="margin-left:auto; display:flex; align-items:center; gap:6px; flex:none;">
                 <div style="height:26px; width:150px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 8px; font-size:12px; color:#83878d; white-space:nowrap; flex:none;">Alias or ID</div>
                 <sc-for list="{{ filters }}" as="f" hint-placeholder-count="5">
@@ -105,8 +105,15 @@
               </div>
             </div>
 
+            <sc-for list="{{ deviceGroups }}" as="g" hint-placeholder-count="2">
+            <div style="display:flex; align-items:center; gap:10px; margin:{{ g.headMargin }};">
+              <span style="width:3px; height:15px; background:{{ g.mark }}; flex:none;"></span>
+              <span style="font-size:13px; font-weight:700; white-space:nowrap;">{{ g.title }}</span>
+              <span style="font-size:12px; color:#63676d; white-space:nowrap;">{{ g.count }}</span>
+              <span onClick="{{ g.setTarget }}" style="margin-left:auto; font-size:10px; font-weight:{{ g.targetWeight }}; letter-spacing:{{ g.targetSpacing }}; text-transform:{{ g.targetCase }}; color:{{ g.targetFg }}; background:{{ g.targetBg }}; border:1px solid {{ g.targetBorder }}; padding:3px 8px; white-space:nowrap; cursor:{{ g.targetCursor }};">{{ g.targetLabel }}</span>
+            </div>
             <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px;">
-              <sc-for list="{{ devices }}" as="d" hint-placeholder-count="16">
+              <sc-for list="{{ g.devices }}" as="d" hint-placeholder-count="6">
                 <div style="background:#ffffff; border:1px solid #dcdfe3; border-left:3px solid {{ d.accent }}; padding:10px 12px; animation:{{ d.pulse }};">
                   <div style="display:flex; align-items:center; gap:8px;">
                     <div style="font-size:14px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.alias }}</div>
@@ -133,11 +140,31 @@
                 </div>
               </sc-for>
             </div>
+            </sc-for>
 
-            <div style="margin-top:16px; background:#ffffff; border:1px solid #dcdfe3;">
+            <div style="margin-top:18px; background:#ffffff; border:1px solid #dcdfe3;">
+              <div style="display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid #edeff1;">
+                <div style="font-size:13px; font-weight:700;">Other groups on this network</div>
+                <div style="font-size:12px; color:#63676d;">Announcing normally, but this companion is not a member — join a group to hear it and talk to it</div>
+              </div>
+              <sc-for list="{{ otherGroups }}" as="x" hint-placeholder-count="2">
+                <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid #f2f4f5; font-size:12px;">
+                  <span style="width:6px; height:6px; background:#9aa0a6; flex:none;"></span>
+                  <span style="font-weight:600; width:150px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ x.title }}</span>
+                  <span style="color:#63676d; width:110px; white-space:nowrap; font-variant-numeric:tabular-nums;">{{ x.count }}</span>
+                  <div style="min-width:0;">
+                    <div style="color:#3d4147; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ x.members }}</div>
+                    <div style="font-size:11px; color:{{ x.noteFg }}; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ x.note }}</div>
+                  </div>
+                  <button onClick="{{ openGroups }}" style="margin-left:auto; flex:none; font:12px 'Segoe UI',sans-serif; padding:5px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Join group…</button>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:12px; background:#ffffff; border:1px solid #dcdfe3;">
               <div style="display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid #edeff1;">
                 <div style="font-size:13px; font-weight:700;">Known, not responding</div>
-                <div style="font-size:12px; color:#63676d;">3 devices kept from earlier sessions — they return to the grid as soon as they announce</div>
+                <div style="font-size:12px; color:#63676d;">3 devices kept from earlier sessions, silent on every group — they return to the grid as soon as they announce</div>
                 <button onClick="{{ openRemove }}" style="margin-left:auto; font:12px 'Segoe UI',sans-serif; padding:6px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Remove all three…</button>
               </div>
               <sc-for list="{{ offline }}" as="o" hint-placeholder-count="3">
@@ -160,11 +187,11 @@
             <div style="background:#ffffff; border:1px solid #dcdfe3; padding:16px;">
               <button style="width:100%; font:700 17px 'Segoe UI',sans-serif; color:#ffffff; background:#2e7d32; border:1px solid #2e7d32; padding:22px 0; cursor:pointer;">Hold to broadcast</button>
               <div style="display:flex; justify-content:space-between; font-size:11px; color:#63676d; margin-top:8px;">
-                <span>Everyone in group MESH</span><span>Space, or Ctrl+Alt+B anywhere</span>
+                <span>Everyone in Workshop (MESH)</span><span>Space, or Ctrl+Alt+B anywhere</span>
               </div>
               <button style="width:100%; font:700 14px 'Segoe UI',sans-serif; color:#ffffff; background:#1565c0; border:1px solid #1565c0; padding:14px 0; margin-top:12px; cursor:pointer;">Hold to reply</button>
               <div style="display:flex; justify-content:space-between; font-size:11px; color:#63676d; margin-top:8px;">
-                <span>Last sender: Intercom</span><span>Ctrl+Alt+R</span>
+                <span>Last sender: Intercom · Workshop (MESH)</span><span>Ctrl+Alt+R</span>
               </div>
             </div>
 
@@ -317,45 +344,78 @@
             <sc-if value="{{ isGroup }}" hint-placeholder-val="{{ false }}">
               <div style="max-width:760px;">
                 <div style="font-size:20px; font-weight:700;">Group and device IDs</div>
-                <div style="font-size:13px; color:#63676d; margin-top:6px; text-wrap:pretty;">A group is an intercom channel, not a radio network. Every device and companion that should hear each other must carry the same group ID on the same 2.4 GHz LAN. A group holds up to 16 devices.</div>
+                <div style="font-size:13px; color:#63676d; margin-top:6px; text-wrap:pretty;">A group is an intercom channel, not a radio network. Every node in a group must be on the same 2.4 GHz LAN and a group holds up to 16 devices. A device belongs to exactly one group; this companion can join several and hear all of them, but it broadcasts to one at a time.</div>
 
-                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:18px 20px; margin-top:18px;">
-                  <div style="display:grid; grid-template-columns:170px 1fr; gap:14px 16px; align-items:center;">
-                    <span style="font-size:13px;">Current group</span>
-                    <span style="font-size:13px; font-weight:600; font-variant-numeric:tabular-nums;">MESH · 16 devices, 1 companion</span>
+                <div style="background:#ffffff; border:1px solid #dcdfe3; margin-top:18px;">
+                  <div style="display:flex; align-items:center; gap:10px; padding:13px 18px; border-bottom:1px solid #edeff1;">
+                    <div style="font-size:13px; font-weight:700;">Groups this companion has joined</div>
+                    <div style="font-size:12px; color:#63676d;">The selected group is where Hold to broadcast sends</div>
+                  </div>
+                  <sc-for list="{{ myGroups }}" as="m" hint-placeholder-count="2">
+                    <div style="display:flex; align-items:center; gap:12px; padding:11px 18px; border-bottom:1px solid #f2f4f5; font-size:13px;">
+                      <input type="radio" name="target" checked="{{ m.target }}">
+                      <span style="font-weight:600; width:200px;">{{ m.title }}</span>
+                      <span style="color:#63676d; width:150px; font-variant-numeric:tabular-nums;">{{ m.count }}</span>
+                      <span style="color:#83878d; font-size:12px;">{{ m.note }}</span>
+                      <div style="margin-left:auto; display:flex; gap:8px;">
+                        <button style="font:12px 'Segoe UI',sans-serif; padding:5px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Rename…</button>
+                        <button style="font:12px 'Segoe UI',sans-serif; padding:5px 10px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Leave</button>
+                      </div>
+                    </div>
+                  </sc-for>
+                  <div style="display:flex; align-items:center; gap:10px; padding:14px 18px; background:#f7f8f9;">
+                    <span style="font-size:13px;">Join another group</span>
+                    <input placeholder="CODE" style="width:96px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box; letter-spacing:0.14em;">
+                    <input placeholder="Name on this PC (optional)" style="width:210px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box;">
+                    <button style="font:12px 'Segoe UI',sans-serif; padding:6px 12px; background:#ffffff; border:1px solid #adb2b8; cursor:pointer;">Join</button>
+                    <span style="font-size:12px; color:#83878d;">YARD and LOAD are announcing nearby</span>
+                  </div>
+                </div>
+
+                <div style="background:#ffffff; border:1px solid #dcdfe3; padding:16px 20px; margin-top:12px;">
+                  <div style="display:grid; grid-template-columns:170px 1fr; gap:10px 16px; align-items:center;">
                     <span style="font-size:13px;">This companion's ID</span>
                     <span style="font-size:13px; color:#63676d; font-variant-numeric:tabular-nums;">a9d5b153 · generated once, unique on this PC</span>
+                    <span style="font-size:13px;">Group names</span>
+                    <span style="font-size:12px; color:#63676d; text-wrap:pretty;">Names are stored on this PC only. Devices carry the 4-character code, so another companion may show the same group under a different name.</span>
                   </div>
                 </div>
 
                 <div style="border:1px solid #b22222; border-left:4px solid #b22222; background:#fdf3f3; margin-top:18px;">
                   <div style="padding:14px 18px; border-bottom:1px solid #f2d6d6;">
-                    <div style="font-size:15px; font-weight:700; color:#8e1a1a;">Change the group ID</div>
-                    <div style="font-size:12px; color:#7a2020; margin-top:4px;">This breaks the intercom until every node carries the new ID.</div>
+                    <div style="font-size:15px; font-weight:700; color:#8e1a1a;">Move devices to another group</div>
+                    <div style="font-size:12px; color:#7a2020; margin-top:4px;">Pick the devices to move. Each one reboots and leaves the group it is in now.</div>
                   </div>
                   <div style="padding:16px 18px;">
                     <div style="font-size:13px; color:#3d4147; line-height:1.8;">
-                      <div>· Devices still on <strong>MESH</strong> disappear from this companion and can no longer hear it.</div>
-                      <div>· Each device must be changed separately, over USB or with a configuration write, and each one reboots.</div>
-                      <div>· A device you cannot reach right now keeps the old group until you get to it physically.</div>
-                      <div>· Two groups on the same LAN never mix, so a half-finished change leaves two isolated intercoms.</div>
+                      <div>· A moved device leaves its old group at once and can no longer hear anyone still in it.</div>
+                      <div>· Devices are written one at a time, over the network or by USB, and each one reboots.</div>
+                      <div>· A device you cannot reach right now keeps its current group until you get to it.</div>
+                      <div>· If you are not a member of the destination group, join it or the moved devices vanish from this window.</div>
                     </div>
-                    <div style="display:grid; grid-template-columns:170px 1fr; gap:14px 16px; align-items:center; margin-top:18px;">
-                      <span style="font-size:13px;">New group ID</span>
+                    <div style="display:grid; grid-template-columns:170px 1fr; gap:14px 16px; align-items:start; margin-top:18px;">
+                      <span style="font-size:13px; padding-top:5px;">Devices to move</span>
+                      <div style="border:1px solid #dcdfe3; background:#ffffff; max-height:165px; overflow:auto;">
+                        <sc-for list="{{ movable }}" as="v" hint-placeholder-count="6">
+                          <label style="display:flex; align-items:center; gap:10px; padding:7px 12px; border-bottom:1px solid #f2f4f5; font-size:13px; height:33px; box-sizing:border-box; white-space:nowrap;">
+                            <input type="checkbox" checked="{{ v.picked }}">
+                            <span style="font-weight:600; width:118px; overflow:hidden; text-overflow:ellipsis;">{{ v.alias }}</span>
+                            <span style="color:#63676d; width:96px; font-variant-numeric:tabular-nums;">{{ v.id }}</span>
+                            <span style="color:#83878d; overflow:hidden; text-overflow:ellipsis;">{{ v.from }}</span>
+                            <span style="margin-left:auto; font-size:11px; color:{{ v.reachFg }};">{{ v.reach }}</span>
+                          </label>
+                        </sc-for>
+                      </div>
+                      <span style="font-size:13px;">Destination group</span>
                       <div style="display:flex; align-items:center; gap:10px;">
-                        <input value="WARD" style="width:140px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box; letter-spacing:0.14em;">
-                        <span style="font-size:12px; color:#63676d;">exactly 4 characters, A–Z and 0–9</span>
+                        <div style="width:220px; height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 6px; font-size:13px; box-sizing:border-box;"><span>Bench room (BNCH)</span><span style="margin-left:auto; font-size:9px;">▼</span></div>
+                        <span style="font-size:12px; color:#63676d;">or type a new code — 4 characters, A–Z and 0–9</span>
                       </div>
-                      <span style="font-size:13px;">Type MESH to confirm</span>
-                      <input placeholder="MESH" style="width:140px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box; letter-spacing:0.14em;">
-                      <span style="font-size:13px;">Apply to</span>
-                      <div style="font-size:13px; display:flex; flex-direction:column; gap:8px;">
-                        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" checked>This companion</label>
-                        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox">All 16 active devices, one at a time (each reboots)</label>
-                      </div>
+                      <span style="font-size:13px;">Type BNCH to confirm</span>
+                      <input placeholder="BNCH" style="width:140px; height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box; letter-spacing:0.14em;">
                     </div>
                     <div style="display:flex; align-items:center; gap:12px; margin-top:18px;">
-                      <button disabled style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#d08a8a; border:1px solid #d08a8a; padding:10px 18px;">Change group ID</button>
+                      <button disabled style="font:700 13px 'Segoe UI',sans-serif; color:#ffffff; background:#d08a8a; border:1px solid #d08a8a; padding:10px 18px;">Move 2 devices to BNCH</button>
                       <span style="font-size:12px; color:#7a2020;">Enabled once the confirmation matches.</span>
                     </div>
                   </div>
@@ -422,6 +482,11 @@
             <div style="display:grid; grid-template-columns:150px 1fr; gap:16px; align-items:center; margin-top:18px;">
               <span style="font-size:13px;">Alias</span>
               <input value="Intercom" style="height:26px; border:1px solid #7a7f85; padding:0 6px; font:13px 'Segoe UI',sans-serif; box-sizing:border-box;">
+              <span style="font-size:13px;">Group</span>
+              <div style="display:flex; align-items:center; gap:10px;">
+                <div style="width:220px; height:26px; border:1px solid #7a7f85; background:#fff; display:flex; align-items:center; padding:0 6px; font-size:13px; box-sizing:border-box;"><span>Workshop (MESH)</span><span style="margin-left:auto; font-size:9px;">▼</span></div>
+                <span style="font-size:12px; color:#83878d;">moving restarts the device</span>
+              </div>
               <span style="font-size:13px;">Speaker volume</span>
               <div style="display:flex; align-items:center; gap:12px;">
                 <div style="flex:1; height:4px; background:#e2e5e8; position:relative;">
@@ -598,10 +663,11 @@ class Component extends DCLogic {
       ["Van 1", "9077ab03", "152", "idle", 640],
       ["Spare unit", "90ff2210", "160", "legacy", 384],
     ];
-    const devices = raw.map(([alias, id, host, mode, vol, fw]) => {
+    const devices = raw.map(([alias, id, host, mode, vol, fw], i) => {
       const pct = Math.round(((vol - 64) / (1024 - 64)) * 100) + "%";
       const base = {
-        alias, talkBg: "#6a1b9a", volumePct: pct, volumeLabel: String(vol),
+        alias, group: i < 13 ? "MESH" : "BNCH",
+        talkBg: "#6a1b9a", volumePct: pct, volumeLabel: String(vol),
         meta: id + " · 192.168.0." + host + " · " + (fw || "0.7.9") + " · p2",
         silenceLabel: "Silence", silenceBg: "#ffffff", silenceFg: "#3d4147",
         muteNote: "Playing received audio", muteDot: "#2e7d32", muteFg: "#83878d",
@@ -621,6 +687,51 @@ class Component extends DCLogic {
       return base;
     });
 
+    const joined = [
+      { code: "MESH", name: "Workshop", target: true },
+      { code: "BNCH", name: "Bench room", target: false },
+    ];
+    const deviceGroups = joined.map((g, i) => {
+      const list = devices.filter((d) => d.group === g.code);
+      return {
+        devices: list,
+        title: g.name + " (" + g.code + ")",
+        count: list.length + " of 16 devices",
+        mark: g.target ? "#1565c0" : "#c9ccd0",
+        headMargin: (i === 0 ? "0" : "18px") + " 0 8px 0",
+        targetLabel: g.target ? "Broadcast target" : "Broadcast here",
+        targetFg: g.target ? "#ffffff" : "#1565c0",
+        targetBg: g.target ? "#17191c" : "transparent",
+        targetBorder: g.target ? "#17191c" : "transparent",
+        targetWeight: g.target ? 700 : 400,
+        targetSpacing: g.target ? "0.06em" : "0",
+        targetCase: g.target ? "uppercase" : "none",
+        targetCursor: g.target ? "default" : "pointer",
+        setTarget: () => {},
+      };
+    });
+
+    const myGroups = [
+      { title: "Workshop (MESH)", count: "13 of 16 devices", note: "broadcast target", target: true },
+      { title: "Bench room (BNCH)", count: "3 of 16 devices", note: "receiving only", target: false },
+    ];
+
+    const movable = [
+      { alias: "Intercom", id: "90b77b2c", from: "Workshop (MESH)", picked: true, reach: "reachable", reachFg: "#2e7d32" },
+      { alias: "Test unit", id: "90688edc", from: "Workshop (MESH)", picked: true, reach: "reachable", reachFg: "#2e7d32" },
+      { alias: "Workshop", id: "9061aa04", from: "Workshop (MESH)", picked: false, reach: "reachable", reachFg: "#2e7d32" },
+      { alias: "Reception", id: "90b8f2e1", from: "Workshop (MESH)", picked: false, reach: "reachable", reachFg: "#2e7d32" },
+      { alias: "Spare unit", id: "90ff2210", from: "Workshop (MESH)", picked: false, reach: "legacy, USB only", reachFg: "#7a5200" },
+      { alias: "Old bench board", id: "90b8f2ff", from: "not responding", picked: false, reach: "unreachable", reachFg: "#83878d" },
+    ];
+
+    const otherGroups = [
+      { title: "YARD", count: "4 devices", members: "Gate north, Ramp, Weighbridge, Yard hut",
+        note: "no name set on this PC", noteFg: "#83878d" },
+      { title: "Loading bay (LOAD)", count: "1 device", members: "Bench Intercom",
+        note: "you know this device — it left Workshop on 12 Aug", noteFg: "#7a5200" },
+    ];
+
     const offline = [
       { alias: "Old bench board", meta: "90b8f2ff · last at 192.168.0.191", seen: "not heard for 3 days" },
       { alias: "Bench test", meta: "901f77aa · last at 192.168.0.198", seen: "not heard for 11 days" },
@@ -637,7 +748,8 @@ class Component extends DCLogic {
     }));
 
     return {
-      screens, settingsNav, devices, offline, filters,
+      screens, settingsNav, devices, offline, filters, deviceGroups, otherGroups, myGroups, movable,
+      openGroups: this.go("settings", "group"),
       isTalk: s === "talk",
       isSettings: s === "settings",
       isConfigure: s === "configure",
@@ -660,7 +772,7 @@ class Component extends DCLogic {
       nowTitle: "Intercom is speaking",
       nowAccent: "#1565c0",
       nowBg: "#eef4fb",
-      nowMeta: "broadcast to the group · 3.2 s · output buffer 96 ms",
+      nowMeta: "Workshop (MESH) · broadcast to the group · 3.2 s · output buffer 96 ms",
 
       activity: [
         { time: "14:22", color: "#1565c0", text: "Intercom — broadcast, 3.2 s" },

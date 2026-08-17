@@ -130,7 +130,7 @@ typedef struct {
 #define JB_CAP 32
 typedef struct {
     int16_t  pcm[FRAME_SAMPLES];
-    uint32_t seq;
+    uint16_t seq;                 /* RTP sequence, 16-bit and wrapping */
     bool     present;
 } jb_slot_t;
 
@@ -180,7 +180,7 @@ static struct {
 
     /* jitter buffer */
     jb_slot_t slots[JB_CAP];
-    uint32_t  jb_expected;
+    uint16_t  jb_expected;
     bool      jb_started;
     int16_t   jb_last[FRAME_SAMPLES];
     bool      jb_have_last;
@@ -232,21 +232,31 @@ static void ota_status_send(const struct sockaddr_in *destination, uint32_t sess
                        (const uint8_t *)json, (uint16_t)length);
 }
 
+/* Copies the still-live peers into `out` (room for PEER_CAP entries) and
+ * returns how many there are, so senders never hold g_lock while transmitting.
+ * Must be called without g_lock held. */
+static int snapshot_active_peers(peer_t *out)
+{
+    uint32_t t = now_ms();
+    int count = 0;
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    for (int i = 0; i < PEER_CAP; ++i) {
+        if (g.peers[i].id != 0 && t - g.peers[i].last_seen_ms <= PEER_EXPIRE_MS)
+            out[count++] = g.peers[i];
+    }
+    xSemaphoreGive(g_lock);
+    return count;
+}
+
 static void send_to_active_peers(uint8_t type, uint8_t flags, uint32_t session,
                                  uint32_t sequence, const uint8_t *payload,
                                  uint16_t payload_len)
 {
     peer_t peers[PEER_CAP];
-    uint32_t t = now_ms();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    memcpy(peers, g.peers, sizeof(peers));
-    xSemaphoreGive(g_lock);
-
-    for (int i = 0; i < PEER_CAP; ++i) {
-        if (peers[i].id != 0 && t - peers[i].last_seen_ms <= PEER_EXPIRE_MS)
-            send_packet_to(&peers[i].address, type, flags, session, sequence,
-                           payload, payload_len);
-    }
+    int count = snapshot_active_peers(peers);
+    for (int i = 0; i < count; ++i)
+        send_packet_to(&peers[i].address, type, flags, session, sequence,
+                       payload, payload_len);
 }
 
 static void send_rtp_to(const struct sockaddr_in *control_destination,
@@ -280,15 +290,10 @@ static void send_rtp_to_active_peers(uint32_t session, uint16_t sequence,
                                      uint16_t payload_len)
 {
     peer_t peers[PEER_CAP];
-    uint32_t t = now_ms();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    memcpy(peers, g.peers, sizeof(peers));
-    xSemaphoreGive(g_lock);
-    for (int i = 0; i < PEER_CAP; ++i) {
-        if (peers[i].id != 0 && t - peers[i].last_seen_ms <= PEER_EXPIRE_MS)
-            send_rtp_to(&peers[i].address, session, sequence, timestamp,
-                        payload, payload_len);
-    }
+    int count = snapshot_active_peers(peers);
+    for (int i = 0; i < count; ++i)
+        send_rtp_to(&peers[i].address, session, sequence, timestamp,
+                    payload, payload_len);
 }
 
 static void send_packet(uint8_t type, uint32_t session, uint32_t sequence,
@@ -313,6 +318,14 @@ static bool remote_wins(const intercom_pkt_t *p)
 /* ======================================================================== */
 /* jitter buffer (call with g_lock held)                                     */
 /* ======================================================================== */
+/* RTP sequence numbers are 16 bit and wrap every 65536 frames (~21.8 min of
+ * continuous audio). Every ordering decision therefore uses a signed 16-bit
+ * distance instead of a plain comparison: positive means `a` is ahead of `b`. */
+static inline int jb_seq_delta(uint16_t a, uint16_t b)
+{
+    return (int)(int16_t)(uint16_t)(a - b);
+}
+
 static void jb_reset(void)
 {
     for (int i = 0; i < JB_CAP; ++i) g.slots[i].present = false;
@@ -322,15 +335,15 @@ static void jb_reset(void)
     g.jb_missing_polls = 0;
 }
 
-static void jb_push(uint32_t seq, const int16_t *pcm)
+static void jb_push(uint16_t seq, const int16_t *pcm)
 {
-    if (g.jb_started && seq < g.jb_expected) return;      /* too late */
+    if (g.jb_started && jb_seq_delta(seq, g.jb_expected) < 0) return;  /* too late */
 
     /* A late I2S/DMA wake-up must not let a finite ring overwrite frames the
      * playout side still expects. Rejoin close to the live edge instead. */
-    if (g.jb_started && seq - g.jb_expected >= JB_CAP) {
+    if (g.jb_started && jb_seq_delta(seq, g.jb_expected) >= JB_CAP) {
         for (int i = 0; i < JB_CAP; ++i) g.slots[i].present = false;
-        g.jb_expected = seq - (JITTER_PREBUFFER - 1);
+        g.jb_expected = (uint16_t)(seq - (JITTER_PREBUFFER - 1));
         g.jb_missing_polls = 0;
         ESP_LOGW(TAG, "RX jitter resynchronised at sequence %u", (unsigned)seq);
     }
@@ -343,12 +356,15 @@ static void jb_push(uint32_t seq, const int16_t *pcm)
     if (!g.jb_started) {
         /* count distinct buffered frames; start once we have the prebuffer */
         int cnt = 0;
-        uint32_t minseq = 0;
+        uint16_t minseq = 0;
         bool first = true;
         for (int i = 0; i < JB_CAP; ++i) {
             if (g.slots[i].present) {
                 cnt++;
-                if (first || g.slots[i].seq < minseq) { minseq = g.slots[i].seq; first = false; }
+                if (first || jb_seq_delta(g.slots[i].seq, minseq) < 0) {
+                    minseq = g.slots[i].seq;
+                    first = false;
+                }
             }
         }
         if (cnt >= JITTER_PREBUFFER) {
@@ -384,11 +400,11 @@ static bool jb_pop(int16_t *out)
          * resynchronise to it; otherwise wait up to 80 ms before declaring a
          * loss. This matches the companion's proven receiver behavior. */
         bool have_future = false;
-        uint32_t next = 0;
+        uint16_t next = 0;
         for (int i = 0; i < JB_CAP; ++i) {
             if (!g.slots[i].present) continue;
-            if (g.slots[i].seq > g.jb_expected &&
-                (!have_future || g.slots[i].seq < next)) {
+            if (jb_seq_delta(g.slots[i].seq, g.jb_expected) > 0 &&
+                (!have_future || jb_seq_delta(g.slots[i].seq, next) < 0)) {
                 next = g.slots[i].seq;
                 have_future = true;
             }
@@ -413,7 +429,7 @@ static bool jb_pop(int16_t *out)
     /* drop anything now hopelessly late */
     for (int i = 0; i < JB_CAP; ++i) {
         if (g.slots[i].present &&
-            g.slots[i].seq + REORDER_WINDOW < g.jb_expected)
+            jb_seq_delta(g.jb_expected, g.slots[i].seq) > REORDER_WINDOW)
             g.slots[i].present = false;
     }
     return real;
@@ -497,10 +513,13 @@ static void handle_heartbeat(const intercom_pkt_t *p)
         g.rx_last_ms = now_ms();
 }
 
-static void handle_config_packet(const intercom_pkt_t *p,
+/* Returns true when the applied configuration needs a reboot. The caller must
+ * perform it after releasing g_lock: sleeping or restarting while holding the
+ * lock stalls the transmit, playback and ring tasks. */
+static bool handle_config_packet(const intercom_pkt_t *p,
                                  const struct sockaddr_in *source)
 {
-    if (p->payload_len == 0 || p->payload_len >= 320) return;
+    if (p->payload_len == 0 || p->payload_len >= 320) return false;
     char request[320] = {0};
     char response[320] = {0};
     memcpy(request, p->payload, p->payload_len);
@@ -508,11 +527,7 @@ static void handle_config_packet(const intercom_pkt_t *p,
     usb_control_process(&g_config, request, response, sizeof(response), &restart_required);
     send_packet_to(source, PKT_CONFIG_REPLY, 0, p->session_id, 0,
                    (const uint8_t *)response, (uint16_t)strlen(response));
-    if (restart_required) {
-        ESP_LOGI(TAG, "Configuration change requires restart");
-        vTaskDelay(pdMS_TO_TICKS(300));
-        esp_restart();
-    }
+    return restart_required;
 }
 
 /* A direct HELLO acknowledgement makes discovery work on access points that
@@ -565,6 +580,7 @@ static void net_rx_task(void *arg)
         intercom_pkt_t pkt;
         if (!protocol_parse(buf, n, MESH_ID, NODE_ID, &pkt)) continue;
 
+        bool restart_required = false;
         xSemaphoreTake(g_lock, portMAX_DELAY);
         peer_seen(&pkt, &src);
         if (ota_manager_is_active() && pkt.type == PKT_CLAIM) {
@@ -578,20 +594,24 @@ static void net_rx_task(void *arg)
             case PKT_END:   handle_end(&pkt);   break;
             case PKT_HEARTBEAT: handle_heartbeat(&pkt); break;
             case PKT_CONFIG_GET:
-            case PKT_CONFIG_SET: handle_config_packet(&pkt, &src); break;
+            case PKT_CONFIG_SET:
+                restart_required = handle_config_packet(&pkt, &src);
+                break;
             case PKT_OTA_OFFER: {
                 /* Do not interrupt speech. The companion can queue and retry
-                 * its small, idempotent offer when the floor becomes idle. */
+                 * its small, idempotent offer when the floor becomes idle.
+                 * The idle test and the OTA claim both happen under g_lock, so
+                 * a PTT can no longer slip in between them; the expensive parse
+                 * and signature check run later on ota_task. */
                 bool idle = g.state == ST_IDLE;
-                xSemaphoreGive(g_lock);
                 const char *reason = NULL;
                 bool accepted = idle && ota_manager_offer(pkt.payload, pkt.payload_len,
                                                           &src, pkt.session_id, &reason);
-                if (!accepted)
+                if (!accepted) {
                     ota_status_send(&src, pkt.session_id, "rejected", 0,
                                     idle ? (reason ? reason : "OTA rejected") : "Floor is active");
-                xSemaphoreTake(g_lock, portMAX_DELAY);
-                if (!accepted) g.error_until_ms = now_ms() + 1500;
+                    g.error_until_ms = now_ms() + 1500;
+                }
                 break;
             }
             case PKT_OTA_CANCEL:
@@ -601,7 +621,16 @@ static void net_rx_task(void *arg)
                 ota_status_send(&src, pkt.session_id, "rejected", 0, "Cancellation unavailable");
                 break;
             case PKT_BUSY:
-                if (g.state == ST_CLAIMING) g.state = ST_IDLE;
+                /* A Busy must plausibly answer our own claim, otherwise a
+                 * single forged packet from anyone who knows the 4-char mesh
+                 * id cancels every claim in the mesh. The PTT1 header carries
+                 * the responder's session (see handle_claim), not ours, so the
+                 * check is the same floor-arbitration rule a CLAIM gets: we
+                 * must still be claiming, must already have sent a claim, and
+                 * the remote tuple must beat ours. */
+                if (g.state == ST_CLAIMING && g.claims_sent > 0 &&
+                    pkt.sender_id != NODE_ID && remote_wins(&pkt))
+                    g.state = ST_IDLE;
                 break;
             default: break;
         }
@@ -612,6 +641,12 @@ static void net_rx_task(void *arg)
             g.have_last_talker = true;
         }
         xSemaphoreGive(g_lock);
+
+        if (restart_required) {
+            ESP_LOGI(TAG, "Configuration change requires restart");
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
+        }
     }
 }
 
@@ -689,7 +724,11 @@ static void tx_task(void *arg)
         uint32_t t = now_ms();
         bool d10_pressed = button_pressed(BUTTON_BROADCAST_GPIO);
         bool d9_pressed = button_pressed(BUTTON_REPLY_GPIO);
+        /* g_config is rewritten wholesale by the configuration path under
+         * g_lock, so take a snapshot instead of reading it unsynchronised. */
+        xSemaphoreTake(g_lock, portMAX_DELAY);
         bool swapped = (g_config.hardware_flags & DEVICE_FLAG_BUTTONS_SWAPPED) != 0;
+        xSemaphoreGive(g_lock);
         bool broadcast = swapped ? d9_pressed : d10_pressed;
         bool reply = swapped ? d10_pressed : d9_pressed;
         bool any_pressed = broadcast || reply;
@@ -712,7 +751,9 @@ static void tx_task(void *arg)
                      * than failing silently, and log it for wiring checks. */
                     g.error_until_ms = t + 750;
                     ESP_LOGW(TAG, "Reply unavailable: no previous talker");
-                } else if (g.state == ST_IDLE) {
+                } else if (g.state == ST_IDLE && !ota_manager_is_active()) {
+                    /* The OTA slot is claimed under g_lock as well, so this
+                     * pair of checks cannot both succeed. */
                     g.tx_buffer_count = 0;
                     g.tx_buffer_index = 0;
                     start_tx_locked(t, directed,
@@ -744,7 +785,7 @@ static void tx_task(void *arg)
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
         if (g.waiting_for_floor) {
-            if (g.state == ST_IDLE) {
+            if (g.state == ST_IDLE && !ota_manager_is_active()) {
                 g.tx_buffer_count = g.waiting_count;
                 g.tx_buffer_index = 0;
                 g.waiting_for_floor = false;
@@ -866,6 +907,10 @@ static void playback_task(void *arg)
         xSemaphoreTake(g_lock, portMAX_DELAY);
         node_state_t st = g.state;
         bool local_floor = (st == ST_CLAIMING || st == ST_TALKING);
+        /* Snapshot the configuration fields used below: the configuration path
+         * replaces the whole struct under g_lock. */
+        bool soft_muted = g_config.soft_mute != 0;
+        uint16_t volume = g_config.speaker_volume;
 
         if (st == ST_RECEIVING) {
             uint32_t age = now_ms() - g.rx_last_ms;
@@ -891,7 +936,7 @@ static void playback_task(void *arg)
 
         /* Keep the amplifier in standby outside actual received playback.
          * MAX98357A enters high-impedance standby when BCLK is stopped. */
-        bool output_allowed = !local_floor && !button_pressed(MUTE_SWITCH_GPIO) && !g_config.soft_mute &&
+        bool output_allowed = !local_floor && !button_pressed(MUTE_SWITCH_GPIO) && !soft_muted &&
                               st == ST_RECEIVING;
         if (!output_allowed)
             memset(mono, 0, sizeof(mono));
@@ -909,7 +954,6 @@ static void playback_task(void *arg)
         if (!should_output) continue;
 
         /* NVS-configured digital playback volume (/256) with safe clipping. */
-        uint16_t volume = g_config.speaker_volume;
         for (int i = 0; i < FRAME_SAMPLES; ++i) {
             int32_t v = ((int32_t)mono[i] * volume) >> 8;
             if (v > 32767)  v = 32767;

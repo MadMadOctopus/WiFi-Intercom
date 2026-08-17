@@ -16,9 +16,14 @@ typedef void (*ota_status_callback_t)(const struct sockaddr_in *destination,
 
 void ota_manager_init(ota_status_callback_t callback);
 
-/* Parses, authenticates and queues an OTA offer. The URL must be HTTP to the
- * offer sender's IPv4 address; image authentication is performed by the
- * signed manifest and streamed SHA-256 verification. */
+/* Copies an OTA offer and hands it to the OTA task, which parses and
+ * authenticates it: the manifest signature check needs more stack than a
+ * network receive task provides. Returning true therefore only means the offer
+ * was admitted; a manifest rejected later is reported through the status
+ * callback. The URL must be HTTP to the offer sender's IPv4 address; image
+ * authentication is performed by the signed manifest and streamed SHA-256
+ * verification. Only one offer is admitted at a time, and the caller may hold
+ * its own state lock across this call - it never blocks. */
 bool ota_manager_offer(const uint8_t *payload, size_t payload_len,
                        const struct sockaddr_in *source, uint32_t session,
                        const char **reject_reason);

@@ -170,7 +170,11 @@ internal sealed class ConfigureDeviceDialog : Form
         }
         Result = current with
         {
-            Alias = aliasBox.Text.Trim(),
+            // The device alias goes into the firmware's 32-byte UTF-8 field via
+            // ConfigSet; MaxLength on the TextBox caps characters, not bytes,
+            // so the byte-level cap must be applied here. An emptied box keeps
+            // the device's current alias.
+            Alias = CompanionSettings.SanitizeAlias(aliasBox.Text, current.Alias),
             SpeakerVolume = volume.Value,
             LedBrightness = brightness.Value,
             SoftMute = current.HardwareMuted ? current.SoftMute : playback.SelectedIndex == 1,

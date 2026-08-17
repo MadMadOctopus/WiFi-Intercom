@@ -257,6 +257,10 @@ internal sealed class IntercomNode : IAsyncDisposable
                 var received = await client.ReceiveAsync(stopping.Token);
                 // A single malformed or hostile datagram must never terminate
                 // discovery: anything unexpected is logged and the packet dropped.
+                // Only cancellation may escape this block; the socket-teardown
+                // exceptions of ReceiveAsync itself are raised outside it, so a
+                // handler that happens to throw SocketException or
+                // ObjectDisposedException cannot kill the receive loop.
                 try
                 {
                     if (!Protocol.TryParse(received.Buffer, Protocol.MeshIdFromText(settings.MeshId), NodeId, out var packet) || packet is null)
@@ -269,9 +273,7 @@ internal sealed class IntercomNode : IAsyncDisposable
                     else if (packet.Type == PacketType.OtaStatus)
                         ParseOtaStatus(packet, received.RemoteEndPoint);
                 }
-                catch (Exception exception) when (exception is not OperationCanceledException
-                                                   and not ObjectDisposedException
-                                                   and not SocketException)
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     DiagnosticLog.Write($"packet handling failed from {received.RemoteEndPoint}: {exception}");
                     Diagnostic?.Invoke($"Ignored unreadable packet from {received.RemoteEndPoint.Address}.");
@@ -293,9 +295,18 @@ internal sealed class IntercomNode : IAsyncDisposable
             while (!stopping.IsCancellationRequested)
             {
                 var received = await mediaClient.ReceiveAsync(stopping.Token);
-                if (!Rtp.TryParse(received.Buffer, out var packet) || packet is null)
-                    continue;
-                RtpPacketReceived?.Invoke(this, new RtpPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+                // Same containment as ReceiveLoopAsync: a throwing RTP handler
+                // must drop one packet, not end media reception for the session.
+                try
+                {
+                    if (!Rtp.TryParse(received.Buffer, out var packet) || packet is null)
+                        continue;
+                    RtpPacketReceived?.Invoke(this, new RtpPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    DiagnosticLog.Write($"rtp packet handling failed from {received.RemoteEndPoint}: {exception}");
+                }
             }
         }
         catch (OperationCanceledException) { }

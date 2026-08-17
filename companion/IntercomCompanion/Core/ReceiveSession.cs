@@ -316,18 +316,32 @@ internal sealed class ReceiveSession : IAsyncDisposable
         if (packet.Type == PacketType.Claim)
         {
             var sendBusy = false;
+            uint busySession = 0;
             lock (gate)
             {
                 if (state is IntercomState.Claiming or IntercomState.Talking)
                 {
                     if (RemoteWins(packet)) { CancelTransmitLocked(); BeginReceivingLocked(packet, eventArgs.Endpoint); }
-                    else sendBusy = true;
+                    else
+                    {
+                        // The firmware runs the claimant's remote_wins() rule on the
+                        // BUSY it receives, comparing the carried session against its
+                        // own claim. The BUSY must therefore carry the session that
+                        // actually won the arbitration: our transmit session here,
+                        // not the id of some earlier receive.
+                        sendBusy = true;
+                        busySession = transmitSession;
+                    }
                 }
                 else if (state == IntercomState.Idle) BeginReceivingLocked(packet, eventArgs.Endpoint);
-                else if (packet.SessionId != sessionId) sendBusy = true;
+                else if (packet.SessionId != sessionId)
+                {
+                    sendBusy = true;
+                    busySession = sessionId;
+                }
             }
             if (sendBusy)
-                _ = node.SendToEndpointAsync(PacketType.Busy, sessionId, 0, [], eventArgs.Endpoint);
+                _ = node.SendToEndpointAsync(PacketType.Busy, busySession, 0, [], eventArgs.Endpoint);
             return;
         }
         lock (gate)

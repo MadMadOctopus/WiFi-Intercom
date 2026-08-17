@@ -6,6 +6,11 @@ internal sealed class JitterBuffer
     // companion queue is bounded by session lifetime; stale frames are pruned.
     private const int PrebufferFrames = 20;
     private const int ReorderWindow = 12;
+    // Mirrors the firmware's JB_CAP resynchronisation. Without a forward bound
+    // any far-future sequence (a sender glitch, or frames forged with the
+    // cleartext SSRC) would be stored, growing the dictionary without limit
+    // and letting TryPop resynchronise onto a bogus playout position.
+    private const int ForwardWindow = 32;
     private readonly object gate = new();
     private readonly Dictionary<ushort, short[]> frames = [];
     // Reused so the 50 packets/s playout path allocates nothing per tick.
@@ -39,6 +44,12 @@ internal sealed class JitterBuffer
         lock (gate)
         {
             if (started && Distance(sequence, expectedSequence) < 0 || frames.ContainsKey(sequence)) return;
+            if (started && Distance(sequence, expectedSequence) >= ForwardWindow)
+            {
+                frames.Clear();
+                expectedSequence = sequence;
+                missingPolls = 0;
+            }
             frames[sequence] = pcm;
             if (!started && frames.Count >= PrebufferFrames)
             {

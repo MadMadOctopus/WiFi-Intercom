@@ -54,17 +54,21 @@ internal sealed class CompanionSettings
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    public static string SanitizeAlias(string? alias) => SanitizeAlias(alias, "Companion");
+
     // Firmware stores the alias in a 32-byte UTF-8 field (DEVICE_ALIAS_MAX) and
     // truncates with strncpy, so the cap is measured in encoded bytes and whole
-    // characters are dropped rather than splitting a code point.
-    public static string SanitizeAlias(string? alias)
+    // characters are dropped rather than splitting a code point. Every alias
+    // that travels to a device (own HELLO alias and ConfigSet device aliases)
+    // must pass through here.
+    public static string SanitizeAlias(string? alias, string fallback)
     {
-        if (string.IsNullOrWhiteSpace(alias)) return "Companion";
+        if (string.IsNullOrWhiteSpace(alias)) return fallback;
         var trimmed = alias.Trim();
         var length = trimmed.Length;
         while (length > 0 && (char.IsHighSurrogate(trimmed[length - 1]) ||
                               Encoding.UTF8.GetByteCount(trimmed.AsSpan(0, length)) > AliasMaxBytes))
             length--;
-        return length == 0 ? "Companion" : trimmed[..length];
+        return length == 0 ? fallback : trimmed[..length];
     }
 }

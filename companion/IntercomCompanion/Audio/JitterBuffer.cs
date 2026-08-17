@@ -7,8 +7,10 @@ internal sealed class JitterBuffer
     private const int PrebufferFrames = 20;
     private const int ReorderWindow = 12;
     private readonly object gate = new();
-    private readonly Dictionary<uint, short[]> frames = [];
-    private uint expectedSequence;
+    private readonly Dictionary<ushort, short[]> frames = [];
+    // Reused so the 50 packets/s playout path allocates nothing per tick.
+    private readonly List<ushort> staleKeys = [];
+    private ushort expectedSequence;
     private bool started;
     private short[]? lastFrame;
     private int missingPolls;
@@ -18,6 +20,7 @@ internal sealed class JitterBuffer
         lock (gate)
         {
             frames.Clear();
+            staleKeys.Clear();
             expectedSequence = 0;
             started = false;
             lastFrame = null;
@@ -25,15 +28,21 @@ internal sealed class JitterBuffer
         }
     }
 
-    public void Push(uint sequence, short[] pcm)
+    // RTP sequence numbers are 16-bit and wrap to zero after ~21.8 minutes of
+    // continuous speech, so ordering must come from the signed 16-bit
+    // difference and never from plain magnitude comparison.
+    private static int Distance(ushort sequence, ushort reference) =>
+        (short)(ushort)(sequence - reference);
+
+    public void Push(ushort sequence, short[] pcm)
     {
         lock (gate)
         {
-            if (started && sequence < expectedSequence || frames.ContainsKey(sequence)) return;
+            if (started && Distance(sequence, expectedSequence) < 0 || frames.ContainsKey(sequence)) return;
             frames[sequence] = pcm;
             if (!started && frames.Count >= PrebufferFrames)
             {
-                expectedSequence = frames.Keys.Min();
+                expectedSequence = EarliestSequenceLocked();
                 started = true;
                 missingPolls = 0;
             }
@@ -66,8 +75,8 @@ internal sealed class JitterBuffer
             // the expected frame before treating it as genuinely lost.
             if (frames.Count > 0)
             {
-                var nextSequence = frames.Keys.Min();
-                if (nextSequence > expectedSequence)
+                var nextSequence = EarliestSequenceLocked();
+                if (Distance(nextSequence, expectedSequence) > 0)
                     expectedSequence = nextSequence;
             }
             else if (++missingPolls >= 4)
@@ -75,8 +84,7 @@ internal sealed class JitterBuffer
                 expectedSequence++;
                 missingPolls = 0;
             }
-            foreach (var stale in frames.Keys.Where(key => key + ReorderWindow < expectedSequence).ToArray())
-                frames.Remove(stale);
+            PruneStaleLocked();
             if (lastFrame is null)
             {
                 pcm = new short[ImaAdpcm.SamplesPerFrame];
@@ -89,5 +97,28 @@ internal sealed class JitterBuffer
             pcm = concealed;
             return true;
         }
+    }
+
+    // Wrap-aware minimum over the buffered window, which is always far smaller
+    // than half the 16-bit sequence space.
+    private ushort EarliestSequenceLocked()
+    {
+        ushort earliest = 0;
+        var first = true;
+        foreach (var key in frames.Keys)
+        {
+            if (!first && Distance(key, earliest) >= 0) continue;
+            earliest = key;
+            first = false;
+        }
+        return earliest;
+    }
+
+    private void PruneStaleLocked()
+    {
+        staleKeys.Clear();
+        foreach (var key in frames.Keys)
+            if (Distance(key, expectedSequence) < -ReorderWindow) staleKeys.Add(key);
+        foreach (var key in staleKeys) frames.Remove(key);
     }
 }

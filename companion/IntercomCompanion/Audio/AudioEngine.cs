@@ -9,6 +9,8 @@ internal sealed class AudioEngine : IDisposable
     public const int SampleRate = 16000;
     private readonly object captureGate = new();
     private readonly byte[] captureRemainder = new byte[ImaAdpcm.SamplesPerFrame * sizeof(short)];
+    private readonly object playbackGate = new();
+    private readonly byte[] playbackBytes = new byte[ImaAdpcm.SamplesPerFrame * sizeof(short)];
     private readonly Channel<short[]> capturedFrames = Channel.CreateBounded<short[]>(
         new BoundedChannelOptions(32) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
     private readonly WaveFormat format = new(SampleRate, 16, 1);
@@ -108,13 +110,18 @@ internal sealed class AudioEngine : IDisposable
         captureStarted = false;
     }
 
+    // BufferedWaveProvider copies the samples into its own ring buffer before
+    // returning, so a single reusable staging buffer (guarded because callers
+    // are background tasks) avoids a 640-byte allocation 50 times a second.
     public void EnqueuePlayback(short[] pcm)
     {
         if (pcm.Length != ImaAdpcm.SamplesPerFrame) return;
         if (localPlaybackMuted) return;
-        var bytes = new byte[pcm.Length * sizeof(short)];
-        Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
-        output.AddSamples(bytes, 0, bytes.Length);
+        lock (playbackGate)
+        {
+            Buffer.BlockCopy(pcm, 0, playbackBytes, 0, playbackBytes.Length);
+            output.AddSamples(playbackBytes, 0, playbackBytes.Length);
+        }
         Interlocked.Increment(ref queuedPlaybackFrames);
     }
 

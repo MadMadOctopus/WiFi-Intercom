@@ -36,6 +36,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private readonly object gate = new();
     private readonly CancellationTokenSource stopping = new();
     private readonly Queue<short[]> heldFrames = [];
+    private readonly byte[] recordingBytes = new byte[ImaAdpcm.SamplesPerFrame * sizeof(short)];
     private Task? decodeTask;
     private Task? playbackTask;
     private Task? captureTask;
@@ -333,6 +334,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         {
             if (packet.Type == PacketType.Busy && state == IntercomState.Claiming)
             {
+                if (!IsBusyForOurClaimLocked(packet, eventArgs.Endpoint)) return;
                 CancelTransmitLocked();
                 SetStateLocked(IntercomState.Idle);
                 Diagnostic?.Invoke("Another peer owns the floor.");
@@ -354,6 +356,20 @@ internal sealed class ReceiveSession : IAsyncDisposable
             Interlocked.Increment(ref audioPacketCount);
             audioPackets.Writer.TryWrite(eventArgs);
         }
+    }
+
+    // A BUSY carries the responder's own floor session (or zero while it is
+    // busy with OTA), never our claim id, so it cannot be matched by session.
+    // Accept it only from a node this claim was actually addressed to and from
+    // that node's known address, which stops an unrelated LAN host from
+    // denying PTT with one forged datagram.
+    private bool IsBusyForOurClaimLocked(IntercomPacket packet, IPEndPoint source)
+    {
+        if (packet.SenderId == node.NodeId) return false;
+        foreach (var peer in transmitPeers)
+            if (peer.NodeId == packet.SenderId && peer.Endpoint.Address.Equals(source.Address)) return true;
+        DiagnosticLog.Write($"busy ignored sender={packet.SenderId:x8} source={source} session={transmitSession:x8}");
+        return false;
     }
 
     private bool RemoteWins(IntercomPacket packet) =>
@@ -461,12 +477,14 @@ internal sealed class ReceiveSession : IAsyncDisposable
         else SetStateLocked(IntercomState.Idle);
     }
 
+    // WaveFileWriter copies out of the buffer before returning, and this runs
+    // under the session lock, so one shared buffer replaces a 640-byte
+    // allocation on every 20 ms playout tick.
     private void WriteRecordingLocked(short[] pcm)
     {
-        if (recording is null) return;
-        var bytes = new byte[pcm.Length * sizeof(short)];
-        Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
-        recording.Write(bytes, 0, bytes.Length);
+        if (recording is null || pcm.Length != ImaAdpcm.SamplesPerFrame) return;
+        Buffer.BlockCopy(pcm, 0, recordingBytes, 0, recordingBytes.Length);
+        recording.Write(recordingBytes, 0, recordingBytes.Length);
     }
 
     private void ResetStatisticsLocked()

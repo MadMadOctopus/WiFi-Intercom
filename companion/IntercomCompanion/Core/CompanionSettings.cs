@@ -1,13 +1,17 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace IntercomCompanion.Core;
 
 internal sealed class CompanionSettings
 {
+    // Matches DEVICE_ALIAS_MAX in the firmware's device_config.h.
+    private const int AliasMaxBytes = 32;
+
     public uint NodeId { get; set; }
     public string MeshId { get; set; } = "MESH";
-    public string Alias { get; set; } = Environment.MachineName[..Math.Min(32, Environment.MachineName.Length)];
+    public string Alias { get; set; } = SanitizeAlias(Environment.MachineName);
     public string? RecordingDeviceName { get; set; }
     public string? PlaybackDeviceId { get; set; }
     public bool RunInNotificationArea { get; set; } = true;
@@ -50,7 +54,17 @@ internal sealed class CompanionSettings
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
 
-    public static string SanitizeAlias(string? alias) => string.IsNullOrWhiteSpace(alias)
-        ? "Companion"
-        : alias.Trim()[..Math.Min(32, alias.Trim().Length)];
+    // Firmware stores the alias in a 32-byte UTF-8 field (DEVICE_ALIAS_MAX) and
+    // truncates with strncpy, so the cap is measured in encoded bytes and whole
+    // characters are dropped rather than splitting a code point.
+    public static string SanitizeAlias(string? alias)
+    {
+        if (string.IsNullOrWhiteSpace(alias)) return "Companion";
+        var trimmed = alias.Trim();
+        var length = trimmed.Length;
+        while (length > 0 && (char.IsHighSurrogate(trimmed[length - 1]) ||
+                              Encoding.UTF8.GetByteCount(trimmed.AsSpan(0, length)) > AliasMaxBytes))
+            length--;
+        return length == 0 ? "Companion" : trimmed[..length];
+    }
 }

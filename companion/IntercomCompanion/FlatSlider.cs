@@ -51,7 +51,7 @@ internal sealed class FlatSlider : Control
         var y = Height / 2;
         var fraction = Maximum == Minimum ? 0f : (float)(Value - Minimum) / (Maximum - Minimum);
         var x = left + (int)Math.Round((right - left) * fraction);
-        using var track = new Pen(Color.FromArgb(226, 229, 232), 3);
+        using var track = new Pen(UiStyles.SliderTrack, 3);
         using var fill = new Pen(AccentColor, 3);
         eventArgs.Graphics.DrawLine(track, left, y, right, y);
         eventArgs.Graphics.DrawLine(fill, left, y, x, y);

@@ -48,7 +48,7 @@ internal sealed class ConfigureDeviceDialog : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         BackColor = UiStyles.White;
-        Font = new Font("Segoe UI", 9f);
+        Font = UiStyles.SecondaryFont;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -99,7 +99,7 @@ internal sealed class ConfigureDeviceDialog : Form
             AutoSize = true, MaximumSize = new Size(484, 0), Font = UiStyles.SecondaryFont, ForeColor = UiStyles.DeepBlue,
             BackColor = UiStyles.BlueTint, Padding = new Padding(12, 9, 12, 9), Margin = new Padding(0, 0, 0, 6),
         };
-        intro.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(207, 224, 243)); e.Graphics.DrawRectangle(pen, 0, 0, intro.Width - 1, intro.Height - 1); };
+        intro.Paint += (_, e) => { using var pen = new Pen(UiStyles.BlueBorder); e.Graphics.DrawRectangle(pen, 0, 0, intro.Width - 1, intro.Height - 1); };
         body.Controls.Add(intro);
 
         var form = UiKit.FormGrid(150);
@@ -131,17 +131,17 @@ internal sealed class ConfigureDeviceDialog : Form
         var warning = new Label
         {
             Text = "Wi-Fi credentials, ring brightness, button mapping, ring centre and device ID make the device restart after it acknowledges. Alias and volume apply immediately.",
-            AutoSize = true, MaximumSize = new Size(484, 0), Font = UiStyles.SecondaryFont, ForeColor = Color.FromArgb(107, 83, 0),
+            AutoSize = true, MaximumSize = new Size(484, 0), Font = UiStyles.SecondaryFont, ForeColor = UiStyles.AmberInk,
             BackColor = UiStyles.AmberTint, Padding = new Padding(12, 10, 12, 10), Margin = new Padding(0, 16, 0, 0),
         };
-        warning.Paint += (_, e) => { using var pen = new Pen(Color.FromArgb(232, 217, 168)); e.Graphics.DrawRectangle(pen, 0, 0, warning.Width - 1, warning.Height - 1); };
+        warning.Paint += (_, e) => { using var pen = new Pen(UiStyles.AmberBorder); e.Graphics.DrawRectangle(pen, 0, 0, warning.Width - 1, warning.Height - 1); };
         body.Controls.Add(warning);
         return body;
     }
 
     private Control BuildFooter()
     {
-        var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, RowCount = 1, Width = 520, Height = 60, BackColor = Color.FromArgb(247, 248, 249), Padding = new Padding(18, 0, 18, 0), Margin = Padding.Empty };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, RowCount = 1, Width = 520, Height = 60, BackColor = UiStyles.DialogFooter, Padding = new Padding(18, 0, 18, 0), Margin = Padding.Empty };
         footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -185,7 +185,11 @@ internal sealed class ConfigureDeviceDialog : Form
         }
         Result = current with
         {
-            Alias = aliasBox.Text.Trim(),
+            // The device alias goes into the firmware's 32-byte UTF-8 field via
+            // ConfigSet; MaxLength on the TextBox caps characters, not bytes,
+            // so the byte-level cap must be applied here. An emptied box keeps
+            // the device's current alias.
+            Alias = CompanionSettings.SanitizeAlias(aliasBox.Text, current.Alias),
             SpeakerVolume = volume.Value,
             LedBrightness = brightness.Value,
             SoftMute = current.HardwareMuted ? current.SoftMute : playback.SelectedIndex == 1,

@@ -38,7 +38,7 @@ internal sealed class DeviceCard : Panel
         silence.AutoSize = false;
         UiStyles.StyleButton(more, Padding.Empty);
         more.AutoSize = false;
-        more.Font = new Font("Segoe UI", 12f);
+        more.Font = UiStyles.CardOverflow;
         more.Padding = Padding.Empty;
 
         var rows = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty, Padding = Padding.Empty };
@@ -108,17 +108,17 @@ internal sealed class DeviceCard : Panel
         updating = true;
         var previousAccent = accent;
         accent = value.IsTalking ? UiStyles.Blue
-            : value.HardwareMuted || value.ProtocolVersion is null or 1 ? UiStyles.Amber
+            : value.HardwareMuted || value.IsLegacy ? UiStyles.Amber
             : value.SoftMuted ? UiStyles.Body : UiStyles.Green;
         alias.Text = value.Alias;
         var state = value.IsTalking ? "SPEAKING" : value.HardwareMuted ? "MUTED"
-            : value.SoftMuted ? "SOFT MUTED" : value.ProtocolVersion is null or 1 ? "LEGACY" : "IDLE";
+            : value.SoftMuted ? "SOFT MUTED" : value.IsLegacy ? "LEGACY" : "IDLE";
         badge.Text = state;
         badge.BackColor = accent;
         details.Text = $"{value.NodeId:x8} · {value.Endpoint.Address} · {value.FirmwareVersion} · {(value.ProtocolVersion is null ? "legacy" : $"p{value.ProtocolVersion}")}";
         muteMarker.BackColor = value.IsTalking ? UiStyles.Blue : value.HardwareMuted ? UiStyles.Amber
-            : value.SoftMuted ? UiStyles.Body : value.SupportsMuteReporting ? UiStyles.Green : Color.FromArgb(201, 204, 208);
-        muteNote.ForeColor = value.IsTalking ? UiStyles.Blue : value.HardwareMuted ? Color.FromArgb(107, 83, 0)
+            : value.SoftMuted ? UiStyles.Body : value.SupportsMuteReporting ? UiStyles.Green : UiStyles.OfflineDot;
+        muteNote.ForeColor = value.IsTalking ? UiStyles.Blue : value.HardwareMuted ? UiStyles.AmberInk
             : value.SoftMuted ? UiStyles.Body : UiStyles.Muted;
         muteNote.Text = value.IsTalking ? "Holding the floor" : value.HardwareMuted ? "Mute slider on at the device"
             : value.SoftMuted ? "Soft muted from here" : value.SupportsMuteReporting ? "Playing received audio"
@@ -128,7 +128,7 @@ internal sealed class DeviceCard : Panel
         silence.Enabled = !pttDisabled && value.SupportsMuteReporting && !value.HardwareMuted;
         silence.Text = value.SoftMuted ? "Silenced" : "Silence";
         silence.ForeColor = !silence.Enabled ? UiStyles.Disabled : value.SoftMuted ? UiStyles.White : UiStyles.Body;
-        silence.BackColor = !silence.Enabled ? Color.FromArgb(242, 244, 245) : value.SoftMuted ? UiStyles.Body : UiStyles.White;
+        silence.BackColor = !silence.Enabled ? UiStyles.HairRule : value.SoftMuted ? UiStyles.Body : UiStyles.White;
         silence.FlatAppearance.BorderColor = !silence.Enabled ? UiStyles.Border : UiStyles.ControlBorder;
         silence.AccessibleDescription = value.HardwareMuted ? "Unavailable while the physical mute slider is on" : null;
 
@@ -153,18 +153,14 @@ internal sealed class DeviceCard : Panel
     {
         base.OnPaint(eventArgs);
         var border = peer?.IsTalking == true
-            ? Blend(UiStyles.Border, UiStyles.Blue, (MathF.Sin(pulse) + 1f) / 2f)
+            ? UiKit.Blend(UiStyles.Border, UiStyles.Blue, (MathF.Sin(pulse) + 1f) / 2f)
             : UiStyles.Border;
         using var pen = new Pen(border);
         eventArgs.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
         using var accentBrush = new SolidBrush(accent);
         eventArgs.Graphics.FillRectangle(accentBrush, 0, 0, 3, Height);
         if (peer?.IsTalking != true) return;
-        using var halo = new Pen(Color.FromArgb(70, UiStyles.Blue), 2);
+        using var halo = new Pen(UiStyles.TalkingHalo, 2);
         eventArgs.Graphics.DrawRectangle(halo, 1, 1, Width - 3, Height - 3);
     }
-
-    private static Color Blend(Color from, Color to, float amount) => Color.FromArgb(
-        (int)(from.R + (to.R - from.R) * amount), (int)(from.G + (to.G - from.G) * amount),
-        (int)(from.B + (to.B - from.B) * amount));
 }

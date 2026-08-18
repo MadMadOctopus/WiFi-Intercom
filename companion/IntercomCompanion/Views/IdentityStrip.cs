@@ -29,7 +29,7 @@ internal sealed class IdentityStrip : UserControl
         Padding = new Padding(20, 0, 20, 0);
 
         localMute.FlatAppearance.BorderColor = UiStyles.ControlBorder;
-        localMute.FlatAppearance.CheckedBackColor = Color.FromArgb(242, 244, 245);
+        localMute.FlatAppearance.CheckedBackColor = UiStyles.HairRule;
         localMute.CheckedChanged += (_, _) => LocalMuteToggled?.Invoke(this, localMute.Checked);
         metaPicker.LinkClicked += (_, _) => ShowTargetMenu();
 

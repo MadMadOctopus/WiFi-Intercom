@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -14,6 +15,9 @@ internal sealed record GroupMembership(string Code, string? Name)
 
 internal sealed class CompanionSettings
 {
+    // Matches DEVICE_ALIAS_MAX in the firmware's device_config.h.
+    private const int AliasMaxBytes = 32;
+
     public uint NodeId { get; set; }
 
     /// <summary>Groups this companion has joined, in display order. A companion
@@ -48,7 +52,7 @@ internal sealed class CompanionSettings
         set => BroadcastTargetCode = value;
     }
 
-    public string Alias { get; set; } = Environment.MachineName[..Math.Min(32, Environment.MachineName.Length)];
+    public string Alias { get; set; } = SanitizeAlias(Environment.MachineName);
     public string? RecordingDeviceName { get; set; }
     public string? PlaybackDeviceId { get; set; }
     public bool RunInNotificationArea { get; set; } = true;
@@ -159,7 +163,21 @@ internal sealed class CompanionSettings
         if (BroadcastTargetCode == null) BroadcastTargetCode = "";
     }
 
-    public static string SanitizeAlias(string? alias) => string.IsNullOrWhiteSpace(alias)
-        ? "Companion"
-        : alias.Trim()[..Math.Min(32, alias.Trim().Length)];
+    public static string SanitizeAlias(string? alias) => SanitizeAlias(alias, "Companion");
+
+    // Firmware stores the alias in a 32-byte UTF-8 field (DEVICE_ALIAS_MAX) and
+    // truncates with strncpy, so the cap is measured in encoded bytes and whole
+    // characters are dropped rather than splitting a code point. Every alias
+    // that travels to a device (own HELLO alias and ConfigSet device aliases)
+    // must pass through here.
+    public static string SanitizeAlias(string? alias, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(alias)) return fallback;
+        var trimmed = alias.Trim();
+        var length = trimmed.Length;
+        while (length > 0 && (char.IsHighSurrogate(trimmed[length - 1]) ||
+                              Encoding.UTF8.GetByteCount(trimmed.AsSpan(0, length)) > AliasMaxBytes))
+            length--;
+        return length == 0 ? fallback : trimmed[..length];
+    }
 }

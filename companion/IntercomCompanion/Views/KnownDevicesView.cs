@@ -88,8 +88,8 @@ internal sealed class KnownDevicesView : UserControl
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        row.Controls.Add(new Panel { Size = new Size(6, 6), BackColor = Color.FromArgb(201, 204, 208), Anchor = AnchorStyles.Left }, 0, 0);
-        row.Controls.Add(new Label { Text = device.Alias, AutoEllipsis = true, AutoSize = false, Dock = DockStyle.Fill, Font = new Font(UiStyles.SecondaryFont, FontStyle.Bold), ForeColor = UiStyles.Ink, TextAlign = ContentAlignment.MiddleLeft }, 1, 0);
+        row.Controls.Add(new Panel { Size = new Size(6, 6), BackColor = UiStyles.OfflineDot, Anchor = AnchorStyles.Left }, 0, 0);
+        row.Controls.Add(new Label { Text = device.Alias, AutoEllipsis = true, AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.SecondaryBold, ForeColor = UiStyles.Ink, TextAlign = ContentAlignment.MiddleLeft }, 1, 0);
         row.Controls.Add(new Label { Text = $"{device.NodeId:x8} · last at {device.LastAddress}", AutoSize = false, Dock = DockStyle.Fill, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, TextAlign = ContentAlignment.MiddleLeft }, 2, 0);
         row.Controls.Add(new Label { Text = HumanAge(DateTimeOffset.UtcNow - device.LastSeen), AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Muted, Anchor = AnchorStyles.Left }, 3, 0);
         var remove = UiKit.PlainButton("Remove…");

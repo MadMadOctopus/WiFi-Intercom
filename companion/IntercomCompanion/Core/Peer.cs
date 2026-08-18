@@ -7,6 +7,9 @@ internal sealed record Peer(uint NodeId, IPEndPoint Endpoint, string Alias,
     string GroupCode = "MESH")
 {
     public bool IsProtocolCompatible => ProtocolVersion is null || ProtocolVersion is 1 or 2;
+    public bool IsLegacy => ProtocolVersion is null or 1;
+    // OTA requires an exact protocol version match; SupportsOta alone admits incompatible peers.
+    public bool IsOtaEligible => ProtocolVersion == Protocol.Version && SupportsOta;
     public bool SupportsOta => (Capabilities & Protocol.OtaCapability) != 0;
     public bool SupportsMuteReporting => ProtocolVersion >= 2;
     public bool HardwareMuted => (HelloFlags & Protocol.HelloFlagHardwareMuted) != 0;

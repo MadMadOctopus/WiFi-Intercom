@@ -18,7 +18,7 @@ internal static class ConfirmFirmwareUpdateDialog
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
             BackColor = UiStyles.White,
-            Font = new Font("Segoe UI", 9f),
+            Font = UiStyles.SecondaryFont,
             AutoScaleMode = AutoScaleMode.Dpi,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -38,7 +38,7 @@ internal static class ConfirmFirmwareUpdateDialog
         var warning = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 500, BackColor = UiStyles.AmberTint, Padding = new Padding(14, 12, 14, 12), Margin = Padding.Empty };
         warning.Paint += (_, e) =>
         {
-            using var pen = new Pen(Color.FromArgb(232, 217, 168));
+            using var pen = new Pen(UiStyles.AmberBorder);
             e.Graphics.DrawRectangle(pen, 0, 0, warning.Width - 1, warning.Height - 1);
             using var bar = new SolidBrush(UiStyles.Amber);
             e.Graphics.FillRectangle(bar, 0, 0, 4, warning.Height);
@@ -50,14 +50,14 @@ internal static class ConfirmFirmwareUpdateDialog
             "· Windows may ask once to allow the temporary local firmware server on a private network.",
             "· A device that does not report healthy rolls back to its current firmware by itself.",
         })
-            warning.Controls.Add(new Label { Text = consequence, AutoSize = true, MaximumSize = new Size(468, 0), Font = UiStyles.BodyFont, ForeColor = Color.FromArgb(107, 83, 0), Margin = new Padding(0, 0, 0, 4) });
+            warning.Controls.Add(new Label { Text = consequence, AutoSize = true, MaximumSize = new Size(468, 0), Font = UiStyles.BodyFont, ForeColor = UiStyles.AmberInk, Margin = new Padding(0, 0, 0, 4) });
         body.Controls.Add(warning);
 
         body.Controls.Add(new Label { Text = "In order:", AutoSize = true, Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Secondary, Margin = new Padding(0, 16, 0, 0) });
         foreach (var target in targets)
         {
             var row = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
-            row.Controls.Add(new Label { Text = target.Alias, AutoSize = true, Font = new Font(UiStyles.BodyFont, FontStyle.Bold), ForeColor = UiStyles.Ink, Margin = Padding.Empty });
+            row.Controls.Add(new Label { Text = target.Alias, AutoSize = true, Font = UiStyles.BodyBold, ForeColor = UiStyles.Ink, Margin = Padding.Empty });
             row.Controls.Add(new Label { Text = $"{target.NodeId:x8} · {target.FromVersion} → {target.ToVersion}", AutoSize = true, Font = UiStyles.BodyFont, ForeColor = UiStyles.Secondary, Margin = new Padding(8, 0, 0, 0) });
             body.Controls.Add(row);
         }
@@ -65,7 +65,7 @@ internal static class ConfirmFirmwareUpdateDialog
         var acknowledge = new CheckBox { Text = "I understand the devices will reboot and be unavailable", AutoSize = true, Font = UiStyles.BodyFont, Margin = new Padding(0, 16, 0, 0) };
         body.Controls.Add(acknowledge);
 
-        var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, RowCount = 1, Width = 540, Height = 60, BackColor = Color.FromArgb(247, 248, 249), Padding = new Padding(20, 0, 20, 0), Margin = Padding.Empty };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, RowCount = 1, Width = 540, Height = 60, BackColor = UiStyles.DialogFooter, Padding = new Padding(20, 0, 20, 0), Margin = Padding.Empty };
         footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));

@@ -90,3 +90,7 @@ The p2 protocol changes (`IH3` HELLO, `soft_mute`, `hw_muted`, `mesh_id`,
 `device_id` in NVS) are specified in `docs/design/companion-redesign-spec.md`
 §2. A p2 node must stay interoperable with p1 nodes for audio and discovery.
 Do not change the codec, frame size or ports.
+
+## Machine-local instructions
+
+IMPORTANT: Also read `CLAUDE.local.md` (machine-local, not committed) - it contains private values (account name, profile URL, local-only notes) that must NEVER be committed or pushed.

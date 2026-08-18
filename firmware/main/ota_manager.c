@@ -25,6 +25,7 @@
 #define OTA_VERSION_MAX 31
 #define OTA_SIGNATURE_MAX 128
 #define OTA_DOWNLOAD_BUFFER 1024
+#define OTA_OFFER_MAX 320
 
 static const char *TAG = "ota";
 
@@ -39,8 +40,24 @@ typedef struct {
     uint32_t session;
 } ota_offer_t;
 
+/* The raw offer as it arrived, copied off the receiving task's buffer. Parsing
+ * and signature verification happen on ota_task, which owns enough stack for
+ * mbedtls; the receiving task only performs this copy. */
+typedef struct {
+    struct sockaddr_in source;
+    uint32_t session;
+    uint16_t payload_len;
+    uint8_t payload[OTA_OFFER_MAX];
+} ota_request_t;
+
 static QueueHandle_t s_queue;
 static ota_status_callback_t s_status;
+static ota_claim_floor_t s_claim_floor;
+/* s_pending guards the staging slot and queue (set from the moment an offer is
+ * admitted until ota_task disposes of it). s_active means an authenticated
+ * update is running and gates PTT; it is set only via ota_manager_set_active()
+ * from the claim callback, after the signature has verified. */
+static volatile bool s_pending;
 static volatile bool s_active;
 static volatile uint32_t s_error_until_ms;
 
@@ -179,99 +196,130 @@ static bool sha_matches(const uint8_t digest[32], const char *expected)
     return true;
 }
 
-static void ota_task(void *arg)
+static void run_update(const ota_offer_t *offer)
 {
-    ota_offer_t offer;
-    while (xQueueReceive(s_queue, &offer, portMAX_DELAY) == pdTRUE) {
-        const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
-        esp_ota_handle_t handle = 0;
-        esp_http_client_handle_t client = NULL;
-        bool began = false;
-        bool success = false;
-        uint32_t received = 0;
-        uint8_t buffer[OTA_DOWNLOAD_BUFFER];
-        mbedtls_sha256_context sha;
-        mbedtls_sha256_init(&sha);
+    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
+    esp_ota_handle_t handle = 0;
+    esp_http_client_handle_t client = NULL;
+    bool began = false;
+    bool success = false;
+    uint32_t received = 0;
+    uint8_t buffer[OTA_DOWNLOAD_BUFFER];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
 
-        report(&offer, "accepted", 0, "Downloading firmware");
-        /* Do not erase the complete 1.5 MiB slot before opening the HTTP
-         * connection. On the C3 that long, uninterrupted preparation caused
-         * the watchdog to reset the unit before the first download request.
-         * The image arrives in order, so ESP-IDF can safely erase each 4 KiB
-         * sector immediately before its first write instead. */
-        if (!partition || esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &handle) != ESP_OK) {
-            report(&offer, "failed", 0, "Cannot open inactive OTA slot");
+    report(offer, "accepted", 0, "Downloading firmware");
+    /* Do not erase the complete 1.5 MiB slot before opening the HTTP
+     * connection. On the C3 that long, uninterrupted preparation caused
+     * the watchdog to reset the unit before the first download request.
+     * The image arrives in order, so ESP-IDF can safely erase each 4 KiB
+     * sector immediately before its first write instead. */
+    if (!partition || esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &handle) != ESP_OK) {
+        report(offer, "failed", 0, "Cannot open inactive OTA slot");
+        goto complete;
+    }
+    began = true;
+    if (mbedtls_sha256_starts(&sha, 0) != 0) {
+        report(offer, "failed", 0, "SHA-256 initialisation failed");
+        goto complete;
+    }
+    esp_http_client_config_t config = {
+        .url = offer->url, .timeout_ms = 10000, .buffer_size = OTA_DOWNLOAD_BUFFER,
+        .buffer_size_tx = 256, .disable_auto_redirect = true, .keep_alive_enable = false,
+    };
+    client = esp_http_client_init(&config);
+    if (!client || esp_http_client_open(client, 0) != ESP_OK) {
+        report(offer, "failed", 0, "Firmware download unavailable");
+        goto complete;
+    }
+    int64_t content_length = esp_http_client_fetch_headers(client);
+    if (esp_http_client_get_status_code(client) != 200 ||
+        content_length != (int64_t)offer->size) {
+        report(offer, "failed", 0, "Firmware download unavailable");
+        goto complete;
+    }
+    int last_progress = -1;
+    while (received < offer->size) {
+        int read = esp_http_client_read(client, (char *)buffer,
+                                         (int)((offer->size - received) < sizeof(buffer)
+                                             ? (offer->size - received) : sizeof(buffer)));
+        if (read <= 0 || esp_ota_write(handle, buffer, read) != ESP_OK ||
+            mbedtls_sha256_update(&sha, buffer, read) != 0) {
+            report(offer, "failed", (int)(received * 100 / offer->size), "Download write failed");
             goto complete;
         }
-        began = true;
-        if (mbedtls_sha256_starts(&sha, 0) != 0) {
-            report(&offer, "failed", 0, "SHA-256 initialisation failed");
-            goto complete;
+        received += (uint32_t)read;
+        int progress = (int)(received * 100 / offer->size);
+        if (progress >= last_progress + 5 || progress == 100) {
+            last_progress = progress;
+            report(offer, "downloading", progress, "Writing inactive firmware slot");
         }
-        esp_http_client_config_t config = {
-            .url = offer.url, .timeout_ms = 10000, .buffer_size = OTA_DOWNLOAD_BUFFER,
-            .buffer_size_tx = 256, .disable_auto_redirect = true, .keep_alive_enable = false,
-        };
-        client = esp_http_client_init(&config);
-        if (!client || esp_http_client_open(client, 0) != ESP_OK) {
-            report(&offer, "failed", 0, "Firmware download unavailable");
-            goto complete;
-        }
-        int64_t content_length = esp_http_client_fetch_headers(client);
-        if (esp_http_client_get_status_code(client) != 200 ||
-            content_length != (int64_t)offer.size) {
-            report(&offer, "failed", 0, "Firmware download unavailable");
-            goto complete;
-        }
-        int last_progress = -1;
-        while (received < offer.size) {
-            int read = esp_http_client_read(client, (char *)buffer,
-                                             (int)((offer.size - received) < sizeof(buffer)
-                                                 ? (offer.size - received) : sizeof(buffer)));
-            if (read <= 0 || esp_ota_write(handle, buffer, read) != ESP_OK ||
-                mbedtls_sha256_update(&sha, buffer, read) != 0) {
-                report(&offer, "failed", (int)(received * 100 / offer.size), "Download write failed");
-                goto complete;
-            }
-            received += (uint32_t)read;
-            int progress = (int)(received * 100 / offer.size);
-            if (progress >= last_progress + 5 || progress == 100) {
-                last_progress = progress;
-                report(&offer, "downloading", progress, "Writing inactive firmware slot");
-            }
-        }
-        uint8_t digest[32];
-        if (mbedtls_sha256_finish(&sha, digest) != 0 || !sha_matches(digest, offer.sha256)) {
-            report(&offer, "failed", 100, "Firmware SHA-256 mismatch");
-            goto complete;
-        }
-        if (esp_ota_end(handle) != ESP_OK || esp_ota_set_boot_partition(partition) != ESP_OK) {
-            report(&offer, "failed", 100, "Firmware image validation failed");
-            goto complete;
-        }
-        began = false; /* esp_ota_end owns the handle from here. */
-        success = true;
-        report(&offer, "rebooting", 100, "Verified; rebooting into new firmware");
+    }
+    uint8_t digest[32];
+    if (mbedtls_sha256_finish(&sha, digest) != 0 || !sha_matches(digest, offer->sha256)) {
+        report(offer, "failed", 100, "Firmware SHA-256 mismatch");
+        goto complete;
+    }
+    if (esp_ota_end(handle) != ESP_OK || esp_ota_set_boot_partition(partition) != ESP_OK) {
+        report(offer, "failed", 100, "Firmware image validation failed");
+        goto complete;
+    }
+    began = false; /* esp_ota_end owns the handle from here. */
+    success = true;
+    report(offer, "rebooting", 100, "Verified; rebooting into new firmware");
 
 complete:
-        if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
-        mbedtls_sha256_free(&sha);
-        if (began) esp_ota_abort(handle);
-        if (!success) {
+    if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
+    mbedtls_sha256_free(&sha);
+    if (began) esp_ota_abort(handle);
+    if (!success) {
+        s_error_until_ms = now_ms() + 1500;
+        s_active = false;
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+
+/* Verification runs here, not in the caller: mbedtls base64, key parsing and
+ * signature checking need far more stack than the network receive task owns.
+ * Only an offer that passes the full parse and signature check may claim the
+ * floor; anything else merely releases the staging slot, so a spray of forged
+ * offers never suppresses PTT. */
+static void ota_task(void *arg)
+{
+    ota_request_t request;
+    while (xQueueReceive(s_queue, &request, portMAX_DELAY) == pdTRUE) {
+        ota_offer_t offer = {0};
+        const char *reason = "invalid offer";
+        if (!parse_offer(request.payload, request.payload_len, &request.source,
+                         request.session, &offer, &reason)) {
+            if (s_status)
+                s_status(&request.source, request.session, "rejected", 0, reason);
             s_error_until_ms = now_ms() + 1500;
-            s_active = false;
+            s_pending = false;
+            continue;
         }
-        if (success) {
-            vTaskDelay(pdMS_TO_TICKS(300));
-            esp_restart();
+        if (!s_claim_floor || !s_claim_floor()) {
+            /* The floor became busy while the signature was being checked.
+             * The companion's offer is idempotent and retried, so rejecting
+             * here is safe. */
+            if (s_status)
+                s_status(&request.source, request.session, "rejected", 0, "Floor is active");
+            s_error_until_ms = now_ms() + 1500;
+            s_pending = false;
+            continue;
         }
+        run_update(&offer);   /* returns only when the update failed */
+        s_pending = false;
     }
 }
 
-void ota_manager_init(ota_status_callback_t callback)
+void ota_manager_init(ota_status_callback_t callback, ota_claim_floor_t claim_floor)
 {
     s_status = callback;
-    s_queue = xQueueCreate(1, sizeof(ota_offer_t));
+    s_claim_floor = claim_floor;
+    s_queue = xQueueCreate(1, sizeof(ota_request_t));
     configASSERT(s_queue);
     xTaskCreate(ota_task, "ota", 7168, NULL, 3, NULL);
 }
@@ -280,22 +328,28 @@ bool ota_manager_offer(const uint8_t *payload, size_t payload_len,
                        const struct sockaddr_in *source, uint32_t session,
                        const char **reject_reason)
 {
-    ota_offer_t offer = {0};
-    const char *reason = "OTA busy";
-    if (s_active) {
-        if (reject_reason) *reject_reason = reason;
+    /* Staging slot rather than a local: s_pending makes this function
+     * single-entry, and the caller's task stack stays untouched. */
+    static ota_request_t staged;
+    if (payload_len == 0 || payload_len > OTA_OFFER_MAX) {
+        if (reject_reason) *reject_reason = "invalid offer";
         return false;
     }
-    /* Claim the OTA state before doing signature work so a simultaneous PTT
-     * cannot begin between the caller's idle check and queue admission. */
-    s_active = true;
-    if (!parse_offer(payload, payload_len, source, session, &offer, &reason)) {
-        s_active = false;
-        if (reject_reason) *reject_reason = reason;
+    if (s_pending || s_active) {
+        if (reject_reason) *reject_reason = "OTA busy";
         return false;
     }
-    if (xQueueSend(s_queue, &offer, 0) != pdTRUE) {
-        s_active = false;
+    /* Only stage the raw offer here. The PTT-gating s_active flag is claimed
+     * on ota_task after the manifest signature verifies (via the claim
+     * callback): claiming it now would let anyone who knows the cleartext
+     * mesh id mute PTT by spraying bogus offers. */
+    s_pending = true;
+    staged.source = *source;
+    staged.session = session;
+    staged.payload_len = (uint16_t)payload_len;
+    memcpy(staged.payload, payload, payload_len);
+    if (xQueueSend(s_queue, &staged, 0) != pdTRUE) {
+        s_pending = false;
         if (reject_reason) *reject_reason = "OTA queue busy";
         return false;
     }
@@ -303,6 +357,7 @@ bool ota_manager_offer(const uint8_t *payload, size_t payload_len,
 }
 
 bool ota_manager_is_active(void) { return s_active; }
+void ota_manager_set_active(void) { s_active = true; }
 bool ota_manager_has_recent_error(void)
 {
     return (int32_t)(s_error_until_ms - now_ms()) > 0;

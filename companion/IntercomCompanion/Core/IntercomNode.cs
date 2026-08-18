@@ -12,7 +12,7 @@ namespace IntercomCompanion.Core;
 /// </summary>
 internal sealed class IntercomNode : IAsyncDisposable
 {
-    private static readonly IPAddress MulticastGroup = IPAddress.Parse("239.255.42.99");
+    public static readonly IPAddress MulticastGroup = IPAddress.Parse("239.255.42.99");
     private static readonly TimeSpan HelloInterval = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan PeerLifetime = TimeSpan.FromSeconds(10);
 
@@ -184,7 +184,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     public async Task RequestOtaUpdateAsync(Peer peer, OtaPackage package, OtaArtifactServer server,
                                             CancellationToken cancellationToken = default)
     {
-        if (!peer.IsProtocolCompatible || peer.ProtocolVersion != Protocol.Version || !peer.SupportsOta)
+        if (!peer.IsOtaEligible)
             throw new InvalidOperationException($"{peer.Alias} does not support OTA protocol p{Protocol.Version}.");
         if (package.Protocol != Protocol.Version)
             throw new InvalidOperationException($"Package protocol p{package.Protocol} is incompatible with this companion.");
@@ -300,19 +300,35 @@ internal sealed class IntercomNode : IAsyncDisposable
             while (!stopping.IsCancellationRequested)
             {
                 var received = await client.ReceiveAsync(stopping.Token);
-                if (!Protocol.TryParse(received.Buffer, NodeId, out var packet) || packet is null)
-                    continue;
+                // A single malformed or hostile datagram must never terminate
+                // discovery: anything unexpected is logged and the packet dropped.
+                // Only cancellation may escape this block; the socket-teardown
+                // exceptions of ReceiveAsync itself are raised outside it, so a
+                // handler that happens to throw SocketException or
+                // ObjectDisposedException cannot kill the receive loop.
+                try
+                {
+                    // Multi-group: parse without filtering on mesh id so we hear
+                    // every group on the LAN; MeshId is kept on the packet.
+                    if (!Protocol.TryParse(received.Buffer, NodeId, out var packet) || packet is null)
+                        continue;
 
-                LearnPeer(packet, received.RemoteEndPoint);
-                // Floor/audio traffic is only ours to act on for a group we have
-                // joined; other groups are discovery-only. Config/OTA replies are
-                // keyed by a session we started, so they are handled regardless.
-                if (settings.IsJoined(Protocol.MeshIdToText(packet.MeshId)))
-                    PacketReceived?.Invoke(this, new IntercomPacketReceivedEventArgs(packet, received.RemoteEndPoint));
-                if (packet.Type == PacketType.ConfigReply)
-                    ParseConfigurationReply(packet, received.RemoteEndPoint);
-                else if (packet.Type == PacketType.OtaStatus)
-                    ParseOtaStatus(packet, received.RemoteEndPoint);
+                    LearnPeer(packet, received.RemoteEndPoint);
+                    // Floor/audio traffic is only ours to act on for a group we have
+                    // joined; other groups are discovery-only. Config/OTA replies are
+                    // keyed by a session we started, so they are handled regardless.
+                    if (settings.IsJoined(Protocol.MeshIdToText(packet.MeshId)))
+                        PacketReceived?.Invoke(this, new IntercomPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+                    if (packet.Type == PacketType.ConfigReply)
+                        ParseConfigurationReply(packet, received.RemoteEndPoint);
+                    else if (packet.Type == PacketType.OtaStatus)
+                        ParseOtaStatus(packet, received.RemoteEndPoint);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    DiagnosticLog.Write($"packet handling failed from {received.RemoteEndPoint}: {exception}");
+                    Diagnostic?.Invoke($"Ignored unreadable packet from {received.RemoteEndPoint.Address}.");
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -330,9 +346,18 @@ internal sealed class IntercomNode : IAsyncDisposable
             while (!stopping.IsCancellationRequested)
             {
                 var received = await mediaClient.ReceiveAsync(stopping.Token);
-                if (!Rtp.TryParse(received.Buffer, out var packet) || packet is null)
-                    continue;
-                RtpPacketReceived?.Invoke(this, new RtpPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+                // Same containment as ReceiveLoopAsync: a throwing RTP handler
+                // must drop one packet, not end media reception for the session.
+                try
+                {
+                    if (!Rtp.TryParse(received.Buffer, out var packet) || packet is null)
+                        continue;
+                    RtpPacketReceived?.Invoke(this, new RtpPacketReceivedEventArgs(packet, received.RemoteEndPoint));
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    DiagnosticLog.Write($"rtp packet handling failed from {received.RemoteEndPoint}: {exception}");
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -430,8 +455,13 @@ internal sealed class IntercomNode : IAsyncDisposable
                 DiagnosticLog.Write($"config unsolicited sender={packet.SenderId:x8} session={packet.SessionId:x8}");
             }
         }
-        catch (JsonException)
+        // JSON accessors also throw when a well-formed document carries a value
+        // of the wrong type or an out-of-range number, so the whole family is
+        // treated as "malformed payload" and the packet dropped.
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException
+                                              or FormatException or OverflowException)
         {
+            DiagnosticLog.Write($"config reply invalid sender={packet.SenderId:x8}: {exception.GetType().Name}");
             Diagnostic?.Invoke($"Ignored invalid configuration reply from {source.Address}.");
         }
     }
@@ -476,8 +506,10 @@ internal sealed class IntercomNode : IAsyncDisposable
                 }
             }
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException
+                                              or FormatException or OverflowException)
         {
+            DiagnosticLog.Write($"ota status invalid sender={packet.SenderId:x8}: {exception.GetType().Name}");
             Diagnostic?.Invoke($"Ignored invalid OTA status from {source.Address}.");
         }
     }

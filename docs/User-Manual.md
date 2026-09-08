@@ -44,9 +44,9 @@ advanced integration setting.
 | Mute slider on | Do not play received audio | No received sound |
 
 Both buttons are push-to-talk: only audio captured while held is sent. Release
-the button to finish the message. If someone else is already talking, keep the
-button held briefly. The device retains up to half a second of speech while it
-waits for the floor. If the other transmission does not end, the device shows
+the button to finish the message. If someone else is already broadcasting, keep the
+broadcast button held briefly. The device retains up to half a second of speech while it
+waits for the broadcast floor. If the other transmission does not end, the device shows
 two short red pulses and does not interrupt it.
 
 The default hardware mapping is D10 for broadcast and D9 for reply. If the
@@ -73,14 +73,17 @@ receive/packet statistics while a message is playing.
 | **Hold to selected device** | Send a directed message to the selected row in Active devices. |
 
 Select a device row before using targeted PTT. A directed message plays only
-on the selected destination. Broadcast calls go to every active device and
-companion in the group.
+on the selected destination. Broadcast calls go to available devices and companions in the group.
+Unrelated directed calls can happen simultaneously. Local transmission has
+priority, then directed reception, then broadcast reception. A directed call
+replaces broadcast playback at its destination; the broadcaster and other
+receivers continue. Busy directed endpoints may miss broadcasts intentionally.
 
 ### Device list and configuration
 
 The **Active devices** table shows the alias, device ID, address, firmware /
 protocol, and how recently the device was heard. Firmware/protocol text such
-as `0.7.8 / p1 / OTA` means the device supports the current protocol and OTA.
+as `0.7.8 / p3 / OTA` means the device supports the current protocol and OTA.
 
 To change a device:
 
@@ -98,11 +101,26 @@ nor written until you press one of those two buttons.
 half a ring. `Ring brightness` ranges from 0 to 255. Keep brightness modest on
 the current prototype because the LEDs and amplifier share a supply rail.
 
+### Future assistant configuration
+
+Open **Configure…** on a device card. Devices advertising assistant-client
+support have **Enable voice assistant** and **Assistant service** controls.
+Other devices show these controls disabled and unsupported. Current production
+C3 firmware does not implement assistant interactions.
+
+Technical support does not grant permission: `assistant_enabled` defaults to
+false, including after an upgrade. The service selector lists discovered
+assistant-service peers and saves their stable sender ID (`assistant_service_id`),
+not their IP address. An unavailable/offline saved service stays selected until
+you explicitly change it. No alternative service is selected automatically.
+These settings prepare the control plane; wake words and assistant conversations
+are not available in this release.
+
 ## Firmware updates over Wi-Fi
 
 The device needs an OTA-capable firmware already installed by USB before it
 can be updated wirelessly. In the device list, an OTA-capable current device
-shows `p1 / OTA`.
+shows `p3 / OTA`.
 
 1. Build a signed `.ota.json` package; maintainers can use
    [`tools/ota/Create-OtaPackage.ps1`](../tools/ota/Create-OtaPackage.ps1).

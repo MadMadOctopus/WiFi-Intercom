@@ -24,6 +24,9 @@ The result is a `.ota.json` manifest next to the image. Choose that manifest,
 not the `.bin`, in the companion. Keep the manifest and image together when
 moving a release.
 
+The packaging script defaults to protocol **3**, matching current firmware and
+companion. Older protocol targets must be updated together before deployment.
+
 The package contains the image file name, version, protocol revision, byte
 size, SHA-256 hash and ECDSA signature. The companion verifies it before
 opening a temporary tokenised local HTTP endpoint. A device verifies the same

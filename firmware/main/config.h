@@ -25,8 +25,7 @@
 
 /* HELLO discovery payload revision. The PTT1 wire header remains stable;
  * this declares the media/control contract used by a discovered peer. */
-#define INTERCOM_PROTOCOL_VERSION 2
-#define INTERCOM_CAPABILITY_OTA    0x01u
+#include "protocol.h"
 
 /* ---- Audio format (must match the companion RTP/IMA ADPCM implementation) */
 #define SAMPLE_RATE     16000

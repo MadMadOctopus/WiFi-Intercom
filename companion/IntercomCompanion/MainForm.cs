@@ -320,14 +320,8 @@ internal sealed class MainForm : Form
         var state = receiveSession?.State ?? IntercomState.Idle;
         var buffer = audio?.BufferedMilliseconds ?? 0;
         var talker = receiveSession?.LastTalker?.Alias ?? "A device";
-        // A directed reception with no audio reaching us is two other devices
-        // talking privately: name it as such and use a muted accent, since this
-        // companion is not playing it.
-        var directedElsewhere = receiveSession is { ReceptionDirected: true, ReceptionHasAudio: false };
-        var directedToUs = receiveSession is { ReceptionDirected: true, ReceptionHasAudio: true };
-        var receivingTitle = directedElsewhere ? $"{talker} is speaking to another device"
-            : directedToUs ? $"{talker} is replying to you"
-            : $"{talker} is speaking";
+        var receivingTitle = receiveSession?.ReceptionDirected == true
+            ? $"{talker} is speaking to you" : $"{talker} is speaking";
         // When several groups are joined, the detail line leads with the sender's
         // group so it is clear which one is on the floor.
         var groupPrefix = settings.JoinedGroups.Count > 1 && receiveSession?.LastTalker is { } lt
@@ -336,14 +330,12 @@ internal sealed class MainForm : Form
         {
             IntercomState.Claiming => ("CLAIMING", "Claiming", UiStyles.Amber, UiStyles.AmberTint),
             IntercomState.Talking => ("TALKING", "Talking", UiStyles.Purple, UiStyles.PurpleTint),
-            IntercomState.Receiving when directedElsewhere => ("RECEIVING", receivingTitle, UiStyles.Secondary, UiStyles.Surface),
             IntercomState.Receiving => ("RECEIVING", receivingTitle, UiStyles.Blue, UiStyles.BlueTint),
             IntercomState.WaitingForFloor => ("FLOOR OCCUPIED", "Floor occupied", UiStyles.Amber, UiStyles.AmberTint),
             _ => ("IDLE", "Idle", UiStyles.Green, UiStyles.Surface),
         };
         var detail = state switch
         {
-            IntercomState.Receiving when directedElsewhere => $"{groupPrefix}directed to another device · not played here · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s",
             IntercomState.Receiving => $"{groupPrefix}{talker} · {(DateTimeOffset.UtcNow - receivingSince).TotalSeconds:0.0} s · output buffer {buffer} ms",
             IntercomState.Talking => $"talking to the group · output buffer {buffer} ms",
             IntercomState.Claiming => $"claiming the floor · output buffer {buffer} ms",
@@ -376,7 +368,7 @@ internal sealed class MainForm : Form
         {
             IntercomState.Claiming => "Claiming floor",
             IntercomState.Talking => "You — talking",
-            IntercomState.Receiving when receiveSession?.ReceptionDirected == true => $"{talker} is speaking to another device{groupSuffix}",
+            IntercomState.Receiving when receiveSession?.ReceptionDirected == true => $"{talker} is speaking to you{groupSuffix}",
             IntercomState.Receiving => $"{talker} is speaking{groupSuffix}",
             IntercomState.WaitingForFloor => "Floor busy — your press was dropped",
             _ => "Idle",
@@ -436,7 +428,7 @@ internal sealed class MainForm : Form
             configurations[peer.NodeId] = reply.Configuration;
             knownDevices.Remember(peer, reply.Configuration);
         }
-        catch (Exception exception) when (exception is SocketException or TimeoutException)
+        catch (Exception exception) when (exception is SocketException or TimeoutException or InvalidOperationException)
         {
             statusBar.SetMessage($"Volume update failed: {exception.Message}");
         }
@@ -466,7 +458,7 @@ internal sealed class MainForm : Form
             knownDevices.Remember(peer, reply.Configuration);
             RefreshPeers();
         }
-        catch (Exception exception) when (exception is SocketException or TimeoutException)
+        catch (Exception exception) when (exception is SocketException or TimeoutException or InvalidOperationException)
         {
             statusBar.SetMessage($"Configuration read failed: {exception.Message}");
         }
@@ -481,7 +473,7 @@ internal sealed class MainForm : Form
             configurations[peer.NodeId] = current;
             using var dialog = new ConfigureDeviceDialog(peer, current,
                 requestedId => node.Peers.Any(other => other.NodeId != peer.NodeId && other.NodeId == requestedId),
-                GroupChoices(current.MeshId), focusGroup);
+                GroupChoices(current.MeshId), focusGroup, () => node.Peers);
             if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result is not { } next) return;
             var reply = await node.SetConfigurationAsync(peer, next);
             configurations[peer.NodeId] = reply.Configuration;

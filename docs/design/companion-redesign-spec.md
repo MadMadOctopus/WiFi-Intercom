@@ -1,3 +1,6 @@
+> Historical p2 design. The [p3 protocol contract](../protocol-p3.md) supersedes
+> its global directed-floor and mixed-revision interoperability requirements.
+
 # Companion redesign — implementation brief
 
 Target repo: `MadMadOctopus/WiFi-Intercom`, branch `main`.

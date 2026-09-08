@@ -24,6 +24,8 @@ typedef struct {
     uint8_t hardware_flags;
     /* p2 soft mute is independent of the physical slider. */
     uint8_t soft_mute;
+    uint8_t assistant_enabled;
+    uint32_t assistant_service_id; /* stable sender ID; zero means unset */
 } device_config_t;
 
 void device_config_load(device_config_t *out);

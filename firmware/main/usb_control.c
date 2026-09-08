@@ -17,6 +17,7 @@
 
 static device_config_t *s_config;
 static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_write_lock;
 
 bool usb_control_process(device_config_t *config, const char *request,
                          char *response, size_t response_size,
@@ -36,9 +37,27 @@ bool usb_control_process(device_config_t *config, const char *request,
     return device_config_to_json(config, hw_muted, response, response_size) != 0;
 }
 
+bool usb_control_request(const char *request, char *response, size_t response_size,
+                         bool *restart_required)
+{
+    xSemaphoreTake(s_write_lock, portMAX_DELAY);
+    device_config_t working;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    working = *s_config;
+    xSemaphoreGive(s_lock);
+    bool ok = usb_control_process(&working, request, response, response_size, restart_required);
+    if (ok) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        *s_config = working;
+        xSemaphoreGive(s_lock);
+    }
+    xSemaphoreGive(s_write_lock);
+    return ok;
+}
+
 static void usb_task(void *arg)
 {
-    char line[384] = {0};
+    char line[768] = {0};
     size_t used = 0;
     const char hello[] = "{\"type\":\"intercom-usb\",\"version\":1}\n";
     usb_serial_jtag_write_bytes(hello, sizeof(hello) - 1, pdMS_TO_TICKS(20));
@@ -53,11 +72,9 @@ static void usb_task(void *arg)
             }
             if (used == 0) continue;
             line[used] = '\0';
-            char response[384] = {0};
+            char response[768] = {0};
             bool restart_required = false;
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            usb_control_process(s_config, line, response, sizeof(response), &restart_required);
-            xSemaphoreGive(s_lock);
+            usb_control_request(line, response, sizeof(response), &restart_required);
             strncat(response, "\n", sizeof(response) - strlen(response) - 1);
             usb_serial_jtag_write_bytes(response, strlen(response), pdMS_TO_TICKS(100));
             used = 0;
@@ -76,7 +93,12 @@ void usb_control_start(device_config_t *config, SemaphoreHandle_t config_lock)
 {
     s_config = config;
     s_lock = config_lock;
+    s_write_lock = xSemaphoreCreateMutex();
+    configASSERT(s_write_lock);
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    /* The driver enqueues each write atomically; a full config reply exceeds
+     * its default 256-byte TX ring, so provision room for the entire line. */
+    cfg.tx_buffer_size = 1024;
 #if INTERCOM_USB_RAW_MIC_CAPTURE
     /* Raw capture frames are 652 bytes. The driver's default 256-byte ring
      * rejects each frame atomically, so use enough room for several complete
@@ -84,5 +106,5 @@ void usb_control_start(device_config_t *config, SemaphoreHandle_t config_lock)
     cfg.tx_buffer_size = 2048;
 #endif
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
-    xTaskCreate(usb_task, "usb_control", 4096, NULL, 4, NULL);
+    xTaskCreate(usb_task, "usb_control", 6144, NULL, 4, NULL);
 }

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../companion/IntercomCompanion/Core/Protocol.cs" Link="Protocol.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Core/DeviceConfigurationJson.cs" Link="DeviceConfigurationJson.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Core/Peer.cs" Link="Peer.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Core/AssistantServices.cs" Link="AssistantServices.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Core/CompanionSettings.cs" Link="CompanionSettings.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Core/ReceiveSession.cs" Link="ReceiveSession.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Core/Rtp.cs" Link="Rtp.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Audio/ImaAdpcm.cs" Link="ImaAdpcm.cs" />
+    <Compile Include="../../companion/IntercomCompanion/Audio/JitterBuffer.cs" Link="JitterBuffer.cs" />
+  </ItemGroup>
+</Project>

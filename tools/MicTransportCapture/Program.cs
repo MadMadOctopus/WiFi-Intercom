@@ -71,7 +71,7 @@ static async Task HelloLoopAsync(UdpClient socket, IPAddress multicast, Cancella
 {
     while (!cancellationToken.IsCancellationRequested)
     {
-        var packet = PackControl(5, 0, 0, "capture-tool"u8);
+        var packet = PackControl(5, 0, 0, "IH3\u0003\u0000\u0000\u0000capture-tool"u8);
         await socket.SendAsync(packet, new IPEndPoint(multicast, ControlPort), cancellationToken);
         await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
     }
@@ -85,6 +85,7 @@ static async Task ControlLoopAsync(UdpClient socket, RawSourceRecorder source, T
         var received = await socket.ReceiveAsync(cancellationToken);
         var data = received.Buffer;
         if (data.Length < 32 || !data.AsSpan(0, 4).SequenceEqual("PTT1"u8) ||
+            BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(30, 2)) != 3 ||
             BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(8, 4)) != MeshId ||
             BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(12, 4)) != deviceId)
             continue;
@@ -152,6 +153,7 @@ static byte[] PackControl(byte type, uint session, uint sequence, ReadOnlySpan<b
     BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(20, 4), sequence);
     BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(24, 4), unchecked((uint)Environment.TickCount64));
     BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(28, 2), checked((ushort)payload.Length));
+    BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(30, 2), 3);
     payload.CopyTo(packet.AsSpan(32));
     return packet;
 }

@@ -1,0 +1,33 @@
+name: Local protocol and build validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  companion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet run --project tests/Companion.HostTests
+      - run: dotnet build companion/IntercomCompanion -p:EnableWindowsTargeting=true
+      - run: dotnet build tools/MicTransportCapture
+      - run: python3 tests/test_ota_package.py
+  firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Firmware host tests with sanitizers
+        shell: bash
+        run: bash tests/firmware/run.sh
+      - name: ESP32-C3 firmware build
+        shell: bash
+        working-directory: firmware
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py build

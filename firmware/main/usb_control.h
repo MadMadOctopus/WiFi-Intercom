@@ -8,3 +8,8 @@ void usb_control_start(device_config_t *config, SemaphoreHandle_t config_lock);
 bool usb_control_process(device_config_t *config, const char *request,
                          char *response, size_t response_size,
                          bool *restart_required);
+
+/* Shared USB/remote/ring configuration transaction. Serialises NVS commits;
+ * holds the audio state lock only to snapshot/publish, never during flash IO. */
+bool usb_control_request(const char *request, char *response, size_t response_size,
+                         bool *restart_required);

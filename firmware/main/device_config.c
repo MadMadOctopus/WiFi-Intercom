@@ -31,10 +31,20 @@ typedef struct {
     device_config_v1_t value;
 } stored_config_v1_t;
 
+/* Freeze historical layouts: never embed the growing current config in v2. */
 typedef struct {
-    uint32_t version;
-    device_config_t value;
-} stored_config_v2_t;
+    uint32_t device_id;
+    uint32_t mesh_id;
+    char alias[DEVICE_ALIAS_MAX + 1];
+    char wifi_ssid[WIFI_SSID_MAX + 1];
+    char wifi_password[WIFI_PASSWORD_MAX + 1];
+    uint16_t speaker_volume;
+    uint8_t led_brightness;
+    uint8_t hardware_flags;
+    uint8_t soft_mute;
+} device_config_v2_t;
+typedef struct { uint32_t version; device_config_v2_t value; } stored_config_v2_t;
+typedef struct { uint32_t version; device_config_t value; } stored_config_v3_t;
 
 static uint32_t default_device_id(void)
 {
@@ -69,18 +79,27 @@ void device_config_load(device_config_t *out)
     size_t len = 0;
     esp_err_t err = nvs_get_blob(handle, NVS_KEY, NULL, &len);
     bool migrated = false;
-    if (err == ESP_OK && len == sizeof(stored_config_v2_t)) {
+    if (err == ESP_OK && len == sizeof(stored_config_v3_t)) {
+        stored_config_v3_t stored = {0};
+        err = nvs_get_blob(handle, NVS_KEY, &stored, &len);
+        if (err == ESP_OK && stored.version == 3 && stored.value.device_id != 0)
+            *out = stored.value;
+        else err = ESP_ERR_NVS_INVALID_STATE;
+    } else if (err == ESP_OK && len == sizeof(stored_config_v2_t)) {
         stored_config_v2_t stored = {0};
         err = nvs_get_blob(handle, NVS_KEY, &stored, &len);
-        if (err == ESP_OK && stored.version == 2 && stored.value.device_id != 0)
-            *out = stored.value;
+        if (err == ESP_OK && stored.version == 2 && stored.value.device_id != 0) {
+            /* Copy fields through soft_mute only: old tail padding is not data. */
+            memcpy(out, &stored.value, offsetof(device_config_v2_t, soft_mute) + 1);
+            migrated = true;
+        }
         else
             err = ESP_ERR_NVS_INVALID_STATE;
     } else if (err == ESP_OK && len == sizeof(stored_config_v1_t)) {
         stored_config_v1_t stored = {0};
         err = nvs_get_blob(handle, NVS_KEY, &stored, &len);
         if (err == ESP_OK && stored.version == 1 && stored.value.device_id != 0) {
-            memcpy(out, &stored.value, sizeof(stored.value));
+            memcpy(out, &stored.value, offsetof(device_config_v1_t, hardware_flags) + 1);
             out->soft_mute = 0;
             migrated = true;
         } else {
@@ -89,7 +108,7 @@ void device_config_load(device_config_t *out)
     }
     nvs_close(handle);
     if (migrated) {
-        ESP_LOGI(TAG, "Migrating p1 configuration to p2");
+        ESP_LOGI(TAG, "Migrating configuration to v3 (assistant disabled)");
         (void)device_config_save(out);
     } else if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW(TAG, "Ignoring invalid saved configuration: %s", esp_err_to_name(err));
@@ -98,7 +117,7 @@ void device_config_load(device_config_t *out)
 
 bool device_config_save(const device_config_t *config)
 {
-    stored_config_v2_t stored = {.version = 2, .value = *config};
+    stored_config_v3_t stored = {.version = 3, .value = *config};
     nvs_handle_t handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
     esp_err_t err = nvs_set_blob(handle, NVS_KEY, &stored, sizeof(stored));
@@ -200,6 +219,17 @@ bool device_config_apply_json(device_config_t *config, const char *json,
         return false;
     }
     if (cJSON_IsBool(soft_mute)) updated.soft_mute = cJSON_IsTrue(soft_mute) ? 1 : 0;
+    cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "assistant_enabled");
+    cJSON *service = cJSON_GetObjectItemCaseSensitive(root, "assistant_service_id");
+    if ((enabled && !cJSON_IsBool(enabled)) ||
+        (service && (!cJSON_IsNumber(service) || !(service->valuedouble >= 0 &&
+          service->valuedouble <= UINT32_MAX) ||
+          service->valuedouble != (double)(uint32_t)service->valuedouble))) {
+        cJSON_Delete(root);
+        return false;
+    }
+    if (enabled) updated.assistant_enabled = cJSON_IsTrue(enabled) ? 1 : 0;
+    if (service) updated.assistant_service_id = (uint32_t)service->valuedouble;
     cJSON_Delete(root);
     if (!device_config_save(&updated)) return false;
     if (restart_required)
@@ -232,6 +262,8 @@ size_t device_config_to_json(const device_config_t *config, bool hw_muted,
                             (config->hardware_flags & DEVICE_FLAG_RING_180) ? 180 : 0);
     cJSON_AddBoolToObject(root, "soft_mute", config->soft_mute != 0);
     cJSON_AddBoolToObject(root, "hw_muted", hw_muted);
+    cJSON_AddBoolToObject(root, "assistant_enabled", config->assistant_enabled != 0);
+    cJSON_AddNumberToObject(root, "assistant_service_id", config->assistant_service_id);
     char *encoded = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!encoded) return 0;

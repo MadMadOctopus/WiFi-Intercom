@@ -43,6 +43,19 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private Task? heartbeatTask;
     private CancellationTokenSource? transmitStopping;
     private IntercomState state;
+    private readonly Dictionary<string, BroadcastFloor> broadcastFloors = [];
+    private bool receivingActive;
+    private IPEndPoint? receiveEndpoint;
+    private bool transmitAccepted;
+
+    private sealed record BroadcastFloor(uint Sender, uint Session, DateTimeOffset LastSeen);
+    private bool BroadcastOccupiedLocked()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var group in broadcastFloors.Where(pair => now - pair.Value.LastSeen > TimeSpan.FromMilliseconds(ReleaseMs)).Select(pair => pair.Key).ToArray())
+            broadcastFloors.Remove(group);
+        return broadcastFloors.Keys.Any(group => node.BroadcastTargetCode.Length == 0 || group == node.BroadcastTargetCode);
+    }
 
     // receive session
     private uint senderId;
@@ -89,10 +102,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     public IntercomState State { get { lock (gate) return state; } }
     public Peer? LastTalker { get; private set; }
-    /// <summary>Whether the current reception's CLAIM was flagged directed. A
-    /// directed transmission is aimed at one node, so if no audio reaches this
-    /// companion (see <see cref="ReceptionHasAudio"/>) it is talk between two
-    /// other devices that this companion is not playing.</summary>
+    /// <summary>Directed control and media reach only the selected recipient.</summary>
     public bool ReceptionDirected { get; private set; }
     public bool ReceptionHasAudio => Interlocked.Read(ref audioPacketCount) > 0;
     public ReceiveStatistics Statistics => new(Interlocked.Read(ref audioPacketCount),
@@ -128,13 +138,19 @@ internal sealed class ReceiveSession : IAsyncDisposable
                 Diagnostic?.Invoke("Select a device before using targeted PTT.");
                 return;
             }
+            if (target is not null)
+            {
+                target = node.Peers.FirstOrDefault(peer => peer.NodeId == target.NodeId && peer.IsProtocolCompatible &&
+                    DateTimeOffset.UtcNow - peer.LastSeen <= TimeSpan.FromSeconds(10));
+                if (target is null) { Diagnostic?.Invoke("Directed target unavailable."); return; }
+            }
             pttHeld = true;
-            if (state == IntercomState.Idle)
+            if (kind != PttKind.Broadcast || !BroadcastOccupiedLocked())
             {
                 StartTransmitLocked(kind, target);
                 return;
             }
-            if (state == IntercomState.Receiving)
+            if (state is IntercomState.Receiving or IntercomState.Idle)
             {
                 heldKind = kind;
                 heldTarget = target;
@@ -158,7 +174,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
             if (state == IntercomState.WaitingForFloor)
             {
                 heldFrames.Clear();
-                SetStateLocked(IntercomState.Receiving);
+                SetStateLocked(receivingActive ? IntercomState.Receiving : IntercomState.Idle);
                 return;
             }
             if (state is not (IntercomState.Claiming or IntercomState.Talking)) return;
@@ -173,7 +189,13 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     private void StartTransmitLocked(PttKind kind, Peer? target)
     {
-        // A directed transmission must reserve the floor only at its selected
+        receivingActive = false;
+        jitter.Reset();
+        audio.ClearPlayback();
+        recording?.Dispose();
+        recording = null;
+        transmitAccepted = false;
+        // A directed transmission must reserve resources only at its selected
         // recipient. Previously CLAIM/HEARTBEAT/END went to every peer while
         // RTP went to one peer, leaving unrelated devices in a silent receive
         // state and making direct PTT behaviour depend on the device chosen.
@@ -208,12 +230,14 @@ internal sealed class ReceiveSession : IAsyncDisposable
         transmitStopping = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
         SetStateLocked(IntercomState.Claiming);
         Diagnostic?.Invoke(transmitDirected
-            ? $"Claiming floor for direct message to {target!.Alias}."
+            ? $"Reserving directed session to {target!.Alias}."
             : "Claiming floor for broadcast message.");
         DiagnosticLog.Write(transmitDirected
             ? $"tx direct target={target!.NodeId:x8} endpoint={target.Endpoint}"
             : $"tx broadcast peers={transmitPeers.Count}");
-        _ = Task.Run(() => ClaimSequenceAsync(transmitSession, transmitStopping.Token));
+        var claimSession = transmitSession;
+        var claimToken = transmitStopping.Token;
+        _ = Task.Run(() => ClaimSequenceAsync(claimSession, claimToken));
     }
 
     private async Task ClaimSequenceAsync(uint claimSession, CancellationToken cancellationToken)
@@ -237,6 +261,13 @@ internal sealed class ReceiveSession : IAsyncDisposable
             lock (gate)
             {
                 if (state != IntercomState.Claiming || transmitSession != claimSession) return;
+                if (transmitDirected && !transmitAccepted)
+                {
+                    CancelTransmitLocked();
+                    SetStateLocked(IntercomState.Idle);
+                    Diagnostic?.Invoke("Directed target did not accept the session.");
+                    return;
+                }
                 SetStateLocked(IntercomState.Talking);
                 heartbeatTask = Task.Run(() => HeartbeatLoopAsync(claimSession, cancellationToken));
             }
@@ -257,9 +288,8 @@ internal sealed class ReceiveSession : IAsyncDisposable
                 lock (gate)
                 {
                     if (state != IntercomState.Talking || transmitSession != heartbeatSession) return;
-                    if (!transmitDirected) continue;
                     peers = transmitPeers;
-                    flags = Protocol.DirectedFlag;
+                    flags = transmitDirected ? Protocol.DirectedFlag : (byte)0;
                 }
                 await node.SendToPeersAsync(PacketType.Heartbeat, heartbeatSession, 0, [], peers, flags, cancellationToken);
             }
@@ -285,7 +315,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
                         if (DateTimeOffset.UtcNow - heldSince >= TimeSpan.FromMilliseconds(BusyBufferFrames * FrameMs))
                         {
                             heldFrames.Clear();
-                            SetStateLocked(IntercomState.Receiving);
+                            SetStateLocked(receivingActive ? IntercomState.Receiving : IntercomState.Idle);
                             Diagnostic?.Invoke("Floor stayed occupied for 500 ms; PTT cancelled.");
                         }
                         else if (heldFrames.Count < BusyBufferFrames) heldFrames.Enqueue(liveFrame);
@@ -334,66 +364,89 @@ internal sealed class ReceiveSession : IAsyncDisposable
     private void OnPacketReceived(object? sender, IntercomPacketReceivedEventArgs eventArgs)
     {
         var packet = eventArgs.Packet;
-        if (packet.Type == PacketType.Claim)
-        {
-            // Floor arbitration is per group: only contend with, or send Busy to,
-            // a claimer in the same group as our current transmit/receive. A CLAIM
-            // in a different joined group is that group's floor and is left alone;
-            // we simply cannot play two at once.
-            var claimGroup = Protocol.MeshIdToText(packet.MeshId);
-            var sendBusy = false;
-            uint busySession = 0;
-            lock (gate)
-            {
-                if (state is IntercomState.Claiming or IntercomState.Talking)
-                {
-                    if (!transmitGroups.Contains(claimGroup)) { /* another group's floor */ }
-                    else if (RemoteWins(packet)) { CancelTransmitLocked(); BeginReceivingLocked(packet, eventArgs.Endpoint); }
-                    else
-                    {
-                        // The firmware runs the claimant's remote_wins() rule on the
-                        // BUSY it receives, comparing the carried session against its
-                        // own claim. The BUSY must therefore carry the session that
-                        // actually won the arbitration: our transmit session here,
-                        // not the id of some earlier receive.
-                        sendBusy = true;
-                        busySession = transmitSession;
-                    }
-                }
-                else if (state == IntercomState.Idle) BeginReceivingLocked(packet, eventArgs.Endpoint);
-                else if (packet.SessionId != sessionId && claimGroup == receivingGroup)
-                {
-                    sendBusy = true;
-                    busySession = sessionId;
-                }
-            }
-            if (sendBusy)
-                _ = node.SendToEndpointAsync(PacketType.Busy, busySession, 0, [], eventArgs.Endpoint, claimGroup);
-            return;
-        }
+        var directed = (packet.Flags & Protocol.DirectedFlag) != 0;
+        var group = Protocol.MeshIdToText(packet.MeshId);
         lock (gate)
         {
-            if (packet.Type == PacketType.Busy && state == IntercomState.Claiming)
+            var localTx = state is IntercomState.Claiming or IntercomState.Talking;
+            if (packet.Type == PacketType.Claim)
             {
-                if (!IsBusyForOurClaimLocked(packet, eventArgs.Endpoint)) return;
-                CancelTransmitLocked();
-                SetStateLocked(IntercomState.Idle);
-                Diagnostic?.Invoke("Another peer owns the floor.");
+                if (directed)
+                {
+                    if (localTx || (receivingActive && ReceptionDirected &&
+                        (senderId != packet.SenderId || sessionId != packet.SessionId)))
+                    {
+                        _ = node.SendToEndpointAsync(PacketType.Busy, packet.SessionId, 0, [], eventArgs.Endpoint, group, Protocol.DirectedFlag);
+                        return;
+                    }
+                    if (!receivingActive || !ReceptionDirected || senderId != packet.SenderId || sessionId != packet.SessionId)
+                        BeginReceivingLocked(packet, eventArgs.Endpoint);
+                    lastAudioAt = DateTimeOffset.UtcNow;
+                    _ = node.SendToEndpointAsync(PacketType.Accept, packet.SessionId, 0, [], eventArgs.Endpoint, group, Protocol.DirectedFlag);
+                    return;
+                }
+                BroadcastOccupiedLocked(); // expire ownership independently of playback
+                if (localTx && !transmitDirected && transmitGroups.Contains(group) && !RemoteWins(packet))
+                {
+                    _ = node.SendToEndpointAsync(PacketType.Busy, transmitSession, 0, [], eventArgs.Endpoint, group);
+                    return;
+                }
+                if (broadcastFloors.TryGetValue(group, out var floor) &&
+                    (floor.Session != packet.SessionId || floor.Sender != packet.SenderId) &&
+                    !Precedes(packet.SessionId, packet.SenderId, floor.Session, floor.Sender))
+                {
+                    _ = node.SendToEndpointAsync(PacketType.Busy, floor.Session, 0, [], eventArgs.Endpoint, group);
+                    return;
+                }
+                broadcastFloors[group] = new(packet.SenderId, packet.SessionId, DateTimeOffset.UtcNow);
+                if ((localTx && (transmitDirected || !transmitGroups.Contains(group))) ||
+                    (receivingActive && (ReceptionDirected || receivingGroup != group))) return;
+                if (!receivingActive || senderId != packet.SenderId || sessionId != packet.SessionId)
+                    BeginReceivingLocked(packet, eventArgs.Endpoint);
                 return;
             }
-            if (state is not (IntercomState.Receiving or IntercomState.WaitingForFloor) ||
-                packet.SenderId != senderId || packet.SessionId != sessionId) return;
+            if (packet.Type == PacketType.Accept && state == IntercomState.Claiming && transmitDirected && directed &&
+                packet.SessionId == transmitSession && IsBusyForOurClaimLocked(packet, eventArgs.Endpoint))
+            {
+                transmitAccepted = true;
+                return;
+            }
+            if (packet.Type == PacketType.Busy && state == IntercomState.Claiming && directed == transmitDirected)
+            {
+                if (!IsBusyForOurClaimLocked(packet, eventArgs.Endpoint) ||
+                    (directed ? packet.SessionId != transmitSession : packet.SessionId != 0 && !RemoteWins(packet))) return;
+                CancelTransmitLocked();
+                SetStateLocked(IntercomState.Idle);
+                Diagnostic?.Invoke(directed ? "Directed target is busy." : "Another peer owns the broadcast floor.");
+                return;
+            }
+            if (!directed && broadcastFloors.TryGetValue(group, out var owner) &&
+                owner.Sender == packet.SenderId && owner.Session == packet.SessionId)
+            {
+                if (packet.Type == PacketType.Heartbeat) broadcastFloors[group] = owner with { LastSeen = DateTimeOffset.UtcNow };
+                if (packet.Type == PacketType.End) broadcastFloors.Remove(group);
+            }
+            if (!receivingActive || packet.SenderId != senderId || packet.SessionId != sessionId ||
+                directed != ReceptionDirected || group != receivingGroup) return;
             if (packet.Type == PacketType.Heartbeat) lastAudioAt = DateTimeOffset.UtcNow;
             if (packet.Type == PacketType.End && !ending) { ending = true; drainFrames = EndDrainFrames; }
         }
     }
 
+    private static bool Precedes(uint session, uint sender, uint otherSession, uint otherSender) =>
+        session < otherSession || (session == otherSession && sender < otherSender);
+
     private void OnRtpPacketReceived(object? sender, RtpPacketReceivedEventArgs eventArgs)
     {
         lock (gate)
         {
+            foreach (var (group, floor) in broadcastFloors.ToArray())
+                if (floor.Session == eventArgs.Packet.Ssrc && node.Peers.Any(peer => peer.NodeId == floor.Sender &&
+                    peer.Endpoint.Address.Equals(eventArgs.Endpoint.Address)))
+                    broadcastFloors[group] = floor with { LastSeen = DateTimeOffset.UtcNow };
             if (state is not (IntercomState.Receiving or IntercomState.WaitingForFloor) ||
-                eventArgs.Packet.Ssrc != sessionId) return;
+                eventArgs.Packet.Ssrc != sessionId || !receivingActive ||
+                receiveEndpoint is null || !eventArgs.Endpoint.Address.Equals(receiveEndpoint.Address)) return;
             Interlocked.Increment(ref audioPacketCount);
             audioPackets.Writer.TryWrite(eventArgs);
         }
@@ -414,7 +467,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
     }
 
     private bool RemoteWins(IntercomPacket packet) =>
-        packet.SessionId < transmitSession || (packet.SessionId == transmitSession && packet.SenderId < node.NodeId);
+        Precedes(packet.SessionId, packet.SenderId, transmitSession, node.NodeId);
 
     private async Task DecodeLoopAsync()
     {
@@ -429,7 +482,8 @@ internal sealed class ReceiveSession : IAsyncDisposable
                 lock (gate)
                 {
                     if (state is not (IntercomState.Receiving or IntercomState.WaitingForFloor) ||
-                        packet.Ssrc != sessionId) continue;
+                        packet.Ssrc != sessionId || !receivingActive || receiveEndpoint is null ||
+                        !eventArgs.Endpoint.Address.Equals(receiveEndpoint.Address)) continue;
                     if (havePreviousSequence && packet.Sequence != unchecked((ushort)(previousSequence + 1)))
                         Interlocked.Increment(ref sequenceGapCount);
                     previousSequence = packet.Sequence;
@@ -454,21 +508,28 @@ internal sealed class ReceiveSession : IAsyncDisposable
                 var finish = false;
                 lock (gate)
                 {
+                    if (state == IntercomState.WaitingForFloor && !BroadcastOccupiedLocked() && pttHeld &&
+                        DateTimeOffset.UtcNow - heldSince < TimeSpan.FromMilliseconds(BusyBufferFrames * FrameMs))
+                    {
+                        StartTransmitLocked(heldKind, heldTarget);
+                        continue;
+                    }
                     if (state is not (IntercomState.Receiving or IntercomState.WaitingForFloor)) continue;
                     if (state == IntercomState.WaitingForFloor && DateTimeOffset.UtcNow - heldSince >= TimeSpan.FromMilliseconds(BusyBufferFrames * FrameMs))
                     {
                         heldFrames.Clear();
-                        SetStateLocked(IntercomState.Receiving);
+                        SetStateLocked(receivingActive ? IntercomState.Receiving : IntercomState.Idle);
                         Diagnostic?.Invoke("Floor stayed occupied for 500 ms; PTT cancelled.");
                     }
+                    if (!receivingActive) continue;
                     if (DateTimeOffset.UtcNow - lastAudioAt > TimeSpan.FromMilliseconds(ReleaseMs)) finish = true;
                     else if (jitter.TryPop(out pcm, out realAudio) && ending && --drainFrames <= 0) finish = true;
                     if (realAudio && pcm is not null) WriteRecordingLocked(pcm);
                     if (realAudio) Interlocked.Increment(ref playedFrameCount);
                     else if (pcm is not null) Interlocked.Increment(ref concealedFrameCount);
                     if (finish) FinishReceivingLocked();
+                    if (pcm is not null && !finish) audio.EnqueuePlayback(pcm);
                 }
-                if (pcm is not null && !finish) audio.EnqueuePlayback(pcm);
             }
         }
         catch (OperationCanceledException) { }
@@ -476,7 +537,10 @@ internal sealed class ReceiveSession : IAsyncDisposable
 
     private void BeginReceivingLocked(IntercomPacket packet, IPEndPoint endpoint)
     {
-        CancelTransmitLocked();
+        var waiting = state == IntercomState.WaitingForFloor;
+        if (!waiting) CancelTransmitLocked();
+        receivingActive = true;
+        receiveEndpoint = endpoint;
         senderId = packet.SenderId;
         sessionId = packet.SessionId;
         receivingGroup = Protocol.MeshIdToText(packet.MeshId);
@@ -498,7 +562,7 @@ internal sealed class ReceiveSession : IAsyncDisposable
         LastTalker = discovered is null
             ? new Peer(packet.SenderId, endpoint, $"Device {packet.SenderId:x8}", null, "unknown", 0, 0, DateTimeOffset.UtcNow, receivingGroup)
             : discovered with { Endpoint = endpoint, LastSeen = DateTimeOffset.UtcNow };
-        SetStateLocked(IntercomState.Receiving);
+        SetStateLocked(waiting ? IntercomState.WaitingForFloor : IntercomState.Receiving);
         DiagnosticLog.Write($"rx begin sender={senderId:x8} session={sessionId:x8}");
         Diagnostic?.Invoke($"Receiving {LastTalker.Alias}; Reply is ready.");
     }
@@ -514,9 +578,11 @@ internal sealed class ReceiveSession : IAsyncDisposable
         // it can still contain the final audio frames. The next receive session
         // clears it before it begins, so stale sound cannot cross sessions.
         ending = false;
-        if (state == IntercomState.WaitingForFloor && pttHeld)
+        receivingActive = false;
+        if (state == IntercomState.WaitingForFloor && pttHeld && !BroadcastOccupiedLocked() &&
+            DateTimeOffset.UtcNow - heldSince < TimeSpan.FromMilliseconds(BusyBufferFrames * FrameMs))
             StartTransmitLocked(heldKind, heldTarget);
-        else SetStateLocked(IntercomState.Idle);
+        else if (state != IntercomState.WaitingForFloor) SetStateLocked(IntercomState.Idle);
     }
 
     // WaveFileWriter copies out of the buffer before returning, and this runs

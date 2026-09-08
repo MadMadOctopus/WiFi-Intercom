@@ -1,3 +1,6 @@
+> Historical p2 design. The [p3 protocol contract](../protocol-p3.md) supersedes
+> its global directed-floor and mixed-revision interoperability requirements.
+
 # Companion redesign — handover to Claude Code
 
 Branch `codex/companion-p2-redesign`, at `0935fcb`. Written 2026-08-15.

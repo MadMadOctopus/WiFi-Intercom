@@ -16,6 +16,11 @@ internal sealed class ConfigureDeviceDialog : Form
     private readonly Func<uint, bool> isDuplicateId;
     private readonly bool focusGroup;
     private readonly ComboBox groupCombo = new();
+    private readonly ComboBox assistantService = new();
+    private readonly Func<IReadOnlyCollection<Peer>> discoveredPeers;
+    private readonly System.Windows.Forms.Timer assistantRefresh = new() { Interval = 1000 };
+    private readonly CheckBox assistantEnabled = new() { Text = "Enable voice assistant", AutoSize = true,
+        Font = UiStyles.SecondaryFont, ForeColor = UiStyles.Body, UseVisualStyleBackColor = false };
 
     private readonly TextBox aliasBox = new() { MaxLength = 24 };
     private readonly FlatSlider volume = new() { Minimum = 64, Maximum = 1024, Width = 230, AccentColor = UiStyles.Blue };
@@ -30,16 +35,25 @@ internal sealed class ConfigureDeviceDialog : Form
     private DeviceConfiguration current;
 
     public ConfigureDeviceDialog(Peer peer, DeviceConfiguration configuration, Func<uint, bool> isDuplicateId,
-        IReadOnlyList<GroupChoice> groupChoices, bool focusGroup = false)
+        IReadOnlyList<GroupChoice> groupChoices, bool focusGroup = false, Func<IReadOnlyCollection<Peer>>? discoveredPeers = null)
     {
         this.peer = peer;
         this.isDuplicateId = isDuplicateId;
         this.focusGroup = focusGroup;
         current = configuration;
+        this.discoveredPeers = discoveredPeers ?? (() => []);
+        UiKit.StyleCombo(assistantService, 280);
+        RefreshAssistantServices();
+        assistantRefresh.Tick += (_, _) => RefreshAssistantServices();
+        Shown += (_, _) => assistantRefresh.Start();
+        assistantEnabled.Checked = configuration.AssistantEnabled;
+        assistantEnabled.Enabled = assistantService.Enabled = AssistantServices.CanConfigure(peer);
 
         UiKit.StyleCombo(groupCombo, 220);
         foreach (var choice in groupChoices) groupCombo.Items.Add(choice);
         groupCombo.SelectedItem = groupChoices.FirstOrDefault(choice => choice.Code == configuration.MeshId) ?? groupChoices.FirstOrDefault();
+
+        groupCombo.SelectedIndexChanged += (_, _) => RefreshAssistantServices();
 
         Text = $"Configure {peer.Alias}";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -73,6 +87,26 @@ internal sealed class ConfigureDeviceDialog : Form
 
         Populate(configuration);
         if (this.focusGroup) Shown += (_, _) => groupCombo.Focus();
+    }
+
+    private void RefreshAssistantServices()
+    {
+        if (assistantService.DroppedDown) return;
+        var savedId = (assistantService.SelectedItem as AssistantServiceChoice)?.SenderId ?? current.AssistantServiceId;
+        var group = (groupCombo.SelectedItem as GroupChoice)?.Code ?? current.MeshId;
+        var choices = AssistantServices.Choices(discoveredPeers(), group, savedId);
+        if (assistantService.Items.Cast<AssistantServiceChoice>().SequenceEqual(choices)) return;
+        assistantService.BeginUpdate();
+        assistantService.Items.Clear();
+        foreach (var choice in choices) assistantService.Items.Add(choice);
+        assistantService.SelectedItem = choices.First(choice => choice.SenderId == savedId);
+        assistantService.EndUpdate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) assistantRefresh.Dispose();
+        base.Dispose(disposing);
     }
 
     public DeviceConfiguration? Result { get; private set; }
@@ -123,6 +157,11 @@ internal sealed class ConfigureDeviceDialog : Form
         playbackStack.Controls.Add(playbackNote);
         UiKit.AddField(form, "Playback", playbackStack);
 
+        UiKit.AddField(form, "Voice assistant", assistantEnabled);
+        UiKit.AddField(form, "Assistant service", assistantService);
+        if (!AssistantServices.CanConfigure(peer))
+            UiKit.AddField(form, "Assistant support", new Label { Text = "Unsupported by this device", AutoSize = true,
+                Font = UiStyles.Hint, ForeColor = UiStyles.Secondary });
         UiKit.AddField(form, "Buttons", buttons, UiKit.RestartNote());
         UiKit.AddField(form, "Ring centre", ringCentre, UiKit.RestartNote());
         UiKit.AddField(form, "Device ID", deviceIdBox, UiKit.RestartNote());
@@ -196,6 +235,10 @@ internal sealed class ConfigureDeviceDialog : Form
             ButtonsSwapped = buttons.SelectedIndex == 1,
             RingOrientation = ringCentre.SelectedIndex == 1 ? 180 : 0,
             DeviceId = requestedId,
+            AssistantEnabled = AssistantServices.CanConfigure(peer) ? assistantEnabled.Checked : current.AssistantEnabled,
+            AssistantServiceId = AssistantServices.CanConfigure(peer)
+                ? (assistantService.SelectedItem as AssistantServiceChoice)?.SenderId ?? current.AssistantServiceId
+                : current.AssistantServiceId,
             MeshId = (groupCombo.SelectedItem as GroupChoice)?.Code ?? current.MeshId,
         };
         DialogResult = DialogResult.OK;

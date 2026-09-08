@@ -17,6 +17,7 @@ internal enum PacketType : byte
     OtaOffer = 10,
     OtaStatus = 11,
     OtaCancel = 12,
+    Accept = 13,
 }
 
 internal sealed record IntercomPacket(
@@ -32,13 +33,15 @@ internal sealed record IntercomPacket(
 /// <summary>Exact big-endian PTT1 datagram codec shared with firmware.</summary>
 internal static class Protocol
 {
-    public const byte Version = 2;
+    public const byte Version = 3;
     public const uint DefaultMeshId = 0x4D455348; // "MESH"
     public const int Port = 45678;
     public const int HeaderLength = 32;
     public const int AdpcmPayloadLength = 164;
     public const byte DirectedFlag = 0x01;
     public const byte OtaCapability = 0x01;
+    public const byte AssistantServiceCapability = 0x02;
+    public const byte AssistantClientCapability = 0x04;
     public const byte HelloFlagHardwareMuted = 0x01;
     public const byte HelloFlagSoftMuted = 0x02;
     public const byte HelloFlagTalking = 0x04;
@@ -50,14 +53,14 @@ internal static class Protocol
 
     /// <summary>Discovery is self-describing while retaining a compact payload.
     /// IH3 | protocol revision | capabilities | flags | firmware byte count | firmware | alias.</summary>
-    public static byte[] BuildHelloPayload(string alias, string firmwareVersion, byte flags = 0)
+    public static byte[] BuildHelloPayload(string alias, string firmwareVersion, byte flags = 0, byte capabilities = 0)
     {
         var firmware = Encoding.UTF8.GetBytes(firmwareVersion[..Math.Min(31, firmwareVersion.Length)]);
         var aliasBytes = Encoding.UTF8.GetBytes(CompanionSettings.SanitizeAlias(alias));
         var payload = new byte[7 + firmware.Length + aliasBytes.Length];
         HelloMagic3.CopyTo(payload);
         payload[3] = Version;
-        payload[4] = 0; // the desktop companion is an OTA host, not an OTA target
+        payload[4] = capabilities; // production companion advertises no service/client roles
         payload[5] = (byte)(flags & (HelloFlagHardwareMuted | HelloFlagSoftMuted | HelloFlagTalking));
         payload[6] = checked((byte)firmware.Length);
         firmware.CopyTo(payload, 7);
@@ -116,7 +119,7 @@ internal static class Protocol
         BinaryPrimitives.WriteUInt32BigEndian(datagram.AsSpan(20), sequence);
         BinaryPrimitives.WriteUInt32BigEndian(datagram.AsSpan(24), timestampMs);
         BinaryPrimitives.WriteUInt16BigEndian(datagram.AsSpan(28), checked((ushort)payload.Length));
-        BinaryPrimitives.WriteUInt16BigEndian(datagram.AsSpan(30), 0);
+        BinaryPrimitives.WriteUInt16BigEndian(datagram.AsSpan(30), Version);
         payload.CopyTo(datagram.AsSpan(HeaderLength));
         return datagram;
     }
@@ -130,6 +133,9 @@ internal static class Protocol
         if (datagram.Length < HeaderLength || !datagram[..4].SequenceEqual(Magic) ||
             BinaryPrimitives.ReadUInt16BigEndian(datagram[6..]) != HeaderLength)
             return false;
+
+        if (datagram[4] != (byte)PacketType.Hello &&
+            BinaryPrimitives.ReadUInt16BigEndian(datagram[30..]) != Version) return false;
 
         var meshId = BinaryPrimitives.ReadUInt32BigEndian(datagram[8..]);
         var sender = BinaryPrimitives.ReadUInt32BigEndian(datagram[12..]);

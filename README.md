@@ -44,7 +44,7 @@ the opposite order. `ring_orientation: 180` rotates the logical ring centre by
   continue.
 - Received broadcast and correctly addressed directed messages play
   immediately and show the speaking animation.
-- When another sender owns the floor, a pressed PTT button retains up to
+- When another broadcaster owns the broadcast floor, broadcast PTT retains up to
   500 ms of microphone audio. If the floor becomes free in time, transmission
   begins; otherwise the active message continues and the device gives two red
   error pulses.
@@ -58,12 +58,11 @@ control/configuration, so use a trusted private LAN.
 
 Discovery sends compact `PTT1` `HELLO` beacons to `239.255.42.99:45678` (TTL
 1), with subnet broadcast and low-rate unicast probing as fallbacks for access
-points that suppress client multicast. Discovery beacons use the `IH2` payload
-format and announce the alias, firmware version, protocol revision and OTA
-capability. After discovery, control and media are sent directly to each
+points that suppress client multicast. Discovery beacons use the `IH3` payload
+format and announce the alias, firmware version, protocol revision, capabilities and mute/talking flags. After discovery, control and media are sent directly to each
 active peer; no static IP address is retained.
 
-PTT floor control uses an explicit, big-endian 32-byte `PTT1` UDP control
+The p3 broadcast floor uses an explicit, big-endian 32-byte `PTT1` UDP control
 header. It uses CLAIM ×3, a 100 ms pre-audio delay, deterministic
 `(session_id, sender_id)` tie-break, a 750 ms release timeout, and END drain.
 Audio travels as RTP on UDP port 45679 with payload type 96: 16 kHz mono
@@ -71,6 +70,18 @@ packet-independent IMA ADPCM, 320 samples / 20 ms per frame and a 164-byte
 payload. The receiver starts audio after a 20-frame / 400 ms prebuffer and has
 reorder plus attenuated replay packet-loss concealment. Voice packets are
 marked Wi-Fi WMM video priority where the platform supports it.
+
+Directed calls reserve only their participating endpoints. Unrelated directed
+calls and a broadcast may run together. Local priority is **local TX > directed
+RX > broadcast RX**; a directed call can replace broadcast playback locally.
+Broadcast is best-effort: nodes busy with directed audio may miss it.
+
+The [p3 protocol contract](docs/protocol-p3.md) documents revision 3, directed
+ACCEPT/BUSY, capability assignments and assistant configuration. Configure
+device exposes assistant permission and a service selector on future
+ASSISTANT_CLIENT-capable devices. `assistant_enabled` defaults to false;
+`assistant_service_id` stores a stable sender ID (0 = unset). Offline selections
+are retained. Current C3 firmware provides no assistant interactions.
 
 ## Build and flash firmware
 

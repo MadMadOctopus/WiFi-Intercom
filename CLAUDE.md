@@ -1,6 +1,6 @@
 # CLAUDE.md — WiFi-Intercom
 
-Working branch: `codex/companion-p2-redesign`. Base: `main`.
+Use a dedicated feature branch based on current `main`.
 
 This file is the standing brief for anyone (human or agent) working in this
 repo. Read it before the first edit of a session.
@@ -12,8 +12,9 @@ repo. Read it before the first edit of a session.
 - `tools/` — helper scripts, not part of the shipped product.
 - `docs/` — protocol, architecture and design documents.
 
-The current effort is a **companion UI redesign plus a p1 → p2 protocol
-uplift**. Two agents have attempted the UI and both produced a window that does
+The companion follows the existing UI redesign. The current protocol is
+**p3**, specified in `docs/protocol-p3.md`. Historical p1/p2 protocol and
+interoperability requirements below are superseded by that contract. Two agents have attempted the UI and both produced a window that does
 not match the design. Read `docs/design/companion-redesign-handover.md` before
 touching `companion/` — it explains why, and what to do instead.
 
@@ -86,10 +87,12 @@ Do not report a phase complete without having run the app.
 
 ## Firmware
 
-The p2 protocol changes (`IH3` HELLO, `soft_mute`, `hw_muted`, `mesh_id`,
-`device_id` in NVS) are specified in `docs/design/companion-redesign-spec.md`
-§2. A p2 node must stay interoperable with p1 nodes for audio and discovery.
-Do not change the codec, frame size or ports.
+The p3 protocol (`docs/protocol-p3.md`) has one broadcast floor per group and
+endpoint-scoped directed sessions with ACCEPT. Local audio priority is local TX
+> directed RX > broadcast RX. Do not change the codec, frame size or ports.
+Unsupported control revisions must be rejected; mixed p1/p2/p3 interoperability
+is not required. Assistant capability/configuration is groundwork only; current
+production C3 advertises OTA and implements no assistant interaction.
 
 ## Machine-local instructions
 

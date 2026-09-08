@@ -8,27 +8,26 @@ for low-rate `HELLO` discovery on the existing 2.4 GHz LAN. Learned endpoint
 addresses are held only in a short-lived peer table, so no IP list is stored in
 configuration. The Wi-Fi radio remains awake while the unit is USB-powered.
 
-Every group packet carries a sender ID. A PTT session snapshots the current
-learned peers and unicasts `CLAIM`, `BUSY`, `HEARTBEAT`, `END`, and broadcast
-audio to that set. Directed audio is unicast only to its selected endpoint,
-while its floor-control packets still fan out to the group snapshot. This keeps
-one deterministic floor without relying on unreliable Wi-Fi multicast for
-real-time traffic.
+Every group packet carries a stable sender ID. Broadcast control and RTP go to
+active learned peers in the group. Directed control and RTP go only to the
+selected endpoint. See the [current p3 contract](protocol-p3.md).
 
 ## Floor and PTT behaviour
 
-* A `CLAIM` is unicast to the active peer snapshot before a sender streams
-  audio. The smallest
-  `(session_id, sender_id)` wins a simultaneous claim.
-* Button 1 creates a broadcast session and shows the green talk animation.
-* Button 2 targets the sender of the last received message and shows the blue
-  talk animation. It does nothing until a sender is known.
-* While another session owns the floor, a held PTT retains at most 25 frames
-  (500 ms) of microphone audio. If the remote session ends within that window,
-  that retained audio is sent first. Otherwise the attempt is rejected with two
-  short red pulses, while remote playout continues.
-* The mute switch prevents I2S playout only; it never removes a unit from
-  discovery or floor control.
+There is one global broadcast floor per network group. Broadcast contenders
+use the lowest `(session_id, sender_id)` tie-break and existing claim retries.
+Directed sessions reserve their participating endpoints and require an ACCEPT;
+unrelated directed sessions coexist with one another and with broadcasts.
+
+Local priority is **local TX > directed RX > broadcast RX**. Directed reception
+replaces broadcast playback locally while the broadcast owner remains active.
+A local transmitter rejects incoming directed calls; an existing directed
+receiver rejects a different directed caller. Busy nodes may miss broadcasts:
+broadcast is best-effort to available nodes, with no catch-up playback.
+
+Broadcast and reply buttons retain green/blue animations. Reply resolves the
+most recent sender's stable ID through discovery. Broadcast PTT buffers up to
+500 ms while the broadcast floor is occupied. Mute affects playout only.
 
 ## Discovery and configuration
 
@@ -59,8 +58,15 @@ All integer fields are big-endian. The proven 32-byte header is retained:
 | sequence | 4 |
 | timestamp (ms) | 4 |
 | payload length | 2 |
-| reserved | 2 |
+| protocol revision (3) | 2 |
 
 Audio remains 16 kHz, mono, 20 ms, packet-independent IMA ADPCM frames. The
 packet types are `CLAIM`, `BUSY`, `AUDIO`, `END`, `HELLO`, `HEARTBEAT`,
-`CONFIG_GET`, `CONFIG_SET`, and `CONFIG_REPLY`.
+`CONFIG_GET`, `CONFIG_SET`, `CONFIG_REPLY`, the existing signed OTA packet
+types 10–12, and directed `ACCEPT` (13).
+
+Assistant service/client capabilities occupy `0x02`/`0x04`; OTA keeps `0x01`.
+NVS v3 adds `assistant_enabled` (default false) and `assistant_service_id`
+(default 0/unset). The ID survives service absence and resolves dynamically;
+permission and technical capability are distinct. No assistant interactions
+are implemented. See [configuration details](protocol-p3.md#configuration-and-service-selection).

@@ -65,7 +65,9 @@ internal static class UsbConfigurationClient
             configuration = new UsbDeviceConfiguration(
                 root.TryGetProperty("device_id", out var deviceId) ? deviceId.GetUInt32() : 0,
                 root.TryGetProperty("alias", out var alias) ? alias.GetString() ?? "" : "",
-                root.TryGetProperty("ssid", out var ssid) ? ssid.GetString() ?? "" : "");
+                root.TryGetProperty("ssid", out var ssid) ? ssid.GetString() ?? "" : "",
+                root.TryGetProperty("assistant_enabled", out var enabled) && enabled.GetBoolean(),
+                root.TryGetProperty("assistant_service_id", out var service) ? service.GetUInt32() : 0);
             return true;
         }
         catch (JsonException)
@@ -75,4 +77,4 @@ internal static class UsbConfigurationClient
     }
 }
 
-internal sealed record UsbDeviceConfiguration(uint DeviceId, string Alias, string Ssid);
+internal sealed record UsbDeviceConfiguration(uint DeviceId, string Alias, string Ssid, bool AssistantEnabled = false, uint AssistantServiceId = 0);

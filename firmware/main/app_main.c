@@ -48,6 +48,7 @@
 #include "adpcm.h"
 #include "device_config.h"
 #include "protocol.h"
+#include "session_policy.h"
 #include "ota_manager.h"
 #include "ring_controller.h"
 #include "usb_control.h"
@@ -122,6 +123,8 @@ typedef struct {
     uint32_t id;
     struct sockaddr_in address;
     uint32_t last_seen_ms;
+    uint8_t capabilities;
+    uint8_t protocol_version;
 } peer_t;
 
 /* ---- jitter buffer ------------------------------------------------------ */
@@ -137,6 +140,7 @@ typedef struct {
 /* ---- shared node state (guarded by g_lock) ----------------------------- */
 static struct {
     node_state_t state;
+    broadcast_floor_t broadcast;
 
     /* transmit */
     uint32_t tx_session;
@@ -150,6 +154,8 @@ static struct {
     int claims_sent;
     uint32_t last_claim_ms;
     bool     tx_directed;
+    bool     tx_accepted;
+    uint32_t tx_target_id;
     struct sockaddr_in tx_audio_destination;
 
     /* Pressing a PTT while another node owns the floor preserves only the
@@ -162,6 +168,8 @@ static struct {
     audio_frame_t waiting_frames[BUSY_BUFFER_FRAMES];
 
     /* receive */
+    bool     rx_directed;
+    struct sockaddr_in rx_address;
     uint32_t rx_sender;
     uint32_t rx_session;
     uint32_t rx_last_ms;
@@ -212,7 +220,7 @@ static void send_packet_to(const struct sockaddr_in *destination, uint8_t type,
                            const uint8_t *payload, uint16_t payload_len)
 {
     /* stack-local: send_packet is called from several tasks concurrently */
-    uint8_t buf[PROTO_HEADER_LEN + 320];
+    uint8_t buf[PROTO_HEADER_LEN + 768];
     size_t n = protocol_pack(buf, type, flags, MESH_ID, NODE_ID, session, sequence,
                              now_ms(), payload, payload_len);
     if (g_sock >= 0)
@@ -254,7 +262,8 @@ static int snapshot_active_peers(peer_t *out)
     int count = 0;
     xSemaphoreTake(g_lock, portMAX_DELAY);
     for (int i = 0; i < PEER_CAP; ++i) {
-        if (g.peers[i].id != 0 && t - g.peers[i].last_seen_ms <= PEER_EXPIRE_MS)
+        if (g.peers[i].id != 0 && g.peers[i].protocol_version == INTERCOM_PROTOCOL_VERSION &&
+            t - g.peers[i].last_seen_ms <= PEER_EXPIRE_MS)
             out[count++] = g.peers[i];
     }
     xSemaphoreGive(g_lock);
@@ -312,12 +321,14 @@ static void send_rtp_to_active_peers(uint32_t session, uint16_t sequence,
 static void send_packet(uint8_t type, uint32_t session, uint32_t sequence,
                         const uint8_t *payload, uint16_t payload_len)
 {
-    uint8_t flags = (g.tx_directed &&
-        (type == PKT_CLAIM || type == PKT_HEARTBEAT || type == PKT_END))
-        ? PROTO_FLAG_DIRECTED : 0;
-    /* All message traffic is learned-peer unicast. HELLO is deliberately the
-     * sole multicast packet type, sent directly by hello_task below. */
-    send_to_active_peers(type, flags, session, sequence, payload, payload_len);
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    bool directed = g.tx_directed;
+    struct sockaddr_in destination = g.tx_audio_destination;
+    xSemaphoreGive(g_lock);
+    if (directed)
+        send_packet_to(&destination, type, PROTO_FLAG_DIRECTED, session, sequence, payload, payload_len);
+    else
+        send_to_active_peers(type, 0, session, sequence, payload, payload_len);
 }
 
 /* remote (session,sender) beats our claim if its tuple is strictly lower. */
@@ -453,6 +464,7 @@ static bool jb_pop(int16_t *out)
 /* ======================================================================== */
 static void begin_receiving(const intercom_pkt_t *p)
 {
+    g.rx_directed = (p->flags & PROTO_FLAG_DIRECTED) != 0;
     g.rx_sender = p->sender_id;
     g.rx_session = p->session_id;
     g.rx_last_ms = now_ms();
@@ -474,6 +486,12 @@ static void peer_seen(const intercom_pkt_t *p, const struct sockaddr_in *source)
         if (g.peers[i].id == p->sender_id) {
             g.peers[i].address = *source;
             g.peers[i].last_seen_ms = now_ms();
+            if (p->type == PKT_HELLO) {
+                g.peers[i].protocol_version = p->payload[3];
+                g.peers[i].capabilities = p->payload[4];
+            }
+            if (g.have_last_talker && g.last_talker_id == p->sender_id)
+                g.last_talker_address = *source;
             return;
         }
         if (g.peers[i].id == 0 && free_slot < 0) free_slot = i;
@@ -483,25 +501,68 @@ static void peer_seen(const intercom_pkt_t *p, const struct sockaddr_in *source)
     g.peers[slot].id = p->sender_id;
     g.peers[slot].address = *source;
     g.peers[slot].last_seen_ms = now_ms();
+    g.peers[slot].protocol_version = INTERCOM_PROTOCOL_VERSION;
+    g.peers[slot].capabilities = p->type == PKT_HELLO ? p->payload[4] : 0;
     ESP_LOGI(TAG, "Peer %08x discovered", (unsigned)p->sender_id);
+}
+
+/* g_lock held. IDs remain stable while endpoints may change on rediscovery.
+ * Future assistant callers pass g_config.assistant_service_id and SERVICE. */
+static const peer_t *find_active_peer_locked(uint32_t id, uint8_t required_capabilities)
+{
+    for (int i = 0; i < PEER_CAP; ++i) {
+        const peer_t *peer = &g.peers[i];
+        if (id != 0 && peer->id == id && peer->protocol_version == INTERCOM_PROTOCOL_VERSION &&
+            now_ms() - peer->last_seen_ms <= PEER_EXPIRE_MS &&
+            (peer->capabilities & required_capabilities) == required_capabilities) return peer;
+    }
+    return NULL;
 }
 
 static void handle_claim(const intercom_pkt_t *p, const struct sockaddr_in *source)
 {
-    if (g.state == ST_CLAIMING || g.state == ST_TALKING) {
-        if (remote_wins(p)) { begin_receiving(p); }
-        else { send_packet_to(source, PKT_BUSY, 0, g.tx_session, 0, NULL, 0); }
-    } else if (g.state == ST_IDLE) {
-        begin_receiving(p);
-    } else if (g.state == ST_RECEIVING && p->session_id != g.rx_session) {
-        send_packet_to(source, PKT_BUSY, 0, g.rx_session, 0, NULL, 0);
+    if (g.state == ST_RECEIVING && !g.rx_ending && now_ms() - g.rx_last_ms > RX_TIMEOUT_MS) {
+        g.state = ST_IDLE;
+        jb_reset();
     }
+    bool local_tx = g.state == ST_CLAIMING || g.state == ST_TALKING;
+    if (p->flags & PROTO_FLAG_DIRECTED) {
+        if (!directed_accept(local_tx, g.state == ST_RECEIVING, g.rx_directed,
+                             g.rx_sender, g.rx_session, p->sender_id, p->session_id)) {
+            send_packet_to(source, PKT_BUSY, PROTO_FLAG_DIRECTED, p->session_id, 0, NULL, 0);
+            return;
+        }
+        if (g.state != ST_RECEIVING || !g.rx_directed ||
+            g.rx_sender != p->sender_id || g.rx_session != p->session_id) begin_receiving(p);
+        g.rx_address = *source;
+        g.rx_last_ms = now_ms();
+        send_packet_to(source, PKT_ACCEPT, PROTO_FLAG_DIRECTED, p->session_id, 0, NULL, 0);
+        return;
+    }
+    /* Broadcast ownership is independent of this node's audio resource. */
+    if (local_tx && !g.tx_directed && !remote_wins(p)) {
+        send_packet_to(source, PKT_BUSY, 0, g.tx_session, 0, NULL, 0);
+        return;
+    }
+    if (!broadcast_claim(&g.broadcast, p->sender_id, p->session_id, now_ms())) {
+        send_packet_to(source, PKT_BUSY, 0, g.broadcast.session, 0, NULL, 0);
+        return;
+    }
+    if ((local_tx && g.tx_directed) || (g.state == ST_RECEIVING && g.rx_directed)) return;
+    if (g.state != ST_RECEIVING || g.rx_sender != p->sender_id || g.rx_session != p->session_id)
+        begin_receiving(p);
+    g.rx_address = *source;
 }
 
-static void handle_rtp(uint32_t session, uint16_t sequence,
+static void handle_rtp(const struct sockaddr_in *source, uint32_t session, uint16_t sequence,
                        const uint8_t *payload, uint16_t payload_len)
 {
-    if (g.state != ST_RECEIVING || session != g.rx_session) return;
+    const peer_t *owner = find_active_peer_locked(g.broadcast.sender, 0);
+    if (g.broadcast.active && session == g.broadcast.session && owner &&
+        source->sin_addr.s_addr == owner->address.sin_addr.s_addr)
+        g.broadcast.last_ms = now_ms();
+    if (g.state != ST_RECEIVING || session != g.rx_session ||
+        source->sin_addr.s_addr != g.rx_address.sin_addr.s_addr) return;
     g.rx_last_ms = now_ms();
     static int16_t pcm[FRAME_SAMPLES];
     if (adpcm_decode_frame(payload, payload_len, pcm) == 0)
@@ -510,8 +571,10 @@ static void handle_rtp(uint32_t session, uint16_t sequence,
 
 static void handle_end(const intercom_pkt_t *p)
 {
-    if (g.state == ST_RECEIVING && p->session_id == g.rx_session &&
-        !g.rx_ending) {
+    if (!(p->flags & PROTO_FLAG_DIRECTED) && broadcast_matches(&g.broadcast, p->sender_id, p->session_id))
+        g.broadcast.active = false;
+    if (g.state == ST_RECEIVING && p->session_id == g.rx_session && p->sender_id == g.rx_sender &&
+        ((p->flags & PROTO_FLAG_DIRECTED) != 0) == g.rx_directed && !g.rx_ending) {
         ESP_LOGI(TAG, "RX end: session=%08x", (unsigned)p->session_id);
         /* Drain whatever is still buffered before returning to idle so the
          * tail of the message is not truncated. */
@@ -522,38 +585,23 @@ static void handle_end(const intercom_pkt_t *p)
 
 static void handle_heartbeat(const intercom_pkt_t *p)
 {
-    if (g.state == ST_RECEIVING && p->session_id == g.rx_session)
+    if (!(p->flags & PROTO_FLAG_DIRECTED) && broadcast_matches(&g.broadcast, p->sender_id, p->session_id))
+        g.broadcast.last_ms = now_ms();
+    if (g.state == ST_RECEIVING && p->session_id == g.rx_session && p->sender_id == g.rx_sender &&
+        ((p->flags & PROTO_FLAG_DIRECTED) != 0) == g.rx_directed)
         g.rx_last_ms = now_ms();
 }
 
-/* Returns true when the applied configuration needs a reboot. Runs WITHOUT
- * g_lock held: JSON parsing, the NVS commit inside device_config_apply_json
- * and the blocking UDP reply are all far slower than the 20 ms deadlines of
- * the audio tasks that contend for the lock. The change is applied to a
- * snapshot and swapped into g_config under the lock afterwards; a concurrent
- * USB configuration write in that window loses, which matches the existing
- * whole-struct-replacement semantics of the configuration path. */
+/* USB and remote configuration share a serialised NVS transaction. */
 static bool handle_config_packet(const intercom_pkt_t *p,
                                  const struct sockaddr_in *source)
 {
-    if (p->payload_len == 0 || p->payload_len >= 320) return false;
-    char request[320] = {0};
-    char response[320] = {0};
+    if (p->payload_len == 0 || p->payload_len >= 768) return false;
+    char request[768] = {0};
+    char response[768] = {0};
     memcpy(request, p->payload, p->payload_len);
     bool restart_required = false;
-    device_config_t working;
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    working = g_config;
-    xSemaphoreGive(g_lock);
-    usb_control_process(&working, request, response, sizeof(response), &restart_required);
-    if (p->type == PKT_CONFIG_SET) {
-        /* A GET leaves the snapshot untouched; writing it back regardless
-         * would silently revert a legitimate concurrent change (USB console,
-         * ring_task's hardware-mute clear) made inside the unlocked window. */
-        xSemaphoreTake(g_lock, portMAX_DELAY);
-        g_config = working;
-        xSemaphoreGive(g_lock);
-    }
+    usb_control_request(request, response, sizeof(response), &restart_required);
     send_packet_to(source, PKT_CONFIG_REPLY, 0, p->session_id, 0,
                    (const uint8_t *)response, (uint16_t)strlen(response));
     return restart_required;
@@ -564,26 +612,12 @@ static bool handle_config_packet(const intercom_pkt_t *p,
  * multicast back to a Windows Wi-Fi client (IGMP/multicast isolation). */
 static uint16_t build_hello_payload(uint8_t *out, size_t capacity)
 {
-    /* IH3 + protocol byte + capabilities + live flags + firmware-version
-     * length + firmware version + alias. IH1/IH2 recipients retain audio and
-     * discovery interoperability even though they do not display p2 flags. */
-    const char *firmware = esp_app_get_description()->version;
-    const uint8_t *alias = (const uint8_t *)g_config.alias;
-    size_t firmware_length = strnlen(firmware, 31);
-    size_t alias_length = strnlen(g_config.alias, DEVICE_ALIAS_MAX);
-    if (capacity < 7 || firmware_length + alias_length > capacity - 7) return 0;
-    out[0] = 'I'; out[1] = 'H'; out[2] = '3';
-    out[3] = INTERCOM_PROTOCOL_VERSION;
-    out[4] = INTERCOM_CAPABILITY_OTA;
     uint8_t flags = 0;
     if (button_pressed(MUTE_SWITCH_GPIO)) flags |= 0x01u;
     if (g_config.soft_mute) flags |= 0x02u;
     if (g.state == ST_CLAIMING || g.state == ST_TALKING) flags |= 0x04u;
-    out[5] = flags;
-    out[6] = (uint8_t)firmware_length;
-    memcpy(out + 7, firmware, firmware_length);
-    memcpy(out + 7 + firmware_length, alias, alias_length);
-    return (uint16_t)(7 + firmware_length + alias_length);
+    return (uint16_t)protocol_hello_pack(out, capacity, INTERCOM_CAPABILITIES, flags,
+                                       esp_app_get_description()->version, g_config.alias);
 }
 
 static void reply_hello(const struct sockaddr_in *destination)
@@ -598,7 +632,7 @@ static void reply_hello(const struct sockaddr_in *destination)
 /* ======================================================================== */
 static void net_rx_task(void *arg)
 {
-    uint8_t buf[PROTO_HEADER_LEN + 320];
+    uint8_t buf[PROTO_HEADER_LEN + 768];
     while (1) {
         struct sockaddr_in src;
         socklen_t slen = sizeof(src);
@@ -609,13 +643,17 @@ static void net_rx_task(void *arg)
         intercom_pkt_t pkt;
         if (!protocol_parse(buf, n, MESH_ID, NODE_ID, &pkt)) continue;
 
+        intercom_hello_t hello;
+        if (pkt.type == PKT_HELLO && (!protocol_hello_parse(pkt.payload, pkt.payload_len, &hello) ||
+            hello.version != INTERCOM_PROTOCOL_VERSION)) continue;
         bool restart_required = false;
         bool config_request = false;
         const char *ota_reject_message = NULL;
         xSemaphoreTake(g_lock, portMAX_DELAY);
         peer_seen(&pkt, &src);
         if (ota_manager_is_active() && pkt.type == PKT_CLAIM) {
-            send_packet_to(&src, PKT_BUSY, 0, 0, 0, NULL, 0);
+            send_packet_to(&src, PKT_BUSY, pkt.flags & PROTO_FLAG_DIRECTED,
+                           (pkt.flags & PROTO_FLAG_DIRECTED) ? pkt.session_id : 0, 0, NULL, 0);
             xSemaphoreGive(g_lock);
             continue;
         }
@@ -654,22 +692,27 @@ static void net_rx_task(void *arg)
                  * or using automatic rollback on the next boot. */
                 ota_reject_message = "Cancellation unavailable";
                 break;
+            case PKT_ACCEPT:
+                if (g.state == ST_CLAIMING && g.tx_directed &&
+                    (pkt.flags & PROTO_FLAG_DIRECTED) && pkt.session_id == g.tx_session && pkt.sender_id == g.tx_target_id &&
+                    src.sin_addr.s_addr == g.tx_audio_destination.sin_addr.s_addr)
+                    g.tx_accepted = true;
+                break;
             case PKT_BUSY:
-                /* A Busy must plausibly answer our own claim, otherwise a
-                 * single forged packet from anyone who knows the 4-char mesh
-                 * id cancels every claim in the mesh. The PTT1 header carries
-                 * the responder's session (see handle_claim), not ours, so the
-                 * check is the same floor-arbitration rule a CLAIM gets: we
-                 * must still be claiming, must already have sent a claim, and
-                 * the remote tuple must beat ours. */
                 if (g.state == ST_CLAIMING && g.claims_sent > 0 &&
-                    pkt.sender_id != NODE_ID && remote_wins(&pkt))
+                    (((pkt.flags & PROTO_FLAG_DIRECTED) && g.tx_directed &&
+                      pkt.session_id == g.tx_session && pkt.sender_id == g.tx_target_id && src.sin_addr.s_addr == g.tx_audio_destination.sin_addr.s_addr) ||
+                     (!(pkt.flags & PROTO_FLAG_DIRECTED) && !g.tx_directed &&
+                      (pkt.session_id == 0 || remote_wins(&pkt))))) {
                     g.state = ST_IDLE;
+                    g.error_until_ms = now_ms() + 750;
+                }
                 break;
             default: break;
         }
         if (pkt.type == PKT_CLAIM && g.state == ST_RECEIVING &&
-            pkt.session_id == g.rx_session) {
+            pkt.session_id == g.rx_session && pkt.sender_id == g.rx_sender &&
+            ((pkt.flags & PROTO_FLAG_DIRECTED) != 0) == g.rx_directed) {
             g.last_talker_id = pkt.sender_id;
             g.last_talker_address = src;
             g.have_last_talker = true;
@@ -707,7 +750,7 @@ static void rtp_rx_task(void *arg)
         uint32_t session = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
                            ((uint32_t)buf[10] << 8) | buf[11];
         xSemaphoreTake(g_lock, portMAX_DELAY);
-        handle_rtp(session, sequence, buf + 12, (uint16_t)(n - 12));
+        handle_rtp(&source, session, sequence, buf + 12, (uint16_t)(n - 12));
         xSemaphoreGive(g_lock);
     }
 }
@@ -729,6 +772,9 @@ static void start_tx_locked(uint32_t t, bool directed,
     g.tx_rtp_sequence = (uint16_t)esp_random();
     g.tx_rtp_timestamp = esp_random();
     g.tx_directed = directed;
+    g.tx_accepted = false;
+    g.tx_target_id = directed ? g.last_talker_id : 0;
+    jb_reset();
     if (destination) g.tx_audio_destination = *destination;
     adpcm_state_reset(&g_adpcm_encoder);
     g.claim_start_ms = t;
@@ -742,8 +788,9 @@ static void start_tx_locked(uint32_t t, bool directed,
 static void finish_tx(uint32_t session, uint32_t sequence, bool directed)
 {
     for (int i = 0; i < END_COUNT; ++i) {
-        send_to_active_peers(PKT_END, directed ? PROTO_FLAG_DIRECTED : 0,
-                             session, sequence, NULL, 0);
+        if (directed)
+            send_packet_to(&g.tx_audio_destination, PKT_END, PROTO_FLAG_DIRECTED, session, sequence, NULL, 0);
+        else send_to_active_peers(PKT_END, 0, session, sequence, NULL, 0);
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -784,23 +831,27 @@ static void tx_task(void *arg)
             previous_reply = reply;
 
             xSemaphoreTake(g_lock, portMAX_DELAY);
+            broadcast_expire(&g.broadcast, t);
             if (new_press) {
                 bool directed = reply && !broadcast;
                 ESP_LOGI(TAG, "PTT button: %s", directed ? "reply" : "broadcast");
-                if (directed && !g.have_last_talker) {
+                const peer_t *reply_peer = directed ? find_active_peer_locked(g.last_talker_id, 0) : NULL;
+                if (reply_peer) g.last_talker_address = reply_peer->address;
+                if (directed && (!g.have_last_talker || !reply_peer)) {
                     /* A reply has no meaning until an incoming AUDIO packet
                      * establishes the last talker. Make that visible rather
                      * than failing silently, and log it for wiring checks. */
                     g.error_until_ms = t + 750;
                     ESP_LOGW(TAG, "Reply unavailable: no previous talker");
-                } else if (g.state == ST_IDLE && !ota_manager_is_active()) {
+                } else if ((g.state == ST_IDLE || g.state == ST_RECEIVING) &&
+                           (directed || !g.broadcast.active) && !ota_manager_is_active()) {
                     /* The OTA slot is claimed under g_lock as well, so this
                      * pair of checks cannot both succeed. */
                     g.tx_buffer_count = 0;
                     g.tx_buffer_index = 0;
                     start_tx_locked(t, directed,
                                     directed ? &g.last_talker_address : NULL);
-                } else if (g.state == ST_RECEIVING) {
+                } else if (g.state == ST_RECEIVING || g.state == ST_IDLE) {
                     g.waiting_for_floor = true;
                     g.waiting_started_ms = t;
                     g.waiting_count = 0;
@@ -826,8 +877,9 @@ static void tx_task(void *arg)
         }
 
         xSemaphoreTake(g_lock, portMAX_DELAY);
+        broadcast_expire(&g.broadcast, t);
         if (g.waiting_for_floor) {
-            if (g.state == ST_IDLE && !ota_manager_is_active()) {
+            if (!g.broadcast.active && t - g.waiting_started_ms < BUSY_BUFFER_MS && !ota_manager_is_active()) {
                 g.tx_buffer_count = g.waiting_count;
                 g.tx_buffer_index = 0;
                 g.waiting_for_floor = false;
@@ -853,7 +905,8 @@ static void tx_task(void *arg)
                 xSemaphoreTake(g_lock, portMAX_DELAY);
             }
             if (t - g.claim_start_ms >= PRE_AUDIO_DELAY_MS && g.state == ST_CLAIMING) {
-                g.state = ST_TALKING;
+                g.state = (!g.tx_directed || g.tx_accepted) ? ST_TALKING : ST_IDLE;
+                if (g.state == ST_IDLE) g.error_until_ms = t + 750;
                 g.tx_sequence = 0;
                 ESP_LOGI(TAG, "TX talking");
             }
@@ -863,7 +916,7 @@ static void tx_task(void *arg)
          * discarded frames between send slots, which produced a time-compressed
          * stream even after replacing Opus with cheap IMA ADPCM. */
         bool can_send = g.state == ST_TALKING;
-        bool send_heartbeat = g.state == ST_TALKING && g.tx_directed &&
+        bool send_heartbeat = g.state == ST_TALKING &&
                               t - g.tx_last_heartbeat_ms >= 100;
         uint32_t heartbeat_session = g.tx_session;
         if (send_heartbeat) g.tx_last_heartbeat_ms = t;
@@ -1172,18 +1225,9 @@ static void ring_task(void *arg)
         uint32_t t = now_ms();
         bool hardware_muted = button_pressed(MUTE_SWITCH_GPIO);
         bool save_soft_mute_clear = false;
-        device_config_t saved_config = {0};
         xSemaphoreTake(g_lock, portMAX_DELAY);
-        /* The physical switch always wins. Clearing and saving this once on
-         * engagement means lifting the switch never leaves playback silently
-         * soft-muted by an earlier companion command. The NVS commit itself
-         * runs on a snapshot after the lock is released: flash writes take
-         * tens of milliseconds and would stall the audio tasks. */
-        if (hardware_muted && g_config.soft_mute) {
-            g_config.soft_mute = 0;
-            saved_config = g_config;
-            save_soft_mute_clear = true;
-        }
+        /* Preserve physical-slider clearing, serialised with remote/USB writes. */
+        save_soft_mute_clear = hardware_muted && g_config.soft_mute;
         bool soft_muted = g_config.soft_mute;
         node_state_t state = g.state;
         bool rx_audio_started = g.jb_started;
@@ -1192,10 +1236,13 @@ static void ring_task(void *arg)
         xSemaphoreGive(g_lock);
 
         if (save_soft_mute_clear) {
-            if (device_config_save(&saved_config))
+            char response[768];
+            bool restart_required = false;
+            if (usb_control_request("{\"cmd\":\"set\",\"soft_mute\":false}", response,
+                                    sizeof(response), &restart_required))
                 ESP_LOGI(TAG, "Hardware mute cleared the soft-mute flag");
             else
-                ESP_LOGW(TAG, "Hardware mute cleared soft mute only until reboot (NVS save failed)");
+                ESP_LOGW(TAG, "Could not persist soft-mute clear; will retry");
         }
 
         if (ota_manager_is_active()) ring_controller_set(RING_OTA);
@@ -1378,7 +1425,7 @@ void app_main(void)
     ESP_LOGW(TAG, "DIAGNOSTIC build: streaming conditioned 16 kHz PCM over USB");
 #endif
 
-    xTaskCreate(net_rx_task,   "net_rx",   4096, NULL, 6, NULL);
+    xTaskCreate(net_rx_task,   "net_rx",   8192, NULL, 6, NULL);
     xTaskCreate(rtp_rx_task,   "rtp_rx",   4096, NULL, 6, NULL);
     xTaskCreate(capture_task,  "capture",  4096, NULL, 6, NULL);
     xTaskCreate(tx_task,       "tx",       4096, NULL, 5, NULL);

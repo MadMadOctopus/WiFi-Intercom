@@ -48,7 +48,7 @@ size_t protocol_pack(uint8_t *buf, uint8_t type, uint8_t flags,
     put_u32(&buf[20], sequence);
     put_u32(&buf[24], timestamp_ms);
     put_u16(&buf[28], payload_len);
-    put_u16(&buf[30], 0);             /* reserved */
+    put_u16(&buf[30], INTERCOM_PROTOCOL_VERSION); /* p3 control contract */
 
     if (payload && payload_len)
         memcpy(buf + PROTO_HEADER_LEN, payload, payload_len);
@@ -62,13 +62,14 @@ bool protocol_parse(const uint8_t *data, size_t len, uint32_t mesh_id,
     if (data[0] != PROTO_MAGIC0 || data[1] != PROTO_MAGIC1 ||
         data[2] != PROTO_MAGIC2 || data[3] != PROTO_MAGIC3) return false;
     if (get_u16(&data[6]) != PROTO_HEADER_LEN) return false;
+    if (data[4] != PKT_HELLO && get_u16(&data[30]) != INTERCOM_PROTOCOL_VERSION) return false;
     if (get_u32(&data[8]) != mesh_id) return false;
 
     uint32_t sender_id = get_u32(&data[12]);
     if (sender_id == self_id) return false;         /* ignore our own packets */
 
     uint16_t payload_len = get_u16(&data[28]);
-    if ((size_t)PROTO_HEADER_LEN + payload_len > len) return false;
+    if ((size_t)PROTO_HEADER_LEN + payload_len != len) return false;
 
     out->type = data[4];
     out->flags = data[5];
@@ -79,5 +80,30 @@ bool protocol_parse(const uint8_t *data, size_t len, uint32_t mesh_id,
     out->timestamp_ms = get_u32(&data[24]);
     out->payload_len = payload_len;
     out->payload = data + PROTO_HEADER_LEN;
+    return true;
+}
+
+size_t protocol_hello_pack(uint8_t *out, size_t capacity, uint8_t capabilities,
+                           uint8_t flags, const char *firmware, const char *alias)
+{
+    size_t fw_len = strlen(firmware), alias_len = strlen(alias);
+    if (fw_len > 31) fw_len = 31;
+    if (alias_len > 32) alias_len = 32;
+    if (capacity < 7 + fw_len + alias_len) return 0;
+    memcpy(out, "IH3", 3);
+    out[3] = INTERCOM_PROTOCOL_VERSION;
+    out[4] = capabilities;
+    out[5] = flags & 7;
+    out[6] = (uint8_t)fw_len;
+    memcpy(out + 7, firmware, fw_len);
+    memcpy(out + 7 + fw_len, alias, alias_len);
+    return 7 + fw_len + alias_len;
+}
+
+bool protocol_hello_parse(const uint8_t *payload, size_t length, intercom_hello_t *out)
+{
+    if (length < 7 || memcmp(payload, "IH3", 3) != 0 || length < 7u + payload[6]) return false;
+    *out = (intercom_hello_t){payload[3], payload[4], payload[5], payload[6],
+                            payload + 7, payload + 7 + payload[6], length - 7 - payload[6]};
     return true;
 }

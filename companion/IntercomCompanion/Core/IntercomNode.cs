@@ -85,7 +85,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     public IReadOnlyList<Peer> SnapshotGroupPeers(string groupCode)
     {
         var expiry = DateTimeOffset.UtcNow - PeerLifetime;
-        return peers.Values.Where(peer => peer.LastSeen >= expiry && peer.GroupCode == groupCode).ToArray();
+        return peers.Values.Where(peer => peer.IsProtocolCompatible && peer.LastSeen >= expiry && peer.GroupCode == groupCode).ToArray();
     }
 
     /// <summary>Live peers across every joined group — the destination set for a
@@ -93,7 +93,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     public IReadOnlyList<Peer> SnapshotJoinedPeers()
     {
         var expiry = DateTimeOffset.UtcNow - PeerLifetime;
-        return peers.Values.Where(peer => peer.LastSeen >= expiry && settings.IsJoined(peer.GroupCode)).ToArray();
+        return peers.Values.Where(peer => peer.IsProtocolCompatible && peer.LastSeen >= expiry && settings.IsJoined(peer.GroupCode)).ToArray();
     }
 
     public event EventHandler? PeersChanged;
@@ -160,18 +160,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     public Task<DeviceConfigurationReceivedEventArgs> SetConfigurationAsync(Peer peer, DeviceConfiguration configuration,
                                                                               CancellationToken cancellationToken = default)
     {
-        var request = JsonSerializer.Serialize(new
-        {
-            cmd = "set",
-            alias = configuration.Alias,
-            speaker_volume = configuration.SpeakerVolume,
-            led_brightness = configuration.LedBrightness,
-            buttons_swapped = configuration.ButtonsSwapped,
-            ring_orientation = configuration.RingOrientation,
-            soft_mute = configuration.SoftMute,
-            mesh_id = configuration.MeshId,
-            device_id = configuration.DeviceId,
-        });
+        var request = DeviceConfigurationJson.Encode(configuration);
         return SendConfigurationRequestAsync(PacketType.ConfigSet, Encoding.UTF8.GetBytes(request), peer,
             cancellationToken);
     }
@@ -237,6 +226,7 @@ internal sealed class IntercomNode : IAsyncDisposable
     private async Task<DeviceConfigurationReceivedEventArgs> SendConfigurationRequestAsync(
         PacketType type, byte[] payload, Peer peer, CancellationToken cancellationToken)
     {
+        if (!peer.IsProtocolCompatible) throw new InvalidOperationException("Device protocol is incompatible; update it before configuration.");
         var session = NewSessionId();
         var completion = new TaskCompletionSource<DeviceConfigurationReceivedEventArgs>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -402,7 +392,7 @@ internal sealed class IntercomNode : IAsyncDisposable
         var announcement = packet.Type == PacketType.Hello
             ? Protocol.ParseHello(packet.Payload)
             : new HelloAnnouncement(known?.Alias ?? $"Device {packet.SenderId:x8}",
-                known?.ProtocolVersion, known?.FirmwareVersion ?? "unknown", known?.Capabilities ?? 0,
+                Protocol.Version, known?.FirmwareVersion ?? "unknown", known?.Capabilities ?? 0,
                 known?.HelloFlags ?? 0);
         var groupCode = Protocol.MeshIdToText(packet.MeshId);
         seenGroupCodes.TryAdd(groupCode, 0);
@@ -434,16 +424,13 @@ internal sealed class IntercomNode : IAsyncDisposable
         {
             using var json = JsonDocument.Parse(packet.Payload);
             var root = json.RootElement;
-            var config = new DeviceConfiguration(
-                root.TryGetProperty("alias", out var alias) ? alias.GetString() ?? "" : "",
-                root.TryGetProperty("speaker_volume", out var volume) ? volume.GetInt32() : 512,
-                root.TryGetProperty("led_brightness", out var brightness) ? brightness.GetInt32() : 48,
-                root.TryGetProperty("buttons_swapped", out var swapped) && swapped.GetBoolean(),
-                root.TryGetProperty("ring_orientation", out var orientation) ? orientation.GetInt32() : 0,
-                root.TryGetProperty("soft_mute", out var softMute) && softMute.GetBoolean(),
-                root.TryGetProperty("hw_muted", out var hardwareMute) && hardwareMute.GetBoolean(),
-                ReadMeshId(root),
-                root.TryGetProperty("device_id", out var deviceId) ? deviceId.GetUInt32() : packet.SenderId);
+            if (root.TryGetProperty("type", out var type) && type.GetString() == "error")
+            {
+                if (configurationRequests.TryGetValue(packet.SessionId, out var pending))
+                    pending.TrySetException(new InvalidOperationException("Device rejected the configuration."));
+                return;
+            }
+            var config = DeviceConfigurationJson.Decode(root, packet.SenderId);
             var reply = new DeviceConfigurationReceivedEventArgs(packet.SenderId, packet.SessionId, source, config);
             if (configurationRequests.TryGetValue(packet.SessionId, out var completion))
             {
@@ -464,16 +451,6 @@ internal sealed class IntercomNode : IAsyncDisposable
             DiagnosticLog.Write($"config reply invalid sender={packet.SenderId:x8}: {exception.GetType().Name}");
             Diagnostic?.Invoke($"Ignored invalid configuration reply from {source.Address}.");
         }
-    }
-
-    private static string ReadMeshId(JsonElement root)
-    {
-        if (!root.TryGetProperty("mesh_id", out var meshId)) return "MESH";
-        if (meshId.ValueKind == JsonValueKind.String)
-            return Protocol.IsValidMeshId(meshId.GetString()) ? meshId.GetString()! : "MESH";
-        if (meshId.ValueKind == JsonValueKind.Number && meshId.TryGetUInt32(out var numeric))
-            return Protocol.MeshIdToText(numeric);
-        return "MESH";
     }
 
     private void ParseOtaStatus(IntercomPacket packet, IPEndPoint source)

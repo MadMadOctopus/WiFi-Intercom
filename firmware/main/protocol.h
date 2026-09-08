@@ -30,6 +30,16 @@
 #define PKT_OTA_OFFER    10
 #define PKT_OTA_STATUS   11
 #define PKT_OTA_CANCEL   12
+#define PKT_ACCEPT       13 /* directed reservation acknowledgement */
+
+#define INTERCOM_PROTOCOL_VERSION 3
+#define INTERCOM_CAPABILITY_OTA               0x01u
+#define INTERCOM_CAPABILITY_ASSISTANT_SERVICE 0x02u
+#define INTERCOM_CAPABILITY_ASSISTANT_CLIENT  0x04u
+/* Production C3 implements OTA only. Future builds may supply genuine roles. */
+#ifndef INTERCOM_CAPABILITIES
+#define INTERCOM_CAPABILITIES INTERCOM_CAPABILITY_OTA
+#endif
 
 #define PROTO_FLAG_DIRECTED 0x01u
 
@@ -62,5 +72,14 @@ size_t protocol_pack(uint8_t *buf, uint8_t type, uint8_t flags,
  */
 bool protocol_parse(const uint8_t *data, size_t len, uint32_t mesh_id,
                     uint32_t self_id, intercom_pkt_t *out);
+
+typedef struct {
+    uint8_t version, capabilities, flags, firmware_len;
+    const uint8_t *firmware, *alias;
+    size_t alias_len;
+} intercom_hello_t;
+size_t protocol_hello_pack(uint8_t *out, size_t capacity, uint8_t capabilities,
+                           uint8_t flags, const char *firmware, const char *alias);
+bool protocol_hello_parse(const uint8_t *payload, size_t length, intercom_hello_t *out);
 
 #endif /* INTERCOM_PROTOCOL_H */

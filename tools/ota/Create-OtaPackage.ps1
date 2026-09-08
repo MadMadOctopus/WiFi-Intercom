@@ -13,7 +13,7 @@ param(
     [Parameter(Mandatory)] [string] $Image,
     [Parameter(Mandatory)] [string] $Version,
     [Parameter(Mandatory)] [string] $PrivateKey,
-    [ValidateRange(1, 255)] [int] $Protocol = 1,
+    [ValidateRange(1, 255)] [int] $Protocol = 3,
     [string] $Output
 )
 

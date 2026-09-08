@@ -111,7 +111,7 @@ internal sealed class DeviceCard : Panel
             : value.HardwareMuted || value.IsLegacy ? UiStyles.Amber
             : value.SoftMuted ? UiStyles.Body : UiStyles.Green;
         alias.Text = value.Alias;
-        var state = value.IsTalking ? "SPEAKING" : value.HardwareMuted ? "MUTED"
+        var state = !value.IsProtocolCompatible ? "INCOMPATIBLE" : value.IsTalking ? "SPEAKING" : value.HardwareMuted ? "MUTED"
             : value.SoftMuted ? "SOFT MUTED" : value.IsLegacy ? "LEGACY" : "IDLE";
         badge.Text = state;
         badge.BackColor = accent;
@@ -120,19 +120,19 @@ internal sealed class DeviceCard : Panel
             : value.SoftMuted ? UiStyles.Body : value.SupportsMuteReporting ? UiStyles.Green : UiStyles.OfflineDot;
         muteNote.ForeColor = value.IsTalking ? UiStyles.Blue : value.HardwareMuted ? UiStyles.AmberInk
             : value.SoftMuted ? UiStyles.Body : UiStyles.Muted;
-        muteNote.Text = value.IsTalking ? "Holding the floor" : value.HardwareMuted ? "Mute slider on at the device"
+        muteNote.Text = !value.IsProtocolCompatible ? "Update required for protocol p3" : value.IsTalking ? "Transmitting audio" : value.HardwareMuted ? "Mute slider on at the device"
             : value.SoftMuted ? "Soft muted from here" : value.SupportsMuteReporting ? "Playing received audio"
             : "No mute reporting before p2";
 
-        talk.Enabled = !pttDisabled;
-        silence.Enabled = !pttDisabled && value.SupportsMuteReporting && !value.HardwareMuted;
+        talk.Enabled = !pttDisabled && value.IsProtocolCompatible;
+        silence.Enabled = !pttDisabled && value.IsProtocolCompatible && value.SupportsMuteReporting && !value.HardwareMuted;
         silence.Text = value.SoftMuted ? "Silenced" : "Silence";
         silence.ForeColor = !silence.Enabled ? UiStyles.Disabled : value.SoftMuted ? UiStyles.White : UiStyles.Body;
         silence.BackColor = !silence.Enabled ? UiStyles.HairRule : value.SoftMuted ? UiStyles.Body : UiStyles.White;
         silence.FlatAppearance.BorderColor = !silence.Enabled ? UiStyles.Border : UiStyles.ControlBorder;
         silence.AccessibleDescription = value.HardwareMuted ? "Unavailable while the physical mute slider is on" : null;
 
-        volume.Enabled = !pttDisabled;
+        volume.Enabled = !pttDisabled && value.IsProtocolCompatible;
         volume.AccentColor = accent;
         volume.Value = Math.Clamp(knownVolume, volume.Minimum, volume.Maximum);
         volumeValue.Text = knownVolume.ToString();

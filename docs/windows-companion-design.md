@@ -1,3 +1,6 @@
+> Current protocol/state semantics: [p3 contract](protocol-p3.md). This supersedes
+> older delivery-sequence and p1/p2 interoperability notes below.
+
 # Windows companion design
 
 This replaces the experimental Python/Tkinter companion. The firmware and
@@ -54,8 +57,8 @@ sender. It never runs protocol or network work on NAudio's capture callback.
   `239.255.42.99:45678` with TTL 1.
 * Every peer endpoint learned before PTT is snapshotted at press time. The
   same snapshot receives broadcast CLAIM, END and AUDIO for that session.
-  Directed AUDIO goes only to the selected endpoint, while directed floor
-  control still reaches the snapshot.
+  Directed control and AUDIO go only to the selected endpoint, with p3
+  ACCEPT/BUSY reserving that endpoint. Directed sessions never claim the broadcast floor.
 * CLAIM is sent three times, followed by the 100 ms pre-audio delay. Lowest
   `(session_id, sender_id)` wins simultaneous claims. A valid remote session
   expires after 750 ms without AUDIO/HEARTBEAT.
